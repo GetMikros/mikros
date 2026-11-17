@@ -95,7 +95,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
     executor.block_on(async move {
-        match probe(&launcher, &reactor, &asked).await {
+        match probe(&launcher, &reactor, &asked, spawner).await {
             Ok(()) => 0,
             Err(step) => step,
         }
@@ -327,7 +327,12 @@ const MANAGER_APP: &str = "test.manager";
 
 /// Runs every check in turn, and returns the number of the first that
 /// failed.
-async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, asked: &Cell<u32>) -> Result<(), i64> {
+async fn probe(
+    l: &LauncherAsyncClient,
+    reactor: &Reactor,
+    asked: &Cell<u32>,
+    spawner: Spawner,
+) -> Result<(), i64> {
     let mut step = 0;
     let mut check_ = |what: &str, passed: bool| {
         step += 1;
@@ -470,6 +475,38 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, asked: &Cell<u32>) ->
             if e.user == 1 && e.app_id == APP && e.permission == "user.camera.use"),
     )?;
 
+    // A watcher with confirmation holds up the revoking SetGrant until it
+    // confirms (MIKSPEC-0037.R34).
+    let confirmer = Rc::new(connect(&provider, ADMIN, reactor));
+    let watched = confirmer.watch_confirmed("user.location.read".into()).await;
+    c(
+        "watching with confirmation",
+        watched.is_ok_and(|r| r.is_ok()),
+    )?;
+    c(
+        "allowing a grant to revoke",
+        set(&admin, "user.location.read", Decision::Allowed).await == Ok(()),
+    )?;
+    let confirmed = Rc::new(Cell::new(false));
+    let (answering, told) = (confirmer.clone(), confirmed.clone());
+    spawner.spawn(async move {
+        if let Ok(BrokerEvent::OnRevokedConfirmed(e)) = answering.next_event().await
+            && e.user == 1
+            && e.app_id == APP
+            && e.permission == "user.location.read"
+        {
+            told.set(true);
+            let _ = answering.revocation_done(e.sequence).await;
+        }
+    });
+    let start = now();
+    c(
+        "revoking the grant with confirmation",
+        set(&admin, "user.location.read", Decision::Denied).await == Ok(()),
+    )?;
+    c("telling the confirming watcher", confirmed.get())?;
+    c("replying once it confirmed", now() - start < 4_000_000_000)?;
+
     // Only the session manager asks users (MIKSPEC-0037.R42).
     let (client, _server) = endpoints::<Prompter>().map_err(|_| 100)?;
     let registered = admin.register_prompter(client).await;
@@ -489,4 +526,11 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, asked: &Cell<u32>) ->
         "not asking for a decided permission",
         request(&admin, APP, "user.camera.use").await == Ok(Decision::Denied),
     )
+}
+
+fn now() -> i64 {
+    let mut now = 0;
+    // SAFETY: the pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    now
 }

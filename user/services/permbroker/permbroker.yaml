@@ -5,7 +5,8 @@ binary: /system/services/system.permbroker/permbroker
 start: boot
 # To reach the root file system and the temporary file system, where the
 # broker keeps its grants.
-permissions: [system.filesystems.mount]
+# To kill a service that does not confirm a revocation in time.
+permissions: [system.filesystems.mount, system.processes.control]
 provides:
   - protocol: mikros.permissions.Broker
   # The numbers of app IDs, for every process; Number needs

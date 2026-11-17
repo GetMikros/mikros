@@ -9,20 +9,23 @@ use crate::permissions::{
     Store,
 };
 use crate::service::files::{self, Files};
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{
     self as midl, BrokerAsyncServer, BrokerCheckResponse, BrokerGrantSystemResponse,
     BrokerListGrantsRequest, BrokerListGrantsResponse, BrokerRegisterPrompterResponse,
-    BrokerRequest, BrokerRequestRequest, BrokerRequestResponse, BrokerSetGrantRequest,
-    BrokerSetGrantResponse, BrokerWatchResponse, PrompterAsyncClient,
+    BrokerRequest, BrokerRequestRequest, BrokerRequestResponse, BrokerRevocationDoneResponse,
+    BrokerSetGrantRequest, BrokerSetGrantResponse, BrokerWatchConfirmedResponse,
+    BrokerWatchResponse, PrompterAsyncClient,
 };
+use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::{ClientIdentity, DirectoryAsyncClient};
 use mikros_rt::interfaces::mikros::session::{Authorization, AuthorizationAsyncClient};
 
@@ -32,6 +35,38 @@ const AUTHORIZATION: &str = "mikros.session.Authorization";
 const SESSION_MANAGER: &str = "system.sessionmgr";
 /// The longest reason that `Authorize` takes, in bytes.
 const REASON_MAX: usize = 256;
+/// How long the services that watch a permission with confirmation have
+/// to confirm a revocation, and how often the broker looks.
+const CONFIRM_WAIT: i64 = 5_000_000_000;
+const CONFIRM_POLL: i64 = 20_000_000;
+/// The services that are only logged when they confirm late, being
+/// critical; every other is killed.
+const CRITICAL: [&str; 2] = ["system.processmgr", "system.servicemgr"];
+const KILL: u32 = 9;
+
+/// A connection that watches a permission with confirmation
+/// (MIKSPEC-0037.R34), and the revocations it has confirmed.
+struct Confirming {
+    permission: String,
+    server: Weak<BrokerAsyncServer>,
+    caller: Rc<ClientIdentity>,
+    done: Rc<RefCell<BTreeSet<u64>>>,
+}
+
+/// A revocation sent to a confirming connection, until it confirms.
+struct Pending {
+    sequence: u64,
+    server: Weak<BrokerAsyncServer>,
+    caller: Rc<ClientIdentity>,
+    done: Rc<RefCell<BTreeSet<u64>>>,
+}
+
+fn now() -> i64 {
+    let mut now = 0;
+    // SAFETY: the pointer is valid for the call.
+    unsafe { mikros_rt::sys::clock_get_monotonic(&mut now) };
+    now
+}
 
 /// The broker's state, shared by every connection.
 pub struct Broker(Rc<Inner>);
@@ -47,6 +82,12 @@ struct Inner {
     prompter: RefCell<Option<Rc<PrompterAsyncClient>>>,
     /// The connections that watch each permission.
     watchers: RefCell<Vec<(String, Weak<BrokerAsyncServer>)>>,
+    /// Those that watch with confirmation, and the last sequence number
+    /// of a revocation sent to them.
+    confirming: RefCell<Vec<Confirming>>,
+    sequence: Cell<u64>,
+    /// Through which a service that confirmed too late is killed.
+    launcher: Rc<LauncherAsyncClient>,
     reactor: Reactor,
     spawner: Spawner,
 }
@@ -58,6 +99,7 @@ impl Broker {
     pub fn new(
         store: Store,
         directory: DirectoryAsyncClient,
+        launcher: LauncherAsyncClient,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Broker {
@@ -76,6 +118,9 @@ impl Broker {
             directory,
             prompter: RefCell::new(None),
             watchers: RefCell::new(Vec::new()),
+            confirming: RefCell::new(Vec::new()),
+            sequence: Cell::new(0),
+            launcher: Rc::new(launcher),
             reactor,
             spawner,
         }))
@@ -247,8 +292,10 @@ impl Inner {
     }
 
     /// Sends `OnRevoked` to every live connection that watches the
-    /// permission, and forgets the closed ones.
-    fn revoked(&self, revoked: &Revoked) {
+    /// permission, and `OnRevokedConfirmed` with a new sequence number to
+    /// every one that watches it with confirmation, which it returns, and
+    /// forgets the closed ones.
+    fn revoked(&self, revoked: &Revoked) -> Vec<Pending> {
         self.watchers.borrow_mut().retain(|(permission, watcher)| {
             let Some(watcher) = watcher.upgrade() else {
                 return false;
@@ -262,12 +309,70 @@ impl Inner {
             }
             true
         });
+        let mut pending = Vec::new();
+        self.confirming.borrow_mut().retain(|c| {
+            let Some(server) = c.server.upgrade() else {
+                return false;
+            };
+            if c.permission == revoked.permission {
+                let sequence = self.sequence.get() + 1;
+                self.sequence.set(sequence);
+                let _ = server.server().send_on_revoked_confirmed(
+                    sequence,
+                    revoked.user,
+                    revoked.app_id.clone(),
+                    revoked.permission.clone(),
+                );
+                pending.push(Pending {
+                    sequence,
+                    server: c.server.clone(),
+                    caller: c.caller.clone(),
+                    done: c.done.clone(),
+                });
+            }
+            true
+        });
+        pending
+    }
+
+    /// Waits until every one of `pending` has confirmed its revocation or
+    /// closed its connection, at most `CONFIRM_WAIT`; then logs each that
+    /// did not, and kills its process unless it is critical
+    /// (MIKSPEC-0037.R34).
+    async fn confirmed(&self, mut pending: Vec<Pending>) {
+        let deadline = now() + CONFIRM_WAIT;
+        loop {
+            pending.retain(|p| {
+                let done = p.done.borrow_mut().remove(&p.sequence);
+                !done && p.server.upgrade().is_some()
+            });
+            if pending.is_empty() || now() >= deadline {
+                break;
+            }
+            let next = (now() + CONFIRM_POLL).min(deadline);
+            if self.reactor.sleep_until(next).await.is_err() {
+                break;
+            }
+        }
+        for p in pending {
+            let (pid, app_id) = (p.caller.pid, &p.caller.app_id);
+            mikros_rt::log!(
+                Error,
+                "permbroker: process {pid} ({app_id}) did not confirm revocation {} within 5 s",
+                p.sequence
+            );
+            if !CRITICAL.contains(&app_id.as_str()) {
+                let _ = self.launcher.kill(pid, KILL).await;
+            }
+        }
     }
 }
 
 async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<ClientIdentity>) {
     use BrokerRequest as R;
     let server = Rc::new(BrokerAsyncServer::new(end, inner.reactor.clone()));
+    // The revocations that this connection has confirmed.
+    let done = Rc::new(RefCell::new(BTreeSet::new()));
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
@@ -306,6 +411,23 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
                     Ok(BrokerWatchResponse {})
                 });
                 r.reply(s, result)
+            }
+            R::WatchConfirmed(q, r) => {
+                let result = inner.authorize(&caller, Call::Watch).and_then(|()| {
+                    crate::permissions::scope(&q.permission).ok_or(Status::NotFound)?;
+                    inner.confirming.borrow_mut().push(Confirming {
+                        permission: q.permission,
+                        server: Rc::downgrade(&server),
+                        caller: caller.clone(),
+                        done: done.clone(),
+                    });
+                    Ok(BrokerWatchConfirmedResponse {})
+                });
+                r.reply(s, result)
+            }
+            R::RevocationDone(q, r) => {
+                done.borrow_mut().insert(q.sequence);
+                r.reply(s, BrokerRevocationDoneResponse {})
             }
             R::SetGrant(q, r) => {
                 // Asking an administrator may take long, so the call runs
@@ -384,8 +506,11 @@ async fn set_grant(
     }
     let revoked = inner.store.borrow_mut().set_grant(&grant);
     inner.files.changed();
+    // Only once those that watch with confirmation have stopped access
+    // (MIKSPEC-0037.R34).
     if let Some(revoked) = revoked.map_err(status)? {
-        inner.revoked(&revoked);
+        let pending = inner.revoked(&revoked);
+        inner.confirmed(pending).await;
     }
     Ok(BrokerSetGrantResponse {})
 }

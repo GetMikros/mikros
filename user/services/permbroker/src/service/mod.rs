@@ -15,7 +15,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
-use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
+use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
     DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
 };
@@ -58,8 +58,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
-    let broker =
-        crate::service::broker::Broker::new(store, directory, reactor.clone(), spawner.clone());
+    let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
+    let broker = crate::service::broker::Broker::new(
+        store,
+        directory,
+        launcher,
+        reactor.clone(),
+        spawner.clone(),
+    );
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor);
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
