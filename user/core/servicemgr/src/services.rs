@@ -94,6 +94,7 @@ pub async fn start(
         active: RefCell::new(BTreeSet::new()),
         held: RefCell::new(BTreeSet::new()),
         removed: RefCell::new(BTreeSet::new()),
+        state: RefCell::new(None),
         starting: RefCell::new(BTreeSet::new()),
         restarts: RefCell::new(BTreeMap::new()),
         demanded: RefCell::new(VecDeque::new()),

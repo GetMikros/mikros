@@ -1,6 +1,7 @@
 //! `mikros.service.ServiceControl`, which the service manager serves to
 //! processes with `admin.services.control`, for which the directory has
-//! already asked: `Start`, `Stop` and `Restart` of a service by name; and
+//! already asked: `Start`, `Stop`, `Restart`, `Enable` and `Disable` of a
+//! service by name (MIKSPEC-0036.R46); and
 //! `mikros.service.PackageServices`, which it serves to the install
 //! service, which tells it that the services of packages changed
 //! (MIKSPEC-0036.R40).
@@ -15,8 +16,8 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{
     PackageServices, PackageServicesAsyncServer, PackageServicesRequest,
     PackageServicesServicesChangedResponse, ServiceControl, ServiceControlAsyncServer,
-    ServiceControlRequest, ServiceControlRestartResponse, ServiceControlStartResponse,
-    ServiceControlStopResponse,
+    ServiceControlDisableResponse, ServiceControlEnableResponse, ServiceControlRequest,
+    ServiceControlRestartResponse, ServiceControlStartResponse, ServiceControlStopResponse,
 };
 
 /// Serves `ServiceControl` on `end` until it closes. Each call is
@@ -57,6 +58,20 @@ pub fn serve(dir: Rc<Dir>, end: ServerEnd<ServiceControl>) {
                         done.map(|()| ServiceControlRestartResponse {}),
                     )
                 }
+                ServiceControlRequest::Enable(q, r) => {
+                    let done = manage(Call::Enable, q.name).await;
+                    r.reply(
+                        server.server(),
+                        done.map(|()| ServiceControlEnableResponse {}),
+                    )
+                }
+                ServiceControlRequest::Disable(q, r) => {
+                    let done = manage(Call::Disable, q.name).await;
+                    r.reply(
+                        server.server(),
+                        done.map(|()| ServiceControlDisableResponse {}),
+                    )
+                }
             };
         }
     });
@@ -91,6 +106,9 @@ impl Supervisor {
         if call == Call::ServicesChanged {
             return crate::packages::changed(self).await;
         }
+        if matches!(call, Call::Enable | Call::Disable) {
+            return self.enable(name, call == Call::Enable).await;
+        }
         let i = self.position(name).ok_or(Status::NotFound)?;
         if self.removed.borrow().contains(&i) {
             return Err(Status::NotFound);
@@ -114,7 +132,7 @@ impl Supervisor {
             }
             (Call::Start | Call::Restart, None) => {}
             // Answered above.
-            (Call::ServicesChanged, _) => return Ok(()),
+            (Call::ServicesChanged | Call::Enable | Call::Disable, _) => return Ok(()),
         }
         // Nothing else starts it from here on: neither a connection to an
         // idle service nor another call.
@@ -127,6 +145,32 @@ impl Supervisor {
             true => Ok(()),
             false => Err(Status::Internal),
         }
+    }
+
+    /// Enables the service `name` when `enable`, and disables it
+    /// otherwise, without starting or stopping it (MIKSPEC-0036.R46): it
+    /// fails with `BAD_STATE` before the root file system is available,
+    /// `NOT_FOUND` for a name without a valid manifest, and `NOT_SUPPORTED`
+    /// for a service of the boot image.
+    async fn enable(&self, name: &str, enable: bool) -> Result<(), Status> {
+        let state = self.state.borrow().clone().ok_or(Status::BadState)?;
+        let i = self.position(name).ok_or(Status::NotFound)?;
+        if self.removed.borrow().contains(&i) {
+            return Err(Status::NotFound);
+        }
+        if i < self.boot_services {
+            return Err(Status::NotSupported);
+        }
+        let mut disabled = self.dir.disabled();
+        let changed = match enable {
+            true => disabled.remove(name),
+            false => disabled.insert(String::from(name)),
+        };
+        if changed {
+            crate::disabled::write(&state, &self.reactor, &disabled).await?;
+            self.dir.set_disabled(disabled);
+        }
+        Ok(())
     }
 
     /// The process ID of service `i` while it runs.

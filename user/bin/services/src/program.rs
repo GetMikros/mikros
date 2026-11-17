@@ -6,6 +6,7 @@
 use crate::listing::{self, COMMAND, Call, Request, Service};
 use mikros_cli::{FAILURE, INVALID, SUCCESS};
 use mikros_command::Directory;
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{ServiceControlClient, ServicesClient};
 use std::io::Write;
 use std::process::ExitCode;
@@ -66,6 +67,7 @@ fn list(directory: &Directory) -> Result<Vec<Service>, String> {
             pid: e.pid,
             restarts: e.restarts,
             exit_status: e.exit_status,
+            enabled: e.enabled,
         }));
         if !page.more {
             return Ok(all);
@@ -85,6 +87,19 @@ fn call_on(
         Call::Start => control.start(name.into(), FOREVER).map(|r| r.map(drop)),
         Call::Stop => control.stop(name.into(), FOREVER).map(|r| r.map(drop)),
         Call::Restart => control.restart(name.into(), FOREVER).map(|r| r.map(drop)),
+        Call::Enable { now } => control.enable(name.into(), FOREVER).map(|r| {
+            // Then started, unless it runs already (MIKSPEC-0098.R30).
+            r.map(drop).and_then(|()| match now {
+                true => now_too(control.start(name.into(), FOREVER).map(|r| r.map(drop))),
+                false => Ok(()),
+            })
+        }),
+        Call::Disable { now } => control.disable(name.into(), FOREVER).map(|r| {
+            r.map(drop).and_then(|()| match now {
+                true => now_too(control.stop(name.into(), FOREVER).map(|r| r.map(drop))),
+                false => Ok(()),
+            })
+        }),
     };
     let status = match done {
         Ok(Ok(())) => return Ok(()),
@@ -97,6 +112,18 @@ fn call_on(
         .and_then(|all| all.into_iter().find(|s| s.name == name))
         .map(|s| s.state);
     Err(listing::failure(name, &status, state.as_deref()))
+}
+
+/// The status of the `Start` or `Stop` that `--now` adds, for which a
+/// service that already runs or does not run is no failure.
+fn now_too(
+    done: Result<Result<(), Status>, mikros_rt::interfaces::__midl::Error>,
+) -> Result<(), Status> {
+    match done {
+        Ok(Ok(())) | Ok(Err(Status::BadState)) => Ok(()),
+        Ok(Err(status)) => Err(status),
+        Err(_) => Err(Status::PeerClosed),
+    }
 }
 
 /// Writes `text` to standard output.

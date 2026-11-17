@@ -95,6 +95,7 @@ impl Supervisor {
                     pid,
                     restarts: s.restarts,
                     exit_status: s.exit_status,
+                    enabled: !self.dir.is_disabled(&services[i].name),
                 }
             })
             .collect();

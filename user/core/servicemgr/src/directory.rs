@@ -19,7 +19,7 @@
 //! permission, and every list and event, is checked with `Check`.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -60,9 +60,14 @@ const PEER_CLOSED: u32 = 1 << 2;
 /// The start of the names of `admin` permissions.
 const ADMIN_SCOPE: &str = "admin.";
 
-/// The root file system's `/system`, `/system/config` and
-/// `/system/drivers`.
-pub type Root = (ClientEnd<Node>, ClientEnd<Node>, ClientEnd<Node>);
+/// The root file system's `/system`, `/system/config`, `/system/drivers`
+/// and the service manager's `/system/state/servicemgr`.
+pub type Root = (
+    ClientEnd<Node>,
+    ClientEnd<Node>,
+    ClientEnd<Node>,
+    ClientEnd<Node>,
+);
 
 /// The directory's state, shared by every connection.
 pub struct Dir {
@@ -90,6 +95,8 @@ pub struct Dir {
     manage: RefCell<Option<Manage>>,
     /// The identity each process was bound with last.
     identities: RefCell<BTreeMap<u32, Rc<ClientIdentity>>>,
+    /// The names of the disabled services (MIKSPEC-0036.R49).
+    disabled: RefCell<BTreeSet<String>>,
     /// The root file system's `/system`, `/system/config` and
     /// `/system/drivers` once the process manager gave them, until the
     /// supervisor takes them, whether it has given them, and the task that
@@ -158,6 +165,8 @@ pub enum Call {
     Start,
     Stop,
     Restart,
+    Enable,
+    Disable,
     /// `ServicesChanged` of the install service (MIKSPEC-0036.R40).
     ServicesChanged,
 }
@@ -199,6 +208,7 @@ impl Dir {
             root: RefCell::new(None),
             root_given: Cell::new(false),
             root_waiting: RefCell::new(None),
+            disabled: RefCell::new(BTreeSet::new()),
         })
     }
 
@@ -358,6 +368,21 @@ impl Dir {
         }
     }
 
+    /// Whether the service `name` is disabled.
+    pub fn is_disabled(&self, name: &str) -> bool {
+        self.disabled.borrow().contains(name)
+    }
+
+    /// The names of the disabled services.
+    pub fn disabled(&self) -> BTreeSet<String> {
+        self.disabled.borrow().clone()
+    }
+
+    /// Takes `disabled` as the names of the disabled services.
+    pub fn set_disabled(&self, disabled: BTreeSet<String>) {
+        *self.disabled.borrow_mut() = disabled;
+    }
+
     /// Stops providing the protocols of the service `name`, whose
     /// package was removed.
     pub fn withdraw(&self, name: &str) {
@@ -371,11 +396,12 @@ impl Dir {
         system: ClientEnd<Node>,
         config: ClientEnd<Node>,
         drivers: ClientEnd<Node>,
+        state: ClientEnd<Node>,
     ) -> Result<(), Status> {
         if self.root_given.replace(true) {
             return Err(Status::BadState);
         }
-        *self.root.borrow_mut() = Some((system, config, drivers));
+        *self.root.borrow_mut() = Some((system, config, drivers, state));
         if let Some(waker) = self.root_waiting.borrow_mut().take() {
             waker.wake();
         }
@@ -575,6 +601,10 @@ impl Dir {
                     None
                 }
                 Provider::Never => return Err(Status::NotFound),
+                // A disabled service starts only by ServiceControl.
+                Provider::Idle if self.disabled.borrow().contains(&p.service) => {
+                    return Err(Status::NotFound);
+                }
                 Provider::Idle => {
                     p.provider = Provider::Waiting(alloc::vec![(server, client)]);
                     Some(p.service.clone())

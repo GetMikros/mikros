@@ -1,4 +1,4 @@
-// MIKSPEC-0036.R35
+// MIKSPEC-0036.R46
 
 library mikros.service;
 using mikros.base;
@@ -18,6 +18,7 @@ type ServiceEntry = struct {
     pid u32;
     restarts u32;
     exit_status i32;
+    enabled bool;
 };
 
 protocol Services {
@@ -28,4 +29,6 @@ protocol ServiceControl {
     @1 Start(name string<64>) -> () error base.Status;
     @2 Stop(name string<64>) -> () error base.Status;
     @3 Restart(name string<64>) -> () error base.Status;
+    @4 Enable(name string<64>) -> () error base.Status;
+    @5 Disable(name string<64>) -> () error base.Status;
 };

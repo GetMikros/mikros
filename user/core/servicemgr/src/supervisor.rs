@@ -76,6 +76,9 @@ pub struct Supervisor {
     /// The services of packages that were removed, which keep their
     /// places until they come back (MIKSPEC-0101.R55).
     pub removed: RefCell<BTreeSet<usize>>,
+    /// The service manager's `/system/state/servicemgr`, once the root
+    /// file system is available, which keeps the disabled services.
+    pub state: RefCell<Option<Rc<mikros_rt::interfaces::mikros::fs::NodeAsyncClient>>>,
     /// The services that are being started.
     pub starting: RefCell<BTreeSet<usize>>,
     /// When each service was restarted, within the last `WINDOW`.

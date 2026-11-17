@@ -87,6 +87,8 @@ const PUBLIC: &str = "/public";
 /// of the installed ones from the root (MIKSPEC-0100.R19).
 const DRIVERS: &str = "/system/drivers";
 const DRIVERS_SUBVOLUME: &str = "drivers";
+/// The service manager's folder of its own state.
+const SERVICE_MANAGER_STATE: &str = "/system/state/servicemgr";
 /// The library packages, and their kept versions, from the root
 /// (MIKSPEC-0101.R51).
 const LIBRARIES: &str = "libraries";
@@ -793,14 +795,17 @@ impl Namespaces {
                 .await
                 .map(|(entry, _)| entry.directory),
         };
-        let (system, config, drivers) = match (system, config, drivers) {
-            (Ok((system, _)), Ok((config, _)), Ok(drivers)) => {
-                (system.directory, config.directory, drivers)
+        // The service manager's own state, made when it is missing
+        // (MIKSPEC-0036.R47).
+        let state = self.entry(shared, &ready, SERVICE_MANAGER_STATE, RW).await;
+        let (system, config, drivers, state) = match (system, config, drivers, state) {
+            (Ok((system, _)), Ok((config, _)), Ok(drivers), Ok((state, _))) => {
+                (system.directory, config.directory, drivers, state.directory)
             }
-            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+            (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)) => {
                 mikros_rt::log!(
                     Error,
-                    "process-manager: opening /system, /system/config and /system/drivers for the service manager failed: {e:?}"
+                    "process-manager: opening /system, /system/config, /system/drivers and {SERVICE_MANAGER_STATE} for the service manager failed: {e:?}"
                 );
                 return;
             }
@@ -823,7 +828,7 @@ impl Namespaces {
                 }
             }
         }
-        match control.root_available(system, config, drivers).await {
+        match control.root_available(system, config, drivers, state).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),
             Err(e) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),

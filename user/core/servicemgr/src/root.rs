@@ -30,10 +30,17 @@ const ROOT_DRIVERS: &str = "mikros.driver.RootDrivers";
 
 /// Waits for the root file system, and then acts on its manifests.
 pub async fn follow(supervisor: Rc<Supervisor>) {
-    let (system, config, drivers) = supervisor.dir.root().await;
+    let (system, config, drivers, state) = supervisor.dir.root().await;
     let reactor = supervisor.reactor.clone();
     let system = NodeAsyncClient::new(system, reactor.clone());
     let drivers = NodeAsyncClient::new(drivers, reactor.clone());
+    // The disabled services, before any of the root's starts
+    // (MIKSPEC-0036.R49).
+    let state = NodeAsyncClient::new(state, reactor.clone());
+    supervisor
+        .dir
+        .set_disabled(crate::disabled::read(&state, &reactor).await);
+    *supervisor.state.borrow_mut() = Some(Rc::new(state));
     let config = NodeAsyncClient::new(config, reactor);
     mikros_rt::log!(Info, "the root file system is available");
     // Read before any service whose manifest the root holds starts.
@@ -201,7 +208,7 @@ pub async fn start_services(
     supervisor.dir.add_services(first, &added, |i| {
         if plan.blocked.iter().any(|(b, _)| *b == i) {
             Initially::Never
-        } else if all[i].start == Start::Boot {
+        } else if all[i].start == Start::Boot && !supervisor.dir.is_disabled(&all[i].name) {
             Initially::Starting
         } else {
             Initially::Idle
@@ -213,6 +220,10 @@ pub async fn start_services(
         added.len()
     );
     for &i in plan.start.iter().filter(|&&i| i >= first) {
+        if supervisor.dir.is_disabled(&all[i].name) {
+            mikros_rt::log!(Info, "service {} is disabled", all[i].name);
+            continue;
+        }
         if !supervisor.active.borrow().contains(&i) && !supervisor.stopping.get() {
             supervisor.start_with_after(i, Vec::new()).await;
         }

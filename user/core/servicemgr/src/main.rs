@@ -17,6 +17,7 @@ mod boot;
 mod broker;
 mod control;
 mod directory;
+mod disabled;
 mod launch;
 mod manage;
 mod packages;
@@ -133,7 +134,7 @@ async fn serve_control(end: OwnedHandle, reactor: Reactor, dir: Rc<Dir>) {
                 responder.reply(server.server(), Ok(ProcessDirectoryBindResponse {}))
             }
             ProcessDirectoryRequest::RootAvailable(request, responder) => {
-                let given = dir.give_root(request.usr, request.etc, request.drivers);
+                let given = dir.give_root(request.usr, request.etc, request.drivers, request.state);
                 responder.reply(
                     server.server(),
                     given.map(|()| ProcessDirectoryRootAvailableResponse {}),

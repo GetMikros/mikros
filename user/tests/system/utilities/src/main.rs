@@ -394,15 +394,17 @@ fn services_lists() -> Result<(), Failure> {
     ensure(
         &run,
         "a header line",
-        header.eq(["NAME", "STATE", "PID", "RESTARTS"]),
+        header.eq(["NAME", "STATE", "PID", "RESTARTS", "ENABLED"]),
     )?;
     let rows: Vec<Vec<&str>> = lines.map(|l| l.split_whitespace().collect()).collect();
-    ensure(&run, "four columns", rows.iter().all(|r| r.len() == 4))?;
+    ensure(&run, "five columns", rows.iter().all(|r| r.len() == 5))?;
     let log = rows.iter().find(|r| r[0] == "logsvc");
     ensure(
         &run,
-        "the log service running",
-        log.is_some_and(|r| r[1] == "running" && r[2].parse::<u32>().is_ok_and(|p| p > 0)),
+        "the log service running and enabled",
+        log.is_some_and(|r| {
+            r[1] == "running" && r[2].parse::<u32>().is_ok_and(|p| p > 0) && r[4] == "yes"
+        }),
     )?;
     let consistent = rows.iter().all(|r| (r[1] == "running") == (r[2] != "-"));
     ensure(&run, "process IDs of the running services only", consistent)

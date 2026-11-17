@@ -6,11 +6,18 @@ use mikros_cli::{Arguments, Command, json_string};
 
 pub const COMMAND: Command = Command {
     name: "services",
-    operands: "[start|stop|restart <name>]",
+    operands: "[start|stop|restart|enable|disable <name>]",
     most: 2,
-    about: "Lists the services with their state, process ID and restarts, or,\n\
-            once an administrator allowed it, starts, stops or restarts one.",
-    options: &[("--json", "write the services as a JSON array of objects")],
+    about: "Lists the services with their state, process ID, restarts and whether\n\
+            they are enabled, or, once an administrator allowed it, starts, stops,\n\
+            restarts, enables or disables one.",
+    options: &[
+        ("--json", "write the services as a JSON array of objects"),
+        (
+            "--now",
+            "with enable or disable, also start or stop the service",
+        ),
+    ],
     values: &[],
 };
 
@@ -20,6 +27,14 @@ pub enum Call {
     Start,
     Stop,
     Restart,
+    /// Enabling or disabling it, and with `now` starting or stopping it
+    /// too (MIKSPEC-0098.R30).
+    Enable {
+        now: bool,
+    },
+    Disable {
+        now: bool,
+    },
 }
 
 /// What services is asked to do.
@@ -40,15 +55,24 @@ pub fn read(arguments: Vec<String>) -> Request {
         Arguments::Invalid(reason) => return Request::Invalid(reason),
     };
     let json = options.contains(&"--json");
+    let now = options.contains(&"--now");
     if operands.is_empty() {
+        if now {
+            return Request::Invalid("--now goes only with enable or disable".into());
+        }
         return Request::List { json };
     }
     let call = match operands[0].as_str() {
         "start" => Call::Start,
         "stop" => Call::Stop,
         "restart" => Call::Restart,
+        "enable" => Call::Enable { now },
+        "disable" => Call::Disable { now },
         other => return Request::Invalid(format!("unknown subcommand {other}")),
     };
+    if now && !matches!(call, Call::Enable { .. } | Call::Disable { .. }) {
+        return Request::Invalid("--now goes only with enable or disable".into());
+    }
     match operands.len() {
         2 => Request::Call(call, operands.swap_remove(1)),
         _ => Request::Invalid(format!("{} needs the name of a service", operands[0])),
@@ -66,20 +90,28 @@ pub struct Service {
     pub pid: u32,
     pub restarts: u32,
     pub exit_status: i32,
+    pub enabled: bool,
 }
 
 /// The header and lines of `services`: the name and state aligned to
 /// the left, the process ID, or `-` when there is none, and the restarts
-/// to the right.
+/// to the right, and `yes` or `no` for whether it is enabled.
 pub fn text(services: &[Service]) -> String {
-    let header = ["NAME", "STATE", "PID", "RESTARTS"];
+    let header = ["NAME", "STATE", "PID", "RESTARTS", "ENABLED"];
     let mut rows = vec![header.map(String::from)];
     rows.extend(services.iter().map(|s| {
         let pid = match s.pid {
             0 => "-".into(),
             pid => pid.to_string(),
         };
-        [s.name.clone(), s.state.clone(), pid, s.restarts.to_string()]
+        let enabled = if s.enabled { "yes" } else { "no" };
+        [
+            s.name.clone(),
+            s.state.clone(),
+            pid,
+            s.restarts.to_string(),
+            enabled.into(),
+        ]
     }));
     let width = |column: usize| {
         rows.iter()
@@ -91,11 +123,12 @@ pub fn text(services: &[Service]) -> String {
     rows.iter()
         .map(|r| {
             format!(
-                "{:<w0$}  {:<w1$}  {:>w2$}  {:>w3$}\n",
+                "{:<w0$}  {:<w1$}  {:>w2$}  {:>w3$}  {}\n",
                 r[0],
                 r[1],
                 r[2],
                 r[3],
+                r[4],
                 w0 = widths[0],
                 w1 = widths[1],
                 w2 = widths[2],
@@ -106,20 +139,22 @@ pub fn text(services: &[Service]) -> String {
 }
 
 /// `services` as a JSON array of objects with the members `name`,
-/// `state`, `on_demand`, `pid`, `restarts` and `exit_status`, on one line.
+/// `state`, `on_demand`, `pid`, `restarts`, `exit_status` and `enabled`,
+/// on one line.
 pub fn json(services: &[Service]) -> String {
     let objects: Vec<String> = services
         .iter()
         .map(|s| {
             format!(
                 "{{\"name\":{},\"state\":{},\"on_demand\":{},\"pid\":{},\"restarts\":{},\
-                 \"exit_status\":{}}}",
+                 \"exit_status\":{},\"enabled\":{}}}",
                 json_string(&s.name),
                 json_string(&s.state),
                 s.on_demand,
                 s.pid,
                 s.restarts,
-                s.exit_status
+                s.exit_status,
+                s.enabled
             )
         })
         .collect();
@@ -168,6 +203,7 @@ mod tests {
             pid,
             restarts,
             exit_status: 0,
+            enabled: true,
         }
     }
 
@@ -187,6 +223,14 @@ mod tests {
             read_args(&["start", "a"]),
             Request::Call(Call::Start, "a".into())
         );
+        assert_eq!(
+            read_args(&["enable", "--now", "a"]),
+            Request::Call(Call::Enable { now: true }, "a".into())
+        );
+        assert_eq!(
+            read_args(&["disable", "a"]),
+            Request::Call(Call::Disable { now: false }, "a".into())
+        );
         assert_eq!(read_args(&["--help", "stop"]), Request::Help);
     }
 
@@ -202,21 +246,28 @@ mod tests {
             read_args(&["stop", "a", "b"]),
             invalid("unexpected argument b")
         );
+        assert_eq!(
+            read_args(&["stop", "--now", "a"]),
+            invalid("--now goes only with enable or disable")
+        );
     }
 
     #[test]
     fn writes_aligned_columns() {
         let services = [
             service("accountsvc", "running", 21, 0),
-            service("termsvc", "not_started", 0, 12),
+            Service {
+                enabled: false,
+                ..service("termsvc", "not_started", 0, 12)
+            },
         ];
         assert_eq!(
             text(&services),
-            "NAME        STATE        PID  RESTARTS\n\
-             accountsvc  running       21         0\n\
-             termsvc     not_started    -        12\n"
+            "NAME        STATE        PID  RESTARTS  ENABLED\n\
+             accountsvc  running       21         0  yes\n\
+             termsvc     not_started    -        12  no\n"
         );
-        assert_eq!(text(&[]), "NAME  STATE  PID  RESTARTS\n");
+        assert_eq!(text(&[]), "NAME  STATE  PID  RESTARTS  ENABLED\n");
     }
 
     #[test]
@@ -230,7 +281,7 @@ mod tests {
         assert_eq!(
             json(&[on_demand]),
             "[{\"name\":\"termsvc\",\"state\":\"exited\",\"on_demand\":true,\"pid\":0,\
-             \"restarts\":1,\"exit_status\":-3}]\n"
+             \"restarts\":1,\"exit_status\":-3,\"enabled\":true}]\n"
         );
     }
 
