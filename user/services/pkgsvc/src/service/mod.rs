@@ -8,6 +8,7 @@ mod files;
 mod install;
 mod list;
 mod package;
+mod public;
 mod remove;
 
 use files::{Root, Subvolumes};
@@ -17,8 +18,9 @@ use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeClient};
 use mikros_rt::interfaces::mikros::packages::{
-    Installer, InstallerCommandOwnerResponse, InstallerCommandsResponse, InstallerInspectResponse,
-    InstallerInstallResponse, InstallerListResponse, InstallerOpenResponse,
+    Installer, InstallerCommandOwnerResponse, InstallerCommandsResponse,
+    InstallerCreatePublicResponse, InstallerInspectResponse, InstallerInstallResponse,
+    InstallerListResponse, InstallerOpenPublicResponse, InstallerOpenResponse,
     InstallerRemoveResponse, InstallerRequest, InstallerServer,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerClient, Decision};
@@ -36,6 +38,7 @@ const INSTALLER: &str = "mikros.packages.Installer";
 /// The only caller of `Open`.
 const PROCESS_MANAGER: &str = "system.processmgr";
 const BROKER: &str = "mikros.permissions.Broker";
+pub const BROKER_NUMBERS: &str = "mikros.permissions.AppNumbers";
 pub const FOREVER: i64 = i64::MAX;
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The longest manifest that `Inspect` returns.
@@ -85,6 +88,19 @@ pub fn allowed(
     manifest: &Manifest,
     action: &str,
 ) -> Result<bool, Status> {
+    let name = manifest.name.as_deref().unwrap_or(&manifest.id);
+    let reason = format!("{action} {name} ({}) for every user", manifest.id);
+    request(shared, caller, permission, &reason)
+}
+
+/// Whether the broker allows `caller` `permission`, asked for with
+/// `Request` and `reason`; not without an answer.
+pub fn request(
+    shared: &Shared,
+    caller: &ClientIdentity,
+    permission: &str,
+    reason: &str,
+) -> Result<bool, Status> {
     let (client, server) = endpoints::<Broker>().map_err(|_| Status::NoResources)?;
     {
         let directory = shared.directory.lock().map_err(|_| Status::Internal)?;
@@ -94,8 +110,6 @@ pub fn allowed(
         }
     }
     let broker = BrokerClient::new(client);
-    let name = manifest.name.as_deref().unwrap_or(&manifest.id);
-    let reason = format!("{action} {name} ({}) for every user", manifest.id);
     let identity = ClientIdentity {
         pid: caller.pid,
         user: caller.user,
@@ -104,7 +118,7 @@ pub fn allowed(
         koid: caller.koid,
         portable_checksum: caller.portable_checksum.clone(),
     };
-    let requested = broker.request(identity, permission.into(), reason, FOREVER);
+    let requested = broker.request(identity, permission.into(), reason.into(), FOREVER);
     Ok(matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed))
 }
 
@@ -206,7 +220,15 @@ fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity)
                 remove::remove(&shared, &caller, &q.id, q.global, q.keep_data)
                     .map(|()| InstallerRemoveResponse {}),
             ),
-            R::CreatePublic(_, r) => r.reply(s, Err(Status::NotSupported)),
+            R::CreatePublic(_, r) => r.reply(
+                s,
+                public::create(&shared, &caller).map(|()| InstallerCreatePublicResponse {}),
+            ),
+            R::OpenPublic(q, r) => r.reply(
+                s,
+                public::open(&shared, &caller, &q.id, q.server)
+                    .map(|()| InstallerOpenPublicResponse {}),
+            ),
             R::CommandOwner(q, r) => r.reply(
                 s,
                 commands::command_owner(&shared, &caller, &q.name, q.user)
