@@ -6,7 +6,7 @@
 //! package's service is refused.
 
 use super::files::Root;
-use super::{FOREVER, Given, Shared};
+use super::{FOREVER, Shared};
 use crate::place::{self, Scope};
 use mikros_mika::format::{MANIFEST, Package};
 use mikros_mika::manifest::Manifest;
@@ -28,7 +28,11 @@ const MANIFEST_MAX: usize = 16384;
 /// Checks the service manifests of `package`, which `manifest` describes:
 /// `INVALID_ARGS` for one that is missing or is not a package's service
 /// manifest, such as one that asks for a `system` or `admin` permission.
-pub fn check(package: &Package, given: &Given, manifest: &Manifest) -> Result<(), Status> {
+pub fn check<S: mikros_mika::format::Source + ?Sized>(
+    package: &Package,
+    given: &S,
+    manifest: &Manifest,
+) -> Result<(), Status> {
     for (key, path) in &manifest.services {
         let entry = package.find(path).ok_or(Status::InvalidArgs)?;
         let bytes = package

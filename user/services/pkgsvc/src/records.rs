@@ -2,8 +2,10 @@
 //! files: the package whose component one is (MIKSPEC-0101.R13), and
 //! whether it was installed only because others need it
 //! (MIKSPEC-0101.R29). They are kept as text, a line
-//! `<scope> <id> [owner=<id>] [dependency]` for each package, `<scope>`
-//! being `global` or `user:<user ID>`.
+//! `<scope> <id> [owner=<id>] [owner-in=<scope>] [dependency]` for each
+//! package, `<scope>` being `global` or `user:<user ID>`, and `owner-in`
+//! the owner's scope when it is not the component's own
+//! (MIKSPEC-0101.R59).
 
 use std::collections::BTreeMap;
 
@@ -19,6 +21,8 @@ pub enum Owner {
 pub struct Record {
     /// The package whose component this one is.
     pub owner: Option<String>,
+    /// The owner's scope when it is not this package's.
+    pub owner_in: Option<Owner>,
     pub dependency: bool,
 }
 
@@ -26,19 +30,33 @@ pub struct Record {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Records(pub BTreeMap<(Owner, String), Record>);
 
+/// The scope that `word` names, `global` or `user:<user ID>`.
+fn scope_of(word: &str) -> Option<Owner> {
+    match word {
+        "global" => Some(Owner::Global),
+        user => user
+            .strip_prefix("user:")
+            .and_then(|u| u.parse().ok())
+            .map(Owner::User),
+    }
+}
+
+/// How `scope` is written.
+fn scope_text(scope: Owner) -> String {
+    match scope {
+        Owner::Global => "global".into(),
+        Owner::User(user) => format!("user:{user}"),
+    }
+}
+
 impl Records {
     /// The records in `text`, leaving out lines that are not records.
     pub fn parse(text: &str) -> Records {
         let mut records = BTreeMap::new();
         for line in text.lines() {
             let mut words = line.split(' ');
-            let scope = match words.next() {
-                Some("global") => Owner::Global,
-                Some(user) => match user.strip_prefix("user:").and_then(|u| u.parse().ok()) {
-                    Some(user) => Owner::User(user),
-                    None => continue,
-                },
-                None => continue,
+            let Some(scope) = words.next().and_then(scope_of) else {
+                continue;
             };
             let Some(id) = words.next().filter(|id| mikros_mika::id::is_valid(id)) else {
                 continue;
@@ -53,6 +71,9 @@ impl Records {
                         {
                             record.owner = Some(owner.into());
                         }
+                        if let Some(text) = word.strip_prefix("owner-in=") {
+                            record.owner_in = scope_of(text).filter(|s| *s != scope);
+                        }
                     }
                 }
             }
@@ -64,14 +85,14 @@ impl Records {
     pub fn encode(&self) -> String {
         let mut text = String::new();
         for ((scope, id), record) in &self.0 {
-            match scope {
-                Owner::Global => text.push_str("global"),
-                Owner::User(user) => text.push_str(&format!("user:{user}")),
-            }
+            text.push_str(&scope_text(*scope));
             text.push(' ');
             text.push_str(id);
             if let Some(owner) = &record.owner {
                 text.push_str(&format!(" owner={owner}"));
+                if let Some(owner_in) = record.owner_in.filter(|s| s != scope) {
+                    text.push_str(&format!(" owner-in={}", scope_text(owner_in)));
+                }
             }
             if record.dependency {
                 text.push_str(" dependency");
@@ -94,12 +115,15 @@ impl Records {
         };
     }
 
-    /// The components of `owner` in `scope`.
-    pub fn components(&self, scope: Owner, owner: &str) -> Vec<String> {
+    /// The components of the package `owner` installed in `scope`, in
+    /// either scope, each with its own scope.
+    pub fn components(&self, scope: Owner, owner: &str) -> Vec<(Owner, String)> {
         self.0
             .iter()
-            .filter(|((s, _), r)| *s == scope && r.owner.as_deref() == Some(owner))
-            .map(|((_, id), _)| id.clone())
+            .filter(|((s, _), r)| {
+                r.owner.as_deref() == Some(owner) && r.owner_in.unwrap_or(*s) == scope
+            })
+            .map(|((s, id), _)| (*s, id.clone()))
             .collect()
     }
 }
@@ -113,12 +137,12 @@ mod tests {
         let mut records = Records::default();
         let plugin = Record {
             owner: Some("org.example.editor".into()),
-            dependency: false,
+            ..Record::default()
         };
         records.set(Owner::Global, "org.example.editor.spell", plugin.clone());
         let lib = Record {
-            owner: None,
             dependency: true,
+            ..Record::default()
         };
         records.set(Owner::User(1000), "org.example.lib", lib.clone());
         records.set(Owner::Global, "org.example.plain", Record::default());
@@ -136,7 +160,7 @@ mod tests {
         );
         assert_eq!(
             records.components(Owner::Global, "org.example.editor"),
-            ["org.example.editor.spell"]
+            [(Owner::Global, "org.example.editor.spell".into())]
         );
         let odd = "nobody org.example.x\nuser:x org.example.x\nglobal Bad\n\nglobal org.example.y owner=Bad\n";
         let parsed = Records::parse(odd);
@@ -144,6 +168,43 @@ mod tests {
         assert_eq!(
             parsed.get(Owner::Global, "org.example.y"),
             Record::default()
+        );
+    }
+
+    #[test]
+    fn keeps_the_scope_of_an_owner_in_another_scope() {
+        let mut records = Records::default();
+        let driver = Record {
+            owner: Some("org.example.app".into()),
+            owner_in: Some(Owner::User(1000)),
+            ..Record::default()
+        };
+        records.set(Owner::Global, "org.example.app.driver", driver.clone());
+        let same = Record {
+            owner: Some("org.example.app".into()),
+            owner_in: Some(Owner::User(1000)),
+            ..Record::default()
+        };
+        records.set(Owner::User(1000), "org.example.app.plugin", same);
+        let text = records.encode();
+        assert_eq!(
+            text,
+            "global org.example.app.driver owner=org.example.app owner-in=user:1000\n\
+             user:1000 org.example.app.plugin owner=org.example.app\n"
+        );
+        let parsed = Records::parse(&text);
+        assert_eq!(parsed.get(Owner::Global, "org.example.app.driver"), driver);
+        assert_eq!(
+            parsed.components(Owner::User(1000), "org.example.app"),
+            [
+                (Owner::Global, "org.example.app.driver".into()),
+                (Owner::User(1000), "org.example.app.plugin".into()),
+            ]
+        );
+        assert!(
+            parsed
+                .components(Owner::Global, "org.example.app")
+                .is_empty()
         );
     }
 }

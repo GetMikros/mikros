@@ -6,7 +6,7 @@
 //! boot started, whenever an install or a removal changes it.
 
 use super::files::Root;
-use super::{FOREVER, Given, Shared};
+use super::{FOREVER, Shared};
 use mikros_mika::format::Package;
 use mikros_mika::manifest::Manifest;
 use mikros_rt::interfaces::__midl::endpoints;
@@ -29,7 +29,11 @@ const HEADER: &str = "# The installed drivers that the bootloader loads, written
 /// `manifest` describes: `INVALID_ARGS` when it is missing, does not
 /// name the package, or asks for a permission that an installed driver
 /// may not have.
-pub fn check(package: &Package, given: &Given, manifest: &Manifest) -> Result<(), Status> {
+pub fn check<S: mikros_mika::format::Source + ?Sized>(
+    package: &Package,
+    given: &S,
+    manifest: &Manifest,
+) -> Result<(), Status> {
     if manifest.driver.as_deref() != Some(MANIFEST) {
         return Err(Status::InvalidArgs);
     }

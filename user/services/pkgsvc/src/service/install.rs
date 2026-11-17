@@ -3,10 +3,12 @@
 //! installed (MIKSPEC-0101.R36). A global install asks the broker for the
 //! permission of the package's kind first (MIKSPEC-0101.R43). A package
 //! with a command that a program in `/system/bin` has is refused
-//! (MIKSPEC-0101.R44).
+//! (MIKSPEC-0101.R44). The components that `Install` names, and those
+//! of the package that are installed, are installed after it, each in
+//! the place its own manifest names (MIKSPEC-0101.R59).
 
 use super::files::{Root, user_name};
-use super::{Given, Shared, open};
+use super::{Given, Shared, check, open};
 use crate::place::{self, Scope};
 use crate::records::{Owner, Record};
 use mikros_mika::format::{self, Kind as EntryKind, Package};
@@ -69,6 +71,54 @@ fn installed_any(root: &Root, id: &str, scope: &Scope) -> Option<Version> {
         .find_map(|kind| installed(root, kind, id, scope))
 }
 
+/// A component (MIKSPEC-0101.R59) of a package being installed, read
+/// from its file in the package, and where it goes.
+struct Component {
+    bytes: Vec<u8>,
+    package: Package,
+    manifest: Manifest,
+    global: bool,
+}
+
+/// The component at `path` in `package`, whose manifest is `owner`:
+/// `INVALID_ARGS` unless it is a package whose ID starts with the
+/// package's ID and `.`.
+fn component(
+    package: &Package,
+    given: &Given,
+    owner: &Manifest,
+    path: &str,
+) -> Result<Component, Status> {
+    let entry = package.find(path).ok_or(Status::InvalidArgs)?;
+    let bytes = package
+        .read(given, entry)
+        .map_err(|_| Status::InvalidArgs)?;
+    let (inner, manifest, _) = check(&bytes[..])?;
+    if !manifest.id.starts_with(&format!("{}.", owner.id)) {
+        return Err(Status::InvalidArgs);
+    }
+    let global = manifest.global;
+    Ok(Component {
+        package: inner,
+        bytes,
+        manifest,
+        global,
+    })
+}
+
+/// What one install writes: a package or a component, with its owner,
+/// the owner's records scope, when it is a component.
+struct One<'a, S: format::Source + ?Sized> {
+    source: &'a S,
+    package: &'a Package,
+    manifest: &'a Manifest,
+    global: bool,
+    owner_of: Option<(&'a str, Owner)>,
+    dependency: bool,
+    dev: bool,
+    commands: &'a [String],
+}
+
 pub fn install(
     shared: &Shared,
     caller: &ClientIdentity,
@@ -76,15 +126,85 @@ pub fn install(
 ) -> Result<(), Status> {
     let given = Given(NodeClient::new(q.package));
     let (package, manifest, _) = open(&given)?;
+    // The components it names, and those of it that are installed, which
+    // are updated with it, all checked before anything is written.
+    let (_, owner) = scope(shared, caller, q.global)?;
+    let records = shared.root()?.records()?;
+    let mut components = Vec::new();
+    for path in &manifest.components {
+        let named = q.components.iter().any(|c| c == path);
+        let component = match component(&package, &given, &manifest, path) {
+            Ok(component) => component,
+            Err(e) if named => return Err(e),
+            Err(_) => continue,
+        };
+        let installed = records.0.iter().any(|((s, id), r)| {
+            *id == component.manifest.id
+                && r.owner.as_deref() == Some(manifest.id.as_str())
+                && r.owner_in.unwrap_or(*s) == owner
+        });
+        if named || installed {
+            components.push(component);
+        }
+    }
+    if let Some(path) = q
+        .components
+        .iter()
+        .find(|c| !manifest.components.contains(c))
+    {
+        eprintln!("pkgsvc: {} has no component {path}", manifest.id);
+        return Err(Status::InvalidArgs);
+    }
+    let one = One {
+        source: &given,
+        package: &package,
+        manifest: &manifest,
+        global: q.global,
+        owner_of: None,
+        dependency: q.dependency,
+        dev: q.dev,
+        commands: &q.commands,
+    };
+    if !install_one(shared, caller, one)? {
+        return Err(Status::AccessDenied);
+    }
+    for c in &components {
+        let one = One {
+            source: &c.bytes[..],
+            package: &c.package,
+            manifest: &c.manifest,
+            global: c.global,
+            owner_of: Some((&manifest.id, owner)),
+            dependency: false,
+            dev: q.dev,
+            commands: &[],
+        };
+        // One that needs a permission that is not granted is left out.
+        if !install_one(shared, caller, one)? {
+            eprintln!("pkgsvc: {} is left out", c.manifest.id);
+        }
+    }
+    super::kept::clean(shared, &*shared.root()?)
+}
+
+/// Installs what `one` describes, once checked: false, with nothing
+/// written, when it needs `admin.packages.install`, which is not
+/// granted.
+fn install_one<S: format::Source + ?Sized>(
+    shared: &Shared,
+    caller: &ClientIdentity,
+    one: One<'_, S>,
+) -> Result<bool, Status> {
+    let (package, manifest) = (one.package, one.manifest);
     let kind = manifest.kind.ok_or(Status::InvalidArgs)?;
     if kind == Kind::Driver {
-        super::drivers::check(&package, &given, &manifest)?;
+        super::drivers::check(package, one.source, manifest)?;
     }
-    super::services::check(&package, &given, &manifest)?;
+    super::services::check(package, one.source, manifest)?;
     if !manifest.installable {
         return Err(Status::InvalidArgs);
     }
-    if kind == Kind::Driver && !q.global {
+    if kind == Kind::Driver && !one.global {
         return Err(Status::InvalidArgs);
     }
     let root = shared.root()?;
@@ -96,7 +216,7 @@ pub fn install(
         );
         return Err(Status::AlreadyExists);
     }
-    let (scope, owner) = scope(shared, caller, q.global)?;
+    let (scope, owner) = scope(shared, caller, one.global)?;
     // Not for every user and for this user at once.
     let other = match &scope {
         Scope::Global => scope_of_caller(shared, caller).ok(),
@@ -123,9 +243,8 @@ pub fn install(
             return Err(Status::NotFound);
         }
     }
-    if scope == Scope::Global && !super::allowed(shared, caller, PERMISSION, &manifest, "install")?
-    {
-        return Err(Status::AccessDenied);
+    if scope == Scope::Global && !super::allowed(shared, caller, PERMISSION, manifest, "install")? {
+        return Ok(false);
     }
     let at = place::subvolume(kind, &manifest.id, &scope).ok_or(Status::InvalidArgs)?;
     // What the scope's other packages have of its commands.
@@ -139,7 +258,7 @@ pub fn install(
     });
     let keep = match (kind, &scope, old) {
         (Kind::Library, Scope::Global, Some(old)) => {
-            let new = super::kept::package_files(&package, q.dev);
+            let new = super::kept::package_files(package, one.dev);
             super::kept::keep_old(shared, &root, &manifest.id, &at, &old.to_string(), &new)?
         }
         _ => None,
@@ -147,11 +266,11 @@ pub fn install(
     write(
         &root,
         shared,
-        &given,
-        &package,
+        one.source,
+        package,
         &at,
         place::read_only(kind),
-        q.dev,
+        one.dev,
         keep.as_deref(),
     )?;
     let mut records = root.records()?;
@@ -159,13 +278,14 @@ pub fn install(
         owner,
         &manifest.id,
         Record {
-            owner: None,
-            dependency: q.dependency,
+            owner: one.owner_of.map(|(id, _)| id.into()),
+            owner_in: one.owner_of.map(|(_, scope)| scope),
+            dependency: one.dependency,
         },
     );
     root.write_records(&records)?;
     let names: Vec<String> = manifest.bins.iter().map(|b| b.name.clone()).collect();
-    super::commands::installed(&root, owner, &manifest.id, &names, &q.commands, &others)?;
+    super::commands::installed(&root, owner, &manifest.id, &names, one.commands, &others)?;
     // A driver marked for boot changes the boot list (MIKSPEC-0101.R20).
     if kind == Kind::Driver {
         super::drivers::boot_modules_changed(shared, &root)?;
@@ -181,7 +301,7 @@ pub fn install(
         }
         super::services::changed(shared);
     }
-    super::kept::clean(shared, &root)
+    Ok(true)
 }
 
 /// The scope of the caller's own user.
@@ -192,10 +312,10 @@ fn scope_of_caller(shared: &Shared, caller: &ClientIdentity) -> Result<Scope, St
 #[allow(clippy::too_many_arguments)]
 /// Writes the files of `package`, without `include/` unless `dev`, into a
 /// new subvolume next to `at`, which then takes the place of `at`.
-fn write(
+fn write<S: format::Source + ?Sized>(
     root: &Root,
     shared: &Shared,
-    given: &Given,
+    given: &S,
     package: &Package,
     at: &str,
     read_only: bool,

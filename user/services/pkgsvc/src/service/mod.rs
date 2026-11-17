@@ -159,6 +159,13 @@ impl format::Source for Given {
 /// against it: `INVALID_ARGS` for one that breaks the format or whose
 /// manifest is not valid.
 pub fn open(package: &Given) -> Result<(Package, Manifest, Vec<u8>), Status> {
+    check(package)
+}
+
+/// The package that `package` holds, checked as `open` does.
+pub fn check<S: format::Source + ?Sized>(
+    package: &S,
+) -> Result<(Package, Manifest, Vec<u8>), Status> {
     let checked = Package::open(package).map_err(|e| match e {
         format::Error::Io => Status::Io,
         format::Error::Invalid(_) => Status::InvalidArgs,

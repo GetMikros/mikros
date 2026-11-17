@@ -142,7 +142,8 @@ fn delete(
 ) -> Result<(), Status> {
     let subvolumes = shared.subvolumes()?;
     let mut records = root.records()?;
-    for component in records.components(owner, id) {
+    let components = records.components(owner, id).into_iter();
+    for (_, component) in components.filter(|(s, _)| *s == owner) {
         if let Some(c) = everything
             .iter()
             .find(|p| p.manifest.id == component && p.owner == owner)
