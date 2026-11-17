@@ -14,6 +14,7 @@ use core::task::{Poll, Waker};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
 use mikros_rt::sys;
 use mikros_storage::{Contiguous, MS, Mmio, now};
 
@@ -61,6 +62,9 @@ const TABLE_SIZE: u64 = 0x80 + 16 * PRD_MAX as u64;
 /// How long a port may take to stop, a link to come up, and the device
 /// to stop being busy.
 const STOP_LIMIT: i64 = 500 * MS;
+/// How long a port has to confirm that it stopped before its commands
+/// fail, after which the function is reset (MIKSPEC-0080.R12).
+const STOP_CONFIRM: i64 = 5000 * MS;
 /// How often the port looks for commands that take too long.
 const WATCH_EVERY: i64 = 1000 * MS;
 const LINK_LIMIT: i64 = 1000 * MS;
@@ -378,8 +382,14 @@ impl Port {
 
     /// Recovers the port after an error: stops it, resets it with
     /// COMRESET through `PxSCTL`, and sets it up and starts it again.
-    pub async fn recover(&self, reactor: &Reactor, spin_up: bool) {
-        self.reset(reactor, spin_up, false).await;
+    pub async fn recover(
+        &self,
+        reactor: &Reactor,
+        spin_up: bool,
+        manager: &DeviceManagerAsyncClient,
+    ) {
+        self.reset(reactor, spin_up, Recovery::Restart, manager)
+            .await;
     }
 
     /// Watches the port's outstanding commands, once every
@@ -387,7 +397,12 @@ impl Port {
     /// `crate::ata::timeouts::LIMIT` (MIKSPEC-0048.R12): it then resets the
     /// port and issues them again, or, once the same command has taken that
     /// long three times, fails them all and resets the port.
-    pub async fn watch_timeouts(&self, reactor: &Reactor, spin_up: bool) {
+    pub async fn watch_timeouts(
+        &self,
+        reactor: &Reactor,
+        spin_up: bool,
+        manager: Rc<DeviceManagerAsyncClient>,
+    ) {
         loop {
             let _ = reactor.sleep_until(now() + WATCH_EVERY).await;
             let action = {
@@ -405,7 +420,8 @@ impl Port {
                         "ahci: port {}: a command did not complete in time; resetting the port and issuing its commands again",
                         self.number
                     );
-                    self.reset(reactor, spin_up, true).await;
+                    self.reset(reactor, spin_up, Recovery::Reissue, &manager)
+                        .await;
                 }
                 Action::Fail => {
                     mikros_rt::log!(
@@ -413,39 +429,59 @@ impl Port {
                         "ahci: port {}: a command did not complete in time three times; failing the port's requests",
                         self.number
                     );
-                    {
-                        let mut state = self.state.borrow_mut();
-                        let outstanding = core::mem::take(&mut state.outstanding);
-                        state.queued = 0;
-                        for slot in (0..32).filter(|s| outstanding & 1 << s != 0) {
-                            state.results[slot] = Some(Err(Status::Internal));
-                            if let Some(waker) = state.wakers[slot].take() {
-                                waker.wake();
-                            }
-                        }
-                    }
-                    self.reset(reactor, spin_up, false).await;
+                    self.reset(reactor, spin_up, Recovery::Fail, &manager).await;
                 }
             }
         }
     }
 
-    /// Stops the port, resets it with COMRESET through `PxSCTL`, and sets
-    /// it up and starts it again; with `reissue`, then issues its
-    /// outstanding commands again, before any other may be issued.
-    async fn reset(&self, reactor: &Reactor, spin_up: bool, reissue: bool) {
+    /// Stops the port, clearing `PxCMD.ST` and waiting for `PxCMD.CR` to
+    /// clear, or for at most `STOP_CONFIRM` and then for a reset of the
+    /// function, which as for any PCI function counts as the stop
+    /// whatever its result (MIKSPEC-0025.R64); resets it with COMRESET
+    /// through `PxSCTL`; with `Fail`, fails its outstanding commands, only
+    /// once it cannot reach their data (MIKSPEC-0048.R14,
+    /// MIKSPEC-0080.R12); and sets it up and starts it again. With
+    /// `Reissue`, it then issues its outstanding commands again, before
+    /// any other may be issued.
+    async fn reset(
+        &self,
+        reactor: &Reactor,
+        spin_up: bool,
+        recovery: Recovery,
+        manager: &DeviceManagerAsyncClient,
+    ) {
         self.state.borrow_mut().recovering = true;
         self.write(CMD, self.read(CMD) & !CMD_ST);
-        let _ = wait(reactor, STOP_LIMIT, || self.read(CMD) & CMD_CR == 0).await;
+        let stopped = wait(reactor, STOP_CONFIRM, || self.read(CMD) & CMD_CR == 0).await;
+        if stopped.is_err() {
+            mikros_rt::log!(
+                Error,
+                "ahci: port {} did not stop; asking for the controller's reset",
+                self.number
+            );
+            let _ = manager.request_reset().await;
+        }
         let sctl = self.read(SCTL) & !0xF;
         self.write(SCTL, sctl | 1);
         let _ = reactor.sleep_until(now() + 2 * MS).await;
         self.write(SCTL, sctl);
         let _ = wait(reactor, LINK_LIMIT, || self.linked()).await;
+        if recovery == Recovery::Fail {
+            let mut state = self.state.borrow_mut();
+            let outstanding = core::mem::take(&mut state.outstanding);
+            state.queued = 0;
+            for slot in (0..32).filter(|s| outstanding & 1 << s != 0) {
+                state.results[slot] = Some(Err(Status::Internal));
+                if let Some(waker) = state.wakers[slot].take() {
+                    waker.wake();
+                }
+            }
+        }
         if self.set_up(reactor, spin_up).await.is_ok() {
             let _ = self.start(reactor).await;
         }
-        if reissue {
+        if recovery == Recovery::Reissue {
             let state = self.state.borrow();
             fence(Ordering::SeqCst);
             if state.queued != 0 {
@@ -464,6 +500,17 @@ impl Port {
             waker.wake();
         }
     }
+}
+
+/// What a reset of a port does with its outstanding commands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    /// Leaves them, after an error that ended them.
+    Restart,
+    /// Issues them again.
+    Reissue,
+    /// Fails them.
+    Fail,
 }
 
 /// Waits until every port in `ports` has a connection established, for

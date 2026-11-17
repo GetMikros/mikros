@@ -194,7 +194,7 @@ async fn start(
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<(Started, DeviceManagerAsyncClient), Status> {
+) -> Result<(Started, Rc<DeviceManagerAsyncClient>), Status> {
     let bus_end = request.bus.ok_or(Status::InvalidArgs)?;
     let dma = request
         .resources
@@ -240,19 +240,24 @@ async fn start(
         let _ = port.start(reactor).await;
     }
     let ports: Vec<Rc<Port>> = ports.into_iter().map(Rc::new).collect();
+    // Through which a port that does not stop has the controller reset.
+    let manager = Rc::new(DeviceManagerAsyncClient::new(
+        request.manager,
+        reactor.clone(),
+    ));
     interrupts(
         &pci,
         &mmio,
         &ports,
         caps.staggered_spin_up,
-        reactor,
-        spawner,
+        (reactor, spawner),
+        &manager,
     )
     .await?;
     for port in &ports {
-        let (port, reactor) = (port.clone(), reactor.clone());
+        let (port, reactor, manager) = (port.clone(), reactor.clone(), manager.clone());
         let spin_up = caps.staggered_spin_up;
-        spawner.spawn(async move { port.watch_timeouts(&reactor, spin_up).await });
+        spawner.spawn(async move { port.watch_timeouts(&reactor, spin_up, manager).await });
     }
     crate::driver::hba::enable_interrupts(&mmio);
     let page = memory.contiguous(PAGE)?;
@@ -277,7 +282,6 @@ async fn start(
             writer: mikros_storage::Writer::default(),
         }));
     }
-    let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     Ok((Started { ports, disks, pci }, manager))
 }
 
@@ -304,10 +308,11 @@ async fn interrupts(
     mmio: &Rc<Mmio>,
     ports: &[Rc<Port>],
     spin_up: bool,
-    reactor: &Reactor,
-    spawner: &Spawner,
+    (reactor, spawner): (&Reactor, &Spawner),
+    manager: &Rc<DeviceManagerAsyncClient>,
 ) -> Result<(), Status> {
     let device = pci.get();
+    let manager = manager.clone();
     let (handle, msi) = match device.enable_msi(1).await {
         Ok(Ok(enabled)) => match enabled.interrupts.into_iter().next() {
             Some(interrupt) => (interrupt, true),
@@ -335,8 +340,8 @@ async fn interrupts(
                 }
                 mmio.write32(crate::driver::hba::IS, 1 << port.number);
                 if matches!(event, Event::Error) {
-                    let (port, reactor) = (port.clone(), reactor.clone());
-                    tasks.spawn(async move { port.recover(&reactor, spin_up).await });
+                    let (port, reactor, manager) = (port.clone(), reactor.clone(), manager.clone());
+                    tasks.spawn(async move { port.recover(&reactor, spin_up, &manager).await });
                 }
             }
             if !msi {
@@ -354,7 +359,7 @@ async fn interrupts(
 /// manager's channel open for as long as the driver runs.
 async fn add_disks(
     disks: Vec<Rc<Disk>>,
-    manager: DeviceManagerAsyncClient,
+    manager: Rc<DeviceManagerAsyncClient>,
     devices: Rc<Devices>,
     reactor: Reactor,
     spawner: Spawner,
