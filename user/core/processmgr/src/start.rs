@@ -12,7 +12,9 @@ use mikros_manifest::path;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::fs::{MemoryFlags, Node, NodeType, OpenFlags, Rights};
+use mikros_rt::interfaces::mikros::fs::{
+    MemoryFlags, Node, NodeAsyncClient, NodeType, OpenFlags, Rights,
+};
 use mikros_rt::interfaces::mikros::process::{
     Bootstrap, BootstrapClient, Launcher, NamespaceEntry, StartupHandle, StartupHeader,
 };
@@ -246,14 +248,18 @@ async fn resolve(
         Origin::Dir { dir, system, .. } => {
             let name = if rest.is_empty() { "." } else { rest };
             let rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
-            let file = namespace::open(dir, name, OpenFlags(0), 0, rights, reactor)
-                .await
-                .map_err(namespace::status)?;
+            let file = match namespace::open(dir, name, OpenFlags(0), 0, rights, reactor).await {
+                Ok(file) => file,
+                Err(e) => {
+                    let denied = namespace::status(e);
+                    return Err(refused(dir, name, denied, reactor).await);
+                }
+            };
             let attributes = reply(file.get_attributes().await)?.attributes;
             if attributes.r#type != NodeType::File
                 || attributes.mode & mikros_bootfs::server::EXECUTE_BITS == 0
             {
-                return Err(Status::AccessDenied);
+                return Err(refused(dir, name, Status::AccessDenied, reactor).await);
             }
             let memory = reply(file.get_memory_object(MemoryFlags::EXECUTE).await)?.memory;
             let file = map_file(own, memory, attributes.size)?;
@@ -262,6 +268,23 @@ async fn resolve(
                 system: *system,
             })
         }
+    }
+}
+
+/// The status that a start of `name` in `dir` that may not run fails
+/// with: `INVALID_ARGS` for a package, which starts only by a name ending
+/// in `.mika` (MIKSPEC-0101.R46), and `denied` otherwise.
+async fn refused(dir: &NodeAsyncClient, name: &str, denied: Status, reactor: &Reactor) -> Status {
+    if denied != Status::AccessDenied {
+        return denied;
+    }
+    let Ok(file) = namespace::open(dir, name, OpenFlags(0), 0, Rights::READ, reactor).await else {
+        return denied;
+    };
+    let magic = mikros_mika::format::MAGIC;
+    match file.read(0, magic.len() as u32).await {
+        Ok(Ok(r)) if r.data == magic => Status::InvalidArgs,
+        _ => denied,
     }
 }
 
@@ -333,6 +356,9 @@ fn load_image(fs: &Rc<Fs>, process: Handle, program: &Program) -> Result<Image, 
 pub struct Lookup<'a> {
     pub first: Option<&'a Programs>,
     pub then: &'a Programs,
+    /// Whether `first` holds every path, not only those under `/system`:
+    /// a portable app's program comes from its own namespace.
+    pub everywhere: bool,
 }
 
 /// The program that the absolute `path` names: in `lookup.first`, when
@@ -346,7 +372,7 @@ async fn resolve_first(
     reactor: &Reactor,
 ) -> Result<Program, Status> {
     let under_system = path::normalize(path).is_some_and(|p| p.starts_with("/system/"));
-    if let Some(first) = lookup.first.filter(|_| under_system) {
+    if let Some(first) = lookup.first.filter(|_| lookup.everywhere || under_system) {
         match resolve(fs, first, own, path, reactor).await {
             Err(Status::NotFound) => {}
             found => return found,
@@ -376,6 +402,11 @@ pub async fn load(
     name: &str,
 ) -> Result<(Started, Option<Vec<String>>), Status> {
     let mut executable = resolve_first(fs, lookup, own, path, reactor).await?;
+    // A package starts only as one, by a name ending in `.mika`
+    // (MIKSPEC-0101.R46).
+    if executable.file().starts_with(mikros_mika::format::MAGIC) {
+        return Err(Status::InvalidArgs);
+    }
     let mut interpreted = None;
     if !native(executable.file()) {
         let (interpreter, argument) =

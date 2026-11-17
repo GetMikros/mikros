@@ -7,6 +7,7 @@
 //! with `NOT_SUPPORTED`.
 
 use crate::broker::{FULL_DISK, LIST_ALL, SET_IDENTITY, SET_USER, SIGNAL_ANY};
+use crate::portable::Portable;
 use crate::processes::{NewProcess, Shared};
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, duplicate};
@@ -200,6 +201,13 @@ async fn new_process(
         Some(_) => None,
         None => command(shared, caller, &request).await?,
     };
+    // A package file or a program of a build starts as a portable app,
+    // unless something before decides (MIKSPEC-0101.R46,
+    // MIKSPEC-0101.R47).
+    let portable_start = match (&named, &command) {
+        (None, None) => portable_start(shared, caller, &request).await?,
+        _ => None,
+    };
     let commands = crate::commands::of(shared).await;
     let records = shared.records.borrow();
     let from = records.get(caller).ok_or(Status::BadState)?;
@@ -224,7 +232,8 @@ async fn new_process(
         Some((app_id, entry)) => (Some(app_id), entry),
         None => (None, None),
     };
-    let (app_id, namespace_of) = match named.or(command) {
+    let portable_id = portable_start.as_ref().map(|(p, _)| p.id.clone());
+    let (app_id, namespace_of) = match named.or(command).or(portable_id) {
         Some(app_id) => (app_id.clone(), app_id),
         None => match from.programs.package_of(&request.path) {
             Some(app_id) => (app_id.clone(), app_id),
@@ -240,6 +249,15 @@ async fn new_process(
     };
     let same = app_id == from.app_id && user == from.user;
     let inherits_app = app_id == from.app_id;
+    // A process that keeps a portable app's app ID runs as it does.
+    let (portable, path) = match portable_start {
+        Some((portable, program)) => (
+            Some(portable),
+            program.unwrap_or_else(|| request.path.clone()),
+        ),
+        None if inherits_app => (from.portable.clone(), request.path.clone()),
+        None => (None, request.path.clone()),
+    };
     // The device manager starts drivers that only the root file system
     // holds, and those of the boot image.
     let programs_first = match from.app_id == DEVICE_MANAGER {
@@ -247,7 +265,7 @@ async fn new_process(
         false => None,
     };
     let new = NewProcess {
-        path: request.path.clone(),
+        path,
         programs: from.programs.clone(),
         programs_first,
         parent: parent(from),
@@ -269,6 +287,7 @@ async fn new_process(
             None => request.working_directory.unwrap_or_else(|| "/".into()),
         },
         working_entry,
+        portable,
         umask: match request.umask {
             start::DEFAULT_UMASK => start::UMASK,
             mask => mask & 0o777,
@@ -361,6 +380,37 @@ async fn command(
     Ok(Some((app_id, entry)))
 }
 
+/// The portable app that the program of `request` of process `caller`
+/// starts, with the path of the program that it runs when that is not the
+/// request's: for a package file, or a program whose own folder holds a
+/// manifest, unless the program lies in an installed package
+/// (MIKSPEC-0101.R46, MIKSPEC-0101.R47).
+async fn portable_start(
+    shared: &Shared,
+    caller: u32,
+    request: &SpawnRequest,
+) -> Result<Option<(Rc<Portable>, Option<String>)>, Status> {
+    let (programs, user) = {
+        let records = shared.records.borrow();
+        let from = records.get(caller).ok_or(Status::BadState)?;
+        (from.programs.clone(), from.user)
+    };
+    if programs.package_of(&request.path).is_some() {
+        return Ok(None);
+    }
+    let user = match request.user {
+        CALLER_USER => user,
+        user => user,
+    };
+    if let Some((portable, program)) =
+        crate::portable::package(shared, &programs, user, &request.path).await?
+    {
+        return Ok(Some((Rc::new(portable), Some(program))));
+    }
+    let built = crate::portable::build(shared, &programs, user, &request.path).await?;
+    Ok(built.map(|portable| (Rc::new(portable), None)))
+}
+
 /// Whether `program`, a path relative to the root, lies in the installed
 /// package of `app_id`: below `apps/<id>/` or below
 /// `users/<user>/apps/<id>/package/`, once normalized.
@@ -395,7 +445,7 @@ async fn named_app(
             app_id: from.app_id.clone(),
             admin: from.admin,
             koid: from.koid,
-            portable_checksum: Default::default(),
+            portable_checksum: from.checksum(),
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);
@@ -536,7 +586,7 @@ async fn holds(shared: &Shared, caller: u32, permission: &str) -> bool {
             app_id: from.app_id.clone(),
             admin: from.admin,
             koid: from.koid,
-            portable_checksum: Default::default(),
+            portable_checksum: from.checksum(),
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);
@@ -642,7 +692,7 @@ async fn kill(
             app_id: from.app_id.clone(),
             admin: from.admin,
             koid: from.koid,
-            portable_checksum: Default::default(),
+            portable_checksum: from.checksum(),
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);

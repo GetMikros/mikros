@@ -1,6 +1,7 @@
 //! The records of the processes the process manager knows.
 
 use crate::namespace::Programs;
+use crate::portable::Portable;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -33,6 +34,8 @@ pub struct Record {
     /// Where the programs that the process names come from: its
     /// namespace's.
     pub programs: Rc<Programs>,
+    /// How it runs when it is a portable app or a build.
+    pub portable: Option<Rc<Portable>>,
     pub process: OwnedHandle,
     /// How the process ended, once it did.
     pub exit: Option<Exit>,
@@ -50,6 +53,17 @@ pub struct Record {
 pub struct Exit {
     pub code: i64,
     pub signal: u32,
+}
+
+impl Record {
+    /// The `portable_checksum` of the process's client identities
+    /// (MIKSPEC-0036.R41).
+    pub fn checksum(&self) -> String {
+        self.portable
+            .as_ref()
+            .map(|p| p.checksum.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// The records by process ID.

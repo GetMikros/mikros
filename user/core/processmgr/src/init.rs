@@ -138,6 +138,7 @@ impl Manager {
             path: "init".into(),
             // init's programs come from the boot file system.
             programs: Rc::new(Programs::boot()),
+            portable: None,
             process,
             exit: None,
             stopped: None,
@@ -192,6 +193,7 @@ impl Manager {
             namespace_of: SERVICE_MANAGER_APP.into(),
             inherits_app: false,
             working_entry: None,
+            portable: None,
             user: 0,
             login_session: 0,
             admin: 0,

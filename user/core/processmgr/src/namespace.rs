@@ -36,6 +36,7 @@
 //! `/system/state/<app ID>`, both read and write, without listing them
 //! (MIKSPEC-0100.R14, MIKSPEC-0050.R46, MIKSPEC-0050.R47).
 
+use crate::portable::Portable;
 use crate::processes::Shared;
 use alloc::format;
 use alloc::rc::Rc;
@@ -645,7 +646,7 @@ impl Namespaces {
         if let Some(pid) = shared.identity_setter.get() {
             let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
             if let Some(app_id) = app_id {
-                match self.of(shared, &app_id, 0, 0, true).await {
+                match self.of(shared, &app_id, 0, 0, true, None).await {
                     Ok((_, programs, _)) => {
                         if let Some(record) = shared.records.borrow_mut().get_mut(pid) {
                             record.programs = Rc::new(programs);
@@ -697,6 +698,7 @@ impl Namespaces {
         user: u32,
         admin: u32,
         service_manager: bool,
+        portable: Option<&Portable>,
     ) -> Result<(Vec<NamespaceEntry>, Programs, Option<App>), Status> {
         let dev = NamespaceEntry {
             path: "/dev".into(),
@@ -784,19 +786,26 @@ impl Namespaces {
             if user == 0 {
                 return Err(Status::AccessDenied);
             }
-            let name = crate::users::name(shared, user).await?;
-            let started = self
-                .app(
-                    shared,
-                    &ready,
-                    app_id,
-                    user,
-                    admin,
-                    &name,
-                    &mut entries,
-                    &mut origins,
-                )
-                .await?;
+            let started = match portable {
+                Some(portable) => {
+                    self.portable_app(shared, &ready, portable, user, &mut entries, &mut origins)
+                        .await?
+                }
+                None => {
+                    let name = crate::users::name(shared, user).await?;
+                    self.app(
+                        shared,
+                        &ready,
+                        app_id,
+                        user,
+                        admin,
+                        &name,
+                        &mut entries,
+                        &mut origins,
+                    )
+                    .await?
+                }
+            };
             app = Some(started);
         } else {
             let (kind, listed) = manifest_entries(self, shared, app_id).await;
@@ -910,7 +919,17 @@ impl Namespaces {
                 }
             }
         }
-        if app_id == CLI_APP || self.holds_volumes(shared, app_id, user, admin).await {
+        if app_id == CLI_APP
+            || self
+                .holds_volumes(
+                    shared,
+                    app_id,
+                    user,
+                    admin,
+                    portable.map_or("", |p| p.checksum.as_str()),
+                )
+                .await
+        {
             let volumes = NamespaceEntry {
                 path: VOLUMES.into(),
                 directory: shared.volumes.directory()?,
@@ -1089,10 +1108,97 @@ impl Namespaces {
             .map(|e| format!("{at}/{e}"))
             .unwrap_or_default();
         Ok(App {
+            cache: Some(format!("{at}/cache")),
+            package: Some(format!("{at}/package")),
             folder: at,
             mode,
             executable,
-            installed,
+            installed: Some(installed),
+        })
+    }
+
+    /// The entries of the portable app or build `portable` for user
+    /// `user` (MIKSPEC-0050.R51, MIKSPEC-0101.R46, MIKSPEC-0101.R47):
+    /// `/system`, `/libraries`, the commands, for a portable app its
+    /// package's files at `/apps/<id>`, `/public` and, when it exists,
+    /// `/public/<id>`, a `/tmp` of its own, and its own folder at its real
+    /// path; and how it starts, in that folder.
+    async fn portable_app(
+        &self,
+        shared: &Shared,
+        ready: &Ready,
+        portable: &Portable,
+        user: u32,
+        entries: &mut Vec<NamespaceEntry>,
+        origins: &mut Vec<(String, Origin)>,
+    ) -> Result<App, Status> {
+        let id = portable.id.as_str();
+        let reactor = &shared.reactor;
+        add(
+            entries,
+            origins,
+            self.entry(shared, ready, SYSTEM_ENTRY, RX).await?,
+        );
+        add(
+            entries,
+            origins,
+            self.entry(shared, ready, "/libraries", RX).await?,
+        );
+        if let Some(commands) = self.commands(shared, user).await {
+            add(entries, origins, commands);
+        }
+        let package = match &portable.package {
+            Some(files) => {
+                let at = format!("{APPS}/{id}");
+                let entry = NamespaceEntry {
+                    path: at.clone(),
+                    directory: connection(files, RX).await?,
+                };
+                let origin = Origin::Dir {
+                    dir: files.clone(),
+                    system: false,
+                    real: None,
+                    rights: RX,
+                };
+                add(entries, origins, (entry, origin));
+                Some(at)
+            }
+            None => None,
+        };
+        add(
+            entries,
+            origins,
+            self.entry(shared, ready, PUBLIC, Rights::READ).await?,
+        );
+        if let Ok(own) = self
+            .entry(shared, ready, &format!("{PUBLIC}/{id}"), RW)
+            .await
+        {
+            add(entries, origins, own);
+        }
+        let budget = shared.budget_of(user, id)?;
+        let tmpfs = self.tmpfs().await;
+        let path = format!("apps/{user}/{id}");
+        add(
+            entries,
+            origins,
+            none(tmp(&tmpfs, &path, "/tmp", budget, reactor).await?),
+        );
+        let folder = &portable.folder;
+        if !entries.iter().any(|e| &e.path == folder) {
+            add(
+                entries,
+                origins,
+                self.entry(shared, ready, folder, portable.rights).await?,
+            );
+        }
+        Ok(App {
+            folder: folder.clone(),
+            mode: "portable",
+            executable: portable.executable.clone(),
+            installed: None,
+            package,
+            cache: None,
         })
     }
 
@@ -1161,14 +1267,21 @@ impl Namespaces {
 
     /// Whether the processes of `app_id` and `user`, elevated by `admin`
     /// unless it is 0, hold `user.volumes.access`, as the broker says.
-    async fn holds_volumes(&self, shared: &Shared, app_id: &str, user: u32, admin: u32) -> bool {
+    async fn holds_volumes(
+        &self,
+        shared: &Shared,
+        app_id: &str,
+        user: u32,
+        admin: u32,
+        checksum: &str,
+    ) -> bool {
         let client = ClientIdentity {
             pid: 0,
             user,
             app_id: app_id.into(),
             admin,
             koid: 0,
-            portable_checksum: Default::default(),
+            portable_checksum: checksum.into(),
         };
         shared
             .permissions
@@ -1539,23 +1652,26 @@ pub struct App {
     pub folder: String,
     pub mode: &'static str,
     pub executable: String,
-    pub installed: String,
+    /// The package on the root file system, for an installed app.
+    pub installed: Option<String>,
+    /// The folder of the package's files as the app sees it:
+    /// `/apps/<id>/package` for an installed app, `/apps/<id>` for a
+    /// portable one, and none for a build.
+    pub package: Option<String>,
+    /// The app's cache, for an installed app.
+    pub cache: Option<String>,
 }
 
 impl App {
-    /// The app's package as the app sees it.
-    pub fn package(&self) -> String {
-        format!("{}/package", self.folder)
-    }
-
-    /// The path at which the app sees the file of its package at `real`
-    /// on the root file system.
+    /// The path at which the app sees the file of its installed package at
+    /// `real` on the root file system.
     pub fn sees(&self, real: &str) -> Option<String> {
-        match real.strip_prefix(self.installed.as_str())? {
-            "" => Some(self.package()),
+        let package = self.package.as_deref()?;
+        match real.strip_prefix(self.installed.as_deref()?)? {
+            "" => Some(String::from(package)),
             rest => rest
                 .strip_prefix('/')
-                .map(|rest| format!("{}/{rest}", self.package())),
+                .map(|rest| format!("{package}/{rest}")),
         }
     }
 }

@@ -5,6 +5,7 @@ use crate::broker::Permissions;
 use crate::devfs::Dev;
 use crate::launcher;
 use crate::namespace::{App, Namespaces, Programs};
+use crate::portable::Portable;
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, Transfer, duplicate};
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -118,6 +119,10 @@ pub struct NewProcess {
     /// that folder, at its real path, and the rights it has there, which
     /// it gets in its namespace and starts in (MIKSPEC-0101.R44).
     pub working_entry: Option<(String, Rights)>,
+    /// How it runs when it is a portable app or a build, which its
+    /// processes that keep its app ID share (MIKSPEC-0101.R46,
+    /// MIKSPEC-0101.R47).
+    pub portable: Option<Rc<Portable>>,
     /// Its file creation mask, as its spawner named it, or 0o022 for the
     /// default.
     pub umask: u32,
@@ -265,6 +270,7 @@ impl Shared {
                 new.user,
                 new.admin,
                 new.service_manager,
+                new.portable.as_deref(),
             )
             .await?;
         // A command's folder of its spawner, unless the namespace has an
@@ -278,9 +284,15 @@ impl Shared {
             }
             in_folder = true;
         }
+        // A portable app's program is found in its package's files first.
+        let from_package = new.portable.as_ref().is_some_and(|p| p.package.is_some());
         let lookup = start::Lookup {
-            first: new.programs_first.as_deref(),
+            first: match from_package {
+                true => Some(&programs),
+                false => new.programs_first.as_deref(),
+            },
             then: &new.programs,
+            everywhere: from_package,
         };
         let (started, interpreted) = start::load(
             &self.fs,
@@ -313,6 +325,7 @@ impl Shared {
             mut working_directory,
             umask,
             inherits_app,
+            portable,
             ..
         } = new;
         let process_koid = koid(&started.process).inspect_err(|_| started.kill())?;
@@ -335,14 +348,15 @@ impl Shared {
         // (MIKSPEC-0101.R41).
         let arguments = match &app {
             Some(app) => {
-                let cache = alloc::format!("{}/cache", app.folder);
                 let mut variables = alloc::vec![
                     ("MIKA_MODE", app.mode),
                     ("MIKA_EXECUTABLE", app.executable.as_str()),
                 ];
                 if !inherits_app {
                     variables.push(("HOME", app.folder.as_str()));
-                    variables.push(("XDG_CACHE_HOME", cache.as_str()));
+                    if let Some(cache) = &app.cache {
+                        variables.push(("XDG_CACHE_HOME", cache.as_str()));
+                    }
                     if !in_folder {
                         working_directory = app.folder.clone();
                     }
@@ -357,7 +371,10 @@ impl Shared {
             app_id: app_id.clone(),
             admin,
             koid: process_koid,
-            portable_checksum: Default::default(),
+            portable_checksum: portable
+                .as_ref()
+                .map(|p| p.checksum.clone())
+                .unwrap_or_default(),
         };
         let namespace = self.restricted(namespace, &identity).await;
         let transferred = self
@@ -387,6 +404,7 @@ impl Shared {
                 budget,
                 path,
                 programs: Rc::new(programs),
+                portable,
                 process: duplicate(started.process.raw(), SAME_RIGHTS)?,
                 exit: None,
                 stopped: None,
@@ -642,12 +660,17 @@ fn placed(programs: &Programs, path: &str, app: Option<&App>) -> (String, Option
         return (normal, None);
     };
     if let Some(seen) = programs.real_path(&normal).and_then(|real| app.sees(&real)) {
-        return (seen, Some(app.package()));
+        return (seen, app.package.clone());
     }
-    // Through the app's own view of its folder.
-    let below = normal
-        .strip_prefix(app.folder.as_str())
-        .is_some_and(|rest| rest.starts_with('/'));
-    let bundle = below.then(|| app.package());
+    // Through the app's own view of its folder, or a portable app's
+    // package.
+    let below = |at: &str| {
+        normal
+            .strip_prefix(at)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    let mut roots = app.package.iter().map(String::as_str);
+    let inside = (app.installed.is_some() && below(&app.folder)) || roots.any(below);
+    let bundle = inside.then(|| app.package.clone()).flatten();
     (normal, bundle)
 }

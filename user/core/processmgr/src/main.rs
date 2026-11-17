@@ -16,6 +16,7 @@ mod elevations;
 mod init;
 mod launcher;
 mod namespace;
+mod portable;
 mod processes;
 mod records;
 mod start;

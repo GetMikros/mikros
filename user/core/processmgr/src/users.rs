@@ -8,7 +8,7 @@
 use crate::processes::Shared;
 use alloc::string::String;
 use alloc::vec::Vec;
-use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
+use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::btrfs::{Subvolumes, SubvolumesAsyncClient};
 use mikros_rt::interfaces::mikros::fs::{
@@ -63,6 +63,21 @@ pub async fn commands(shared: &Shared) -> Result<NodeAsyncClient, Status> {
     let (folder, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
     match installer.commands(server).await {
         Ok(Ok(_)) => Ok(NodeAsyncClient::new(folder, shared.reactor.clone())),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// The manifest of the package that `package` gives, whose files the
+/// install service then serves on `server` (MIKSPEC-0101.R45).
+pub async fn open_package(
+    shared: &Shared,
+    package: ClientEnd<Node>,
+    server: ServerEnd<Node>,
+) -> Result<Vec<u8>, Status> {
+    let installer = installer(shared).await?;
+    match installer.open(package, server).await {
+        Ok(Ok(r)) => Ok(r.manifest),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(Status::PeerClosed),
     }
