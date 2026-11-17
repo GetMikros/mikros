@@ -48,6 +48,10 @@ pub async fn follow(supervisor: Rc<Supervisor>) {
     register_programs(&supervisor, &system, &names).await;
     give_drivers(&supervisor, &system, &drivers).await;
     start_services(&supervisor, new).await;
+    // And those of the packages installed for every user.
+    if let Err(e) = crate::packages::changed(&supervisor).await {
+        mikros_rt::log!(Error, "reading the services of packages failed: {e:?}");
+    }
     *supervisor.root.borrow_mut() = Some((system, config));
     // Every service that starts at boot runs now.
     if let Some(names) = supervisor.selftest.clone() {
@@ -175,7 +179,7 @@ async fn register_programs(
 
 /// Adds the services of `new` and starts the boot services among them,
 /// each after the services it waits for, as at boot.
-async fn start_services(
+pub async fn start_services(
     supervisor: &Rc<Supervisor>,
     new: Vec<(mikros_manifest::Service, Vec<u8>)>,
 ) {

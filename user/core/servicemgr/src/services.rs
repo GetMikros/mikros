@@ -93,6 +93,7 @@ pub async fn start(
         broker: RefCell::new(None),
         active: RefCell::new(BTreeSet::new()),
         held: RefCell::new(BTreeSet::new()),
+        removed: RefCell::new(BTreeSet::new()),
         starting: RefCell::new(BTreeSet::new()),
         restarts: RefCell::new(BTreeMap::new()),
         demanded: RefCell::new(VecDeque::new()),

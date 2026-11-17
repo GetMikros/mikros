@@ -1,6 +1,9 @@
 //! `mikros.service.ServiceControl`, which the service manager serves to
 //! processes with `admin.services.control`, for which the directory has
-//! already asked: `Start`, `Stop` and `Restart` of a service by name.
+//! already asked: `Start`, `Stop` and `Restart` of a service by name; and
+//! `mikros.service.PackageServices`, which it serves to the install
+//! service, which tells it that the services of packages changed
+//! (MIKSPEC-0036.R40).
 
 use crate::directory::{Call, Dir};
 use crate::supervisor::Supervisor;
@@ -10,8 +13,10 @@ use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{
-    ServiceControl, ServiceControlAsyncServer, ServiceControlRequest,
-    ServiceControlRestartResponse, ServiceControlStartResponse, ServiceControlStopResponse,
+    PackageServices, PackageServicesAsyncServer, PackageServicesRequest,
+    PackageServicesServicesChangedResponse, ServiceControl, ServiceControlAsyncServer,
+    ServiceControlRequest, ServiceControlRestartResponse, ServiceControlStartResponse,
+    ServiceControlStopResponse,
 };
 
 /// Serves `ServiceControl` on `end` until it closes. Each call is
@@ -57,6 +62,25 @@ pub fn serve(dir: Rc<Dir>, end: ServerEnd<ServiceControl>) {
     });
 }
 
+/// Serves `PackageServices` to the install service on `end` until it
+/// closes: `ServicesChanged` reads the services of packages again.
+pub fn serve_packages(dir: Rc<Dir>, end: ServerEnd<PackageServices>) {
+    let spawner = dir.spawner().clone();
+    spawner.spawn(async move {
+        let server = PackageServicesAsyncServer::new(end, dir.reactor().clone());
+        while let Ok(PackageServicesRequest::ServicesChanged(_, r)) = server.next().await {
+            let done = match dir.manage() {
+                Some(manage) => manage(Call::ServicesChanged, String::new()).await,
+                None => Err(Status::BadState),
+            };
+            let _ = r.reply(
+                server.server(),
+                done.map(|()| PackageServicesServicesChangedResponse {}),
+            );
+        }
+    });
+}
+
 impl Supervisor {
     /// Does `call` for the service named `name`. Every call fails with
     /// `NOT_FOUND` for a name without a valid manifest, and with
@@ -64,7 +88,13 @@ impl Supervisor {
     /// started. `Stop` and `Restart` fail with `NOT_SUPPORTED` for a
     /// service of the boot image, which keeps running.
     pub async fn manage(self: &Rc<Self>, call: Call, name: &str) -> Result<(), Status> {
+        if call == Call::ServicesChanged {
+            return crate::packages::changed(self).await;
+        }
         let i = self.position(name).ok_or(Status::NotFound)?;
+        if self.removed.borrow().contains(&i) {
+            return Err(Status::NotFound);
+        }
         if call != Call::Start && i < self.boot_services {
             return Err(Status::NotSupported);
         }
@@ -83,6 +113,8 @@ impl Supervisor {
                 }
             }
             (Call::Start | Call::Restart, None) => {}
+            // Answered above.
+            (Call::ServicesChanged, _) => return Ok(()),
         }
         // Nothing else starts it from here on: neither a connection to an
         // idle service nor another call.
@@ -98,7 +130,7 @@ impl Supervisor {
     }
 
     /// The process ID of service `i` while it runs.
-    fn pid(&self, i: usize) -> Option<u32> {
+    pub fn pid(&self, i: usize) -> Option<u32> {
         let running = self.running.borrow();
         running.iter().find(|&&(j, _)| j == i).map(|&(_, pid)| pid)
     }

@@ -19,6 +19,7 @@ mod control;
 mod directory;
 mod launch;
 mod manage;
+mod packages;
 mod registrar;
 mod root;
 mod selftest;

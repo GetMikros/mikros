@@ -442,6 +442,43 @@ impl Namespaces {
         }
     }
 
+    /// Whether `program` is the binary that a service manifest of the
+    /// globally installed package `app_id` names (MIKSPEC-0101.R55).
+    async fn is_package_service(
+        &self,
+        shared: &Shared,
+        ready: &Ready,
+        app_id: &str,
+        program: &str,
+    ) -> bool {
+        if !mikros_mika::id::is_valid(app_id) {
+            return false;
+        }
+        let (root, reactor) = (ready.roots.root(), &shared.reactor);
+        let at = format!("{}/{app_id}", APPS.trim_start_matches('/'));
+        let path = format!("{at}/manifest.yaml");
+        let Ok(manifest) = files::read(root, reactor, &path, SYSTEM_FILE_MAX).await else {
+            return false;
+        };
+        let Ok(manifest) = mikros_mika::manifest::Manifest::parse(&manifest) else {
+            return false;
+        };
+        if manifest.id != app_id {
+            return false;
+        }
+        for (key, path) in &manifest.services {
+            let path = format!("{at}/{path}");
+            let Ok(bytes) = files::read(root, reactor, &path, SYSTEM_FILE_MAX).await else {
+                continue;
+            };
+            let parsed = mikros_manifest::parse_package_service(app_id, key, &bytes);
+            if parsed.is_ok_and(|m| m.service.binary == program) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// The union view of `/system/drivers`: the version's `drivers/` over
     /// the subvolume `drivers`, which holds the installed drivers, read and
     /// execute (MIKSPEC-0100.R19). It is made once; none while the union
@@ -773,7 +810,7 @@ impl Namespaces {
         if let Some(pid) = shared.identity_setter.get() {
             let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
             if let Some(app_id) = app_id {
-                match self.of(shared, &app_id, 0, 0, true, None).await {
+                match self.of(shared, &app_id, 0, 0, true, None, None).await {
                     Ok((_, programs, _)) => {
                         if let Some(record) = shared.records.borrow_mut().get_mut(pid) {
                             record.programs = Rc::new(programs);
@@ -817,7 +854,9 @@ impl Namespaces {
 
     /// The namespace of a new process of `app_id` and `user`, the service
     /// manager that init asked for when `service_manager`, and where the
-    /// programs it names come from.
+    /// programs it names come from. `service_program` is the program when
+    /// the service manager starts it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn of(
         &self,
         shared: &Shared,
@@ -825,6 +864,7 @@ impl Namespaces {
         user: u32,
         admin: u32,
         service_manager: bool,
+        service_program: Option<&str>,
         portable: Option<&Portable>,
     ) -> Result<(Vec<NamespaceEntry>, Programs, Option<App>), Status> {
         let dev = NamespaceEntry {
@@ -911,9 +951,20 @@ impl Namespaces {
         } else if !app_id.starts_with("system.")
             && !(user == 0 && self.installed_driver(shared, app_id).await.is_some())
         {
-            // A native app, which runs for a user.
+            // A native app, which runs for a user, or, for user 0, only
+            // the service of a package installed for every user that the
+            // service manager starts (MIKSPEC-0050.R52, MIKSPEC-0101.R55).
             if user == 0 {
-                return Err(Status::AccessDenied);
+                let service = match (portable, service_program) {
+                    (None, Some(program)) => {
+                        self.is_package_service(shared, &ready, app_id, program)
+                            .await
+                    }
+                    _ => false,
+                };
+                if !service {
+                    return Err(Status::AccessDenied);
+                }
             }
             let started = match portable {
                 Some(portable) => {
@@ -921,7 +972,10 @@ impl Namespaces {
                         .await?
                 }
                 None => {
-                    let name = crate::users::name(shared, user).await?;
+                    let name = match user {
+                        0 => String::new(),
+                        _ => crate::users::name(shared, user).await?,
+                    };
                     self.app(
                         shared,
                         &ready,
@@ -1131,6 +1185,8 @@ impl Namespaces {
         let local = format!("/users/{name}/apps/{app_id}/package");
         let (installed, mode) = match self.entry(shared, ready, &global, Rights::READ).await {
             Ok(_) => (global.clone(), "global"),
+            // A service of user 0 is only one of a global package.
+            Err(Status::NotFound) if user == 0 => return Err(Status::AccessDenied),
             Err(Status::NotFound) => (local.clone(), "local"),
             Err(e) => return Err(e),
         };
@@ -1164,12 +1220,18 @@ impl Namespaces {
             add(entries, origins, commands);
         }
         // The app's own folders of the user, made where they are missing:
-        // the app's folder as a subvolume of its own (MIKSPEC-0101.R38).
-        let folder = format!("/users/{name}/apps/{app_id}");
-        let missing = matches!(
-            self.entry(shared, ready, &folder, Rights::READ).await,
-            Err(Status::NotFound)
-        );
+        // the app's folder as a subvolume of its own (MIKSPEC-0101.R38). A
+        // service of a package has them in /system/state
+        // (MIKSPEC-0101.R55).
+        let folder = match user {
+            0 => format!("{STATE}/apps/{app_id}"),
+            _ => format!("/users/{name}/apps/{app_id}"),
+        };
+        let missing = user != 0
+            && matches!(
+                self.entry(shared, ready, &folder, Rights::READ).await,
+                Err(Status::NotFound)
+            );
         if missing && matches!(ready.roots, Roots::Root(_)) {
             self.apps_folder(shared, ready, name, user).await?;
             match crate::users::subvolume(shared, folder.trim_start_matches('/')).await {

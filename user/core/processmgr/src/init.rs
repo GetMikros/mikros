@@ -203,6 +203,7 @@ impl Manager {
             },
             handles,
             service_manager: true,
+            by_service_manager: false,
             working_directory: "/".into(),
             umask: start::UMASK,
         };

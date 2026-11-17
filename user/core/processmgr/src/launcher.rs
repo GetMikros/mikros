@@ -39,6 +39,7 @@ const INSPECT: u32 = 1 << 9;
 const DEVICE_MANAGER: &str = "system.devicemgr";
 /// The session manager's app ID, the one that may open `Elevations`.
 const SESSION_MANAGER: &str = "system.sessionmgr";
+const SERVICE_MANAGER: &str = "system.servicemgr";
 /// A `user` that means the caller's user ID.
 const CALLER_USER: u32 = u32::MAX;
 /// The signal that ends a process at once.
@@ -282,6 +283,7 @@ async fn new_process(
         arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
         handles: request.handles,
         service_manager: false,
+        by_service_manager: from.app_id == SERVICE_MANAGER,
         working_directory: match &working_entry {
             Some((folder, _)) => folder.clone(),
             None => request.working_directory.unwrap_or_else(|| "/".into()),

@@ -113,6 +113,9 @@ pub struct NewProcess {
     pub handles: Vec<StartupHandle>,
     /// Whether it is the service manager that init asked for.
     pub service_manager: bool,
+    /// Whether the service manager starts it, which may start the
+    /// service of a global package as user 0 (MIKSPEC-0050.R52).
+    pub by_service_manager: bool,
     /// The folder it starts in, as its spawner named it, or `/`.
     pub working_directory: String,
     /// For a command of a package, the folder of its spawner's that holds
@@ -270,6 +273,7 @@ impl Shared {
                 new.user,
                 new.admin,
                 new.service_manager,
+                new.by_service_manager.then_some(new.path.as_str()),
                 new.portable.as_deref(),
             )
             .await?;
@@ -284,8 +288,11 @@ impl Shared {
             }
             in_folder = true;
         }
-        // A portable app's program is found in its package's files first.
-        let from_package = new.portable.as_ref().is_some_and(|p| p.package.is_some());
+        // A portable app's program is found in its package's files first,
+        // and an installed app's in its own namespace, such as a package's
+        // service that the service manager starts (MIKSPEC-0101.R55).
+        let from_package =
+            new.portable.as_ref().is_some_and(|p| p.package.is_some()) || app.is_some();
         let lookup = start::Lookup {
             first: match from_package {
                 true => Some(&programs),

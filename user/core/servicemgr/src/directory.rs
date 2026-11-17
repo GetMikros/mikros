@@ -53,6 +53,9 @@ const CONTROL_PERMISSION: &str = "admin.power.control";
 /// needs.
 const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
 const SERVICE_CONTROL_PERMISSION: &str = "admin.services.control";
+const PACKAGE_SERVICES: &str = "mikros.service.PackageServices";
+/// The only caller of `PackageServices`.
+const INSTALL_SERVICE: &str = "system.pkgsvc";
 const PEER_CLOSED: u32 = 1 << 2;
 /// The start of the names of `admin` permissions.
 const ADMIN_SCOPE: &str = "admin.";
@@ -121,6 +124,9 @@ enum Provider {
     Services,
     /// The service manager's own `ServiceControl`.
     ServiceControl,
+    /// The service manager's own `PackageServices`, for the install
+    /// service only.
+    PackageServices,
 }
 
 /// What the protocols of a service start as.
@@ -152,6 +158,8 @@ pub enum Call {
     Start,
     Stop,
     Restart,
+    /// `ServicesChanged` of the install service (MIKSPEC-0036.R40).
+    ServicesChanged,
 }
 
 /// A named instance of a protocol.
@@ -252,7 +260,13 @@ impl Dir {
                 },
             );
         }
-        for own in [REGISTRAR, CONTROL, SERVICES, SERVICE_CONTROL] {
+        for own in [
+            REGISTRAR,
+            CONTROL,
+            SERVICES,
+            SERVICE_CONTROL,
+            PACKAGE_SERVICES,
+        ] {
             if provided.contains_key(own) {
                 mikros_rt::log!(
                     Error,
@@ -284,6 +298,12 @@ impl Dir {
             provider: Provider::ServiceControl,
         };
         provided.insert(SERVICE_CONTROL.into(), service_control);
+        let package_services = Provided {
+            service: String::new(),
+            permission: None,
+            provider: Provider::PackageServices,
+        };
+        provided.insert(PACKAGE_SERVICES.into(), package_services);
         drop(provided);
         self.ready.set(true);
         for waker in self.waiting.take() {
@@ -336,6 +356,12 @@ impl Dir {
                 },
             );
         }
+    }
+
+    /// Stops providing the protocols of the service `name`, whose
+    /// package was removed.
+    pub fn withdraw(&self, name: &str) {
+        self.provided.borrow_mut().retain(|_, p| p.service != name);
     }
 
     /// Takes the root file system's `/system` and `/system/config` from the
@@ -572,6 +598,14 @@ impl Dir {
                 Provider::ServiceControl => {
                     drop(provided);
                     crate::manage::serve(self.clone(), ServerEnd::new(server));
+                    return Ok(());
+                }
+                Provider::PackageServices => {
+                    drop(provided);
+                    if caller.app_id != INSTALL_SERVICE {
+                        return Err(Status::AccessDenied);
+                    }
+                    crate::manage::serve_packages(self.clone(), ServerEnd::new(server));
                     return Ok(());
                 }
             };

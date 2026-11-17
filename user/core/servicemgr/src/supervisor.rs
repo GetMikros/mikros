@@ -73,6 +73,9 @@ pub struct Supervisor {
     /// The services that `ServiceControl` stopped, which are not
     /// restarted until it starts them.
     pub held: RefCell<BTreeSet<usize>>,
+    /// The services of packages that were removed, which keep their
+    /// places until they come back (MIKSPEC-0101.R55).
+    pub removed: RefCell<BTreeSet<usize>>,
     /// The services that are being started.
     pub starting: RefCell<BTreeSet<usize>>,
     /// When each service was restarted, within the last `WINDOW`.
