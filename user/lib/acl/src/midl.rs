@@ -37,6 +37,7 @@ pub async fn may_manage(
         app_id,
         admin: subject.admin,
         koid: subject.koid,
+        portable_checksum: Default::default(),
     };
     let requested = broker.request(client, MANAGE.into(), REASON.into()).await;
     matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)

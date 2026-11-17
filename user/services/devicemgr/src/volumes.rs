@@ -219,6 +219,7 @@ async fn allowed(m: &Manager, client: &ClientIdentity, permission: &str) -> bool
         app_id: client.app_id.clone(),
         admin: client.admin,
         koid: client.koid,
+        portable_checksum: client.portable_checksum.clone(),
     };
     let reason = format!("{} wants {permission}", client.app_id);
     matches!(

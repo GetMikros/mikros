@@ -1154,6 +1154,7 @@ impl Namespaces {
             app_id: app_id.into(),
             admin,
             koid: 0,
+            portable_checksum: Default::default(),
         };
         shared.permissions.holds(client, false, permission).await
     }
@@ -1167,6 +1168,7 @@ impl Namespaces {
             app_id: app_id.into(),
             admin,
             koid: 0,
+            portable_checksum: Default::default(),
         };
         shared
             .permissions

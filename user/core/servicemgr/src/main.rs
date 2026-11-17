@@ -96,6 +96,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 app_id: core::mem::take(&mut header.app_id),
                 admin: 0,
                 koid: mikros_rt::midl::koid(header.process.raw()).unwrap_or(0),
+                portable_checksum: Default::default(),
             };
             let selftest = selftest::requested(managed.header.arguments.raw());
             let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());

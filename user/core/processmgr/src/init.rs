@@ -301,6 +301,7 @@ fn own_identity(shared: &Shared) -> Result<ClientIdentity, Status> {
         app_id: PROCESS_MANAGER_APP.into(),
         admin: 0,
         koid: koid(&shared.process)?,
+        portable_checksum: Default::default(),
     })
 }
 

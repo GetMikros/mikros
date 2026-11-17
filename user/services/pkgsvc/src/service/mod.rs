@@ -99,6 +99,7 @@ pub fn allowed(
         app_id: caller.app_id.clone(),
         admin: caller.admin,
         koid: caller.koid,
+        portable_checksum: caller.portable_checksum.clone(),
     };
     let requested = broker.request(identity, permission.into(), reason, FOREVER);
     Ok(matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed))

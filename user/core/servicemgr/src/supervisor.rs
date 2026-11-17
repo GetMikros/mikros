@@ -179,6 +179,7 @@ impl Supervisor {
                 app_id: self.me.app_id.clone(),
                 admin: self.me.admin,
                 koid: self.me.koid,
+                portable_checksum: self.me.portable_checksum.clone(),
             };
             let (launcher, boot, reactor) = (&self.launcher, &self.boot, &self.reactor);
             let manifest = &self.manifests.borrow()[i].clone();

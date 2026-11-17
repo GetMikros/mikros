@@ -100,6 +100,7 @@ impl Sources {
             app_id: self.me.app_id.clone(),
             admin: self.me.admin,
             koid: self.me.koid,
+            portable_checksum: self.me.portable_checksum.clone(),
         };
         if provider
             .connect(SOURCES.into(), None, server.into_handle(), me)

@@ -100,5 +100,6 @@ pub fn copy(client: &ClientIdentity) -> ClientIdentity {
         app_id: client.app_id.clone(),
         admin: client.admin,
         koid: client.koid,
+        portable_checksum: client.portable_checksum.clone(),
     }
 }

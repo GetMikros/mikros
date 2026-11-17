@@ -829,6 +829,7 @@ fn clone(identity: &ClientIdentity) -> ClientIdentity {
         app_id: identity.app_id.clone(),
         admin: identity.admin,
         koid: identity.koid,
+        portable_checksum: identity.portable_checksum.clone(),
     }
 }
 

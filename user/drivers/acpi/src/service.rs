@@ -55,6 +55,7 @@ impl Acpi {
             app_id: client.app_id.clone(),
             admin: client.admin,
             koid: client.koid,
+            portable_checksum: client.portable_checksum.clone(),
         };
         let decision = match reason {
             None => broker

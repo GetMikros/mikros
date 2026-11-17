@@ -68,6 +68,7 @@ async fn set_admin(shared: &Shared, koid: u64, admin: u32) -> Result<(), Status>
             app_id: record.app_id.clone(),
             admin,
             koid: record.koid,
+            portable_checksum: Default::default(),
         }
     };
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;

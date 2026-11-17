@@ -239,6 +239,7 @@ fn process(user: u32, app_id: &str, koid: u64) -> ClientIdentity {
         app_id: app_id.into(),
         admin: 0,
         koid,
+        portable_checksum: Default::default(),
     }
 }
 

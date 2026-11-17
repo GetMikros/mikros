@@ -395,6 +395,7 @@ async fn named_app(
             app_id: from.app_id.clone(),
             admin: from.admin,
             koid: from.koid,
+            portable_checksum: Default::default(),
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);
@@ -535,6 +536,7 @@ async fn holds(shared: &Shared, caller: u32, permission: &str) -> bool {
             app_id: from.app_id.clone(),
             admin: from.admin,
             koid: from.koid,
+            portable_checksum: Default::default(),
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);
@@ -640,6 +642,7 @@ async fn kill(
             app_id: from.app_id.clone(),
             admin: from.admin,
             koid: from.koid,
+            portable_checksum: Default::default(),
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);
@@ -789,5 +792,6 @@ fn clone(identity: &ClientIdentity) -> ClientIdentity {
         app_id: identity.app_id.clone(),
         admin: identity.admin,
         koid: identity.koid,
+        portable_checksum: identity.portable_checksum.clone(),
     }
 }

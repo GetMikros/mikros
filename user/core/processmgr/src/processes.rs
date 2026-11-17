@@ -357,6 +357,7 @@ impl Shared {
             app_id: app_id.clone(),
             admin,
             koid: process_koid,
+            portable_checksum: Default::default(),
         };
         let namespace = self.restricted(namespace, &identity).await;
         let transferred = self
