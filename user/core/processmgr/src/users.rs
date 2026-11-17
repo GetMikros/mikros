@@ -1,8 +1,9 @@
 //! What a user's namespace needs from other services: the user's name,
 //! from the accounts service, views that merge directories, from the
-//! union service, and new subvolumes, from the root file system's
-//! subvolume management. All are reached through the process manager's
-//! own directory.
+//! union service, new subvolumes, from the root file system's subvolume
+//! management, and the commands of installed packages and their owners,
+//! from the install service. All are reached through the process
+//! manager's own directory.
 
 use crate::processes::Shared;
 use alloc::string::String;
@@ -10,11 +11,15 @@ use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::btrfs::{Subvolumes, SubvolumesAsyncClient};
-use mikros_rt::interfaces::mikros::fs::{Error, Layer, Node, Rights, Union, UnionAsyncClient};
+use mikros_rt::interfaces::mikros::fs::{
+    Error, Layer, Node, NodeAsyncClient, Rights, Union, UnionAsyncClient,
+};
+use mikros_rt::interfaces::mikros::packages::{Installer, InstallerAsyncClient};
 use mikros_rt::interfaces::mikros::session::{Accounts, AccountsAsyncClient};
 
 const ACCOUNTS: &str = "mikros.session.Accounts";
 const UNION: &str = "mikros.fs.Union";
+const INSTALLER: &str = "mikros.packages.Installer";
 /// The root file system's subvolume management, and its instance.
 const SUBVOLUMES: &str = "device.subvolumes";
 const ROOT: &str = "root";
@@ -41,6 +46,37 @@ async fn connect_to<P>(
         )
         .await;
     matches!(connected, Ok(Ok(_))).then_some(client)
+}
+
+/// The install service.
+async fn installer(shared: &Shared) -> Result<InstallerAsyncClient, Status> {
+    let client = connect::<Installer>(shared, INSTALLER)
+        .await
+        .ok_or(Status::NotFound)?;
+    Ok(InstallerAsyncClient::new(client, shared.reactor.clone()))
+}
+
+/// A connection of the process manager's own to the folder of the
+/// commands of installed packages (MIKSPEC-0101.R43).
+pub async fn commands(shared: &Shared) -> Result<NodeAsyncClient, Status> {
+    let installer = installer(shared).await?;
+    let (folder, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
+    match installer.commands(server).await {
+        Ok(Ok(_)) => Ok(NodeAsyncClient::new(folder, shared.reactor.clone())),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// The ID of the package whose command `name` the user `user` sees
+/// (MIKSPEC-0101.R43).
+pub async fn command_owner(shared: &Shared, name: &str, user: u32) -> Result<String, Status> {
+    let installer = installer(shared).await?;
+    match installer.command_owner(name.into(), user).await {
+        Ok(Ok(r)) => Ok(r.id),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(Status::PeerClosed),
+    }
 }
 
 /// Makes `path`, from the root of the root file system, a new subvolume.

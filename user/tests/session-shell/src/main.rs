@@ -49,7 +49,7 @@ fn expected(name: &str) -> [String; 7] {
         format!("USER={name}"),
         format!("LOGNAME={name}"),
         "SHELL=/system/bin/msh".into(),
-        "PATH=/system/bin".into(),
+        "PATH=/system/bin:/system/commands".into(),
         "TERM=xterm-256color".into(),
         // The process manager's, for the session's `/tmp`.
         "TMPDIR=/tmp".into(),

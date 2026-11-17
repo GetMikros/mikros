@@ -82,6 +82,8 @@ const APPS: &str = "/apps";
 const VOLUMES: &str = "/volumes";
 /// The folders that apps share (MIKSPEC-0101.R33).
 const PUBLIC: &str = "/public";
+/// The folder of the commands of installed packages (MIKSPEC-0101.R44).
+const COMMANDS: &str = "/system/commands";
 /// The permission that lets an app write its installed package
 /// (MIKSPEC-0101.R7).
 const APPS_WRITE: &str = "admin.apps.write";
@@ -145,6 +147,9 @@ pub struct Namespaces {
     /// tmpfs, once it serves, and the tasks that wait for it.
     tmpfs: RefCell<Option<Rc<Tmpfs>>>,
     tmpfs_waiting: RefCell<Vec<Waker>>,
+    /// The process manager's connection to the folder of commands, once
+    /// the install service gave it.
+    commands: RefCell<Option<Rc<NodeAsyncClient>>>,
 }
 
 /// Where an entry of the root table comes from: a directory and the path
@@ -158,16 +163,21 @@ enum Source {
 pub enum Origin {
     /// None may be executed: the entry's rights lack `EXECUTE`.
     None,
+    /// A folder of the root file system at its real path, from which
+    /// none may be executed, and the entry's rights.
+    Folder { real: String, rights: Rights },
     /// A directory of the boot file system, by its path from the root.
     Boot(String),
     /// A directory on a file system server, through a connection of the
     /// process manager's own with the entry's rights, whether it is the
-    /// root's `/system`, whose files are system components, and its path
-    /// on the root file system, when it is a folder there and not a view.
+    /// root's `/system`, whose files are system components, its path on
+    /// the root file system, when it is a folder there and not a view,
+    /// and the entry's rights.
     Dir {
         dir: Rc<NodeAsyncClient>,
         system: bool,
         real: Option<String>,
+        rights: Rights,
     },
 }
 
@@ -189,6 +199,7 @@ impl Programs {
                     dir: root,
                     system: true,
                     real: Some(String::from("/")),
+                    rights: RX,
                 }
             )],
         }
@@ -233,6 +244,44 @@ impl Programs {
         package_of(&self.real_path(path)?).map(String::from)
     }
 
+    /// The name of the command that the absolute `path` reaches through
+    /// the entry `/system/commands` (MIKSPEC-0101.R44).
+    pub fn command_of(&self, path: &str) -> Option<String> {
+        let normal = path::normalize(path)?;
+        let name = normal.strip_prefix(COMMANDS)?.strip_prefix('/')?;
+        let reached = self.entries.iter().any(|(at, _)| at == COMMANDS);
+        let longer = self
+            .entries
+            .iter()
+            .any(|(at, _)| at.len() > COMMANDS.len() && path::overlaps(at, &normal));
+        (reached && !longer && !name.is_empty() && !name.contains('/')).then(|| String::from(name))
+    }
+
+    /// The real path on the root file system of the folder that the
+    /// absolute `path` names, and the rights of the entry it lies in, when
+    /// that entry is a folder there and not a view.
+    pub fn folder_of(&self, path: &str) -> Option<(String, Rights)> {
+        let normal = path::normalize(path)?;
+        let (real, rights, rest) = match self.find(&normal)? {
+            (
+                Origin::Dir {
+                    real: Some(real),
+                    rights,
+                    ..
+                },
+                rest,
+            ) => (real, *rights, rest),
+            (Origin::Folder { real, rights }, rest) => (real, *rights, rest),
+            _ => return None,
+        };
+        Some((join(real, rest), rights))
+    }
+
+    /// Adds the entry at `path`, whose programs come from `origin`.
+    pub fn add(&mut self, path: String, origin: Origin) {
+        self.entries.push((path, origin));
+    }
+
     /// The path on the root file system of the file that the absolute
     /// `path` names, when the entry it lies in is a folder there.
     pub fn real_path(&self, path: &str) -> Option<String> {
@@ -246,10 +295,16 @@ impl Programs {
         else {
             return None;
         };
-        Some(match (real.trim_end_matches('/'), rest) {
-            (real, "") => String::from(real),
-            (real, rest) => format!("{real}/{rest}"),
-        })
+        Some(join(real, rest))
+    }
+}
+
+/// The path `rest` below the folder `real`.
+fn join(real: &str, rest: &str) -> String {
+    match (real.trim_end_matches('/'), rest) {
+        ("", "") => String::from("/"),
+        (real, "") => String::from(real),
+        (real, rest) => format!("{real}/{rest}"),
     }
 }
 
@@ -370,7 +425,72 @@ impl Namespaces {
             ready: RefCell::new(None),
             tmpfs: RefCell::new(None),
             tmpfs_waiting: RefCell::new(Vec::new()),
+            commands: RefCell::new(None),
         }
+    }
+
+    /// The entry `/system/commands`, read and execute, a connection to the
+    /// install service's folder of commands (MIKSPEC-0101.R44), or none
+    /// when the install service cannot give it. Programs come from it
+    /// through a connection of the process manager's own bound to `user`,
+    /// so that the user's own commands are found.
+    async fn commands(&self, shared: &Shared, user: u32) -> Option<(NamespaceEntry, Origin)> {
+        for _ in 0..2 {
+            let kept = self.commands.borrow().clone();
+            let folder = match kept {
+                Some(folder) => folder,
+                None => match crate::users::commands(shared).await {
+                    Ok(folder) => {
+                        let folder = Rc::new(folder);
+                        *self.commands.borrow_mut() = Some(folder.clone());
+                        folder
+                    }
+                    // A system without the install service has no commands
+                    // of packages.
+                    Err(Status::NotFound) => return None,
+                    Err(e) => {
+                        mikros_rt::log!(
+                            Warning,
+                            "process-manager: no {COMMANDS} from the install service ({e:?})"
+                        );
+                        return None;
+                    }
+                },
+            };
+            match (
+                connection(&folder, RX).await,
+                bound(&folder, user, shared).await,
+            ) {
+                (Ok(directory), Ok(programs)) => {
+                    let entry = NamespaceEntry {
+                        path: COMMANDS.into(),
+                        directory,
+                    };
+                    let origin = Origin::Dir {
+                        dir: Rc::new(programs),
+                        system: false,
+                        real: None,
+                        rights: RX,
+                    };
+                    return Some((entry, origin));
+                }
+                // The install service went away: ask it again.
+                _ => *self.commands.borrow_mut() = None,
+            }
+        }
+        None
+    }
+
+    /// The entry of the folder `path` of the root table with `rights`,
+    /// and where the programs below it come from.
+    pub async fn folder(
+        &self,
+        shared: &Shared,
+        path: &str,
+        rights: Rights,
+    ) -> Result<(NamespaceEntry, Origin), Status> {
+        let ready = self.ready.borrow().clone().ok_or(Status::BadState)?;
+        self.entry(shared, &ready, path, rights).await
     }
 
     /// tmpfs, asking through `directory` again until it serves, which
@@ -649,6 +769,9 @@ impl Namespaces {
                 let apps = self.apps_read_only(shared, &ready, name, user, RX).await?;
                 add(&mut entries, &mut origins, apps);
             }
+            if let Some(commands) = self.commands(shared, user).await {
+                add(&mut entries, &mut origins, commands);
+            }
             let budget = shared.user_budget(user)?;
             let tmpfs = self.tmpfs().await;
             add(
@@ -854,6 +977,9 @@ impl Namespaces {
             _ => libraries,
         };
         add(entries, origins, libraries);
+        if let Some(commands) = self.commands(shared, user).await {
+            add(entries, origins, commands);
+        }
         // The app's own folders of the user, made where they are missing:
         // the app's folder as a subvolume of its own (MIKSPEC-0101.R38).
         let folder = format!("/users/{name}/apps/{app_id}");
@@ -911,6 +1037,7 @@ impl Namespaces {
                     dir: Rc::new(view),
                     system: false,
                     real: None,
+                    rights: RWX,
                 },
             ),
         );
@@ -1175,8 +1302,12 @@ impl Namespaces {
                                 dir: Rc::new(made),
                                 system,
                                 real: Some(String::from(normal)),
+                                rights,
                             },
-                            false => Origin::None,
+                            false => Origin::Folder {
+                                real: String::from(normal),
+                                rights,
+                            },
                         };
                         let entry = NamespaceEntry {
                             path: String::from(normal),
@@ -1204,8 +1335,12 @@ impl Namespaces {
                         ),
                         system,
                         real: Some(String::from(normal)),
+                        rights,
                     },
-                    false => Origin::None,
+                    false => Origin::Folder {
+                        real: String::from(normal),
+                        rights,
+                    },
                 };
                 let entry = NamespaceEntry {
                     path: String::from(normal),
@@ -1374,6 +1509,19 @@ async fn live_views(
 }
 
 /// A new connection to the directory `dir` with `rights`.
+/// A connection of the process manager's own to `dir`, read and execute,
+/// bound to `user` alone.
+async fn bound(
+    dir: &NodeAsyncClient,
+    user: u32,
+    shared: &Shared,
+) -> Result<NodeAsyncClient, Status> {
+    let own = NodeAsyncClient::new(connection(dir, RX).await?, shared.reactor.clone());
+    let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
+    flat(own.restrict(user, 0, 0, 0, 0, server).await).map_err(status)?;
+    Ok(NodeAsyncClient::new(client, shared.reactor.clone()))
+}
+
 async fn connection(dir: &NodeAsyncClient, rights: Rights) -> Result<ClientEnd<Node>, Status> {
     let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
     flat(dir.clone(server, rights).await).map_err(status)?;

@@ -234,7 +234,7 @@ async fn resolve(
     let normal = path::normalize(path).ok_or(Status::InvalidArgs)?;
     let (origin, rest) = programs.find(&normal).ok_or(Status::NotFound)?;
     match origin {
-        Origin::None => Err(Status::AccessDenied),
+        Origin::None | Origin::Folder { .. } => Err(Status::AccessDenied),
         Origin::Boot(dir) => {
             let at = match (dir.is_empty(), rest.is_empty()) {
                 (true, _) => String::from(rest),

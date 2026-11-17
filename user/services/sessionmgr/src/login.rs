@@ -37,7 +37,8 @@ const TERM: u32 = 15;
 const KILL: u32 = 9;
 /// How long a session's processes have after `TERM`.
 const GRACE: i64 = 5 * SECOND;
-const PATH: &str = "PATH=/system/bin";
+/// The commands of the system, then those of packages (MIKSPEC-0101.R44).
+const PATH: &str = "PATH=/system/bin:/system/commands";
 const TERM_VALUE: &str = "TERM=xterm-256color";
 /// The numbers of the consoles, and the one that setup runs on.
 const CONSOLES: core::ops::RangeInclusive<u8> = 1..=6;

@@ -191,6 +191,7 @@ impl Manager {
             app_id: SERVICE_MANAGER_APP.into(),
             namespace_of: SERVICE_MANAGER_APP.into(),
             inherits_app: false,
+            working_entry: None,
             user: 0,
             login_session: 0,
             admin: 0,

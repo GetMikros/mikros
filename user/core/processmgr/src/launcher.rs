@@ -16,6 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::fs::Rights;
 use mikros_rt::interfaces::mikros::process::{
     ExitStatus, Launcher, LauncherAsyncServer, LauncherCreateSessionResponse, LauncherExecResponse,
     LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillLoginSessionResponse,
@@ -193,6 +194,12 @@ async fn new_process(
         None => None,
         Some(app_id) => Some(named_app(shared, caller, app_id, program).await?),
     };
+    // A file reached through `/system/commands` starts as the package that
+    // owns the command, in the caller's folder (MIKSPEC-0101.R44).
+    let command = match &named {
+        Some(_) => None,
+        None => command(shared, caller, &request).await?,
+    };
     let commands = crate::commands::of(shared).await;
     let records = shared.records.borrow();
     let from = records.get(caller).ok_or(Status::BadState)?;
@@ -208,16 +215,21 @@ async fn new_process(
     {
         return Err(Status::BadState);
     }
-    // A command's binary, started without an app ID, gets the command's,
-    // and keeps the namespace that its spawner's app ID gives. A program
-    // of an installed package starts as its app, whoever starts it
-    // (MIKSPEC-0034.R45, MIKSPEC-0101.R39).
-    let (app_id, namespace_of) = match named {
+    // Then a program of an installed package starts as its app, whoever
+    // starts it, a command's binary of the system's gets the command's app
+    // ID and keeps the namespace that its spawner's app ID gives, and any
+    // other program keeps its spawner's (MIKSPEC-0101.R44,
+    // MIKSPEC-0101.R39, MIKSPEC-0034.R45).
+    let (command, working_entry) = match command {
+        Some((app_id, entry)) => (Some(app_id), entry),
+        None => (None, None),
+    };
+    let (app_id, namespace_of) = match named.or(command) {
         Some(app_id) => (app_id.clone(), app_id),
-        None => match commands.app_of(shared, program) {
-            Some(command) => (command, from.app_id.clone()),
-            None => match from.programs.package_of(&request.path) {
-                Some(app_id) => (app_id.clone(), app_id),
+        None => match from.programs.package_of(&request.path) {
+            Some(app_id) => (app_id.clone(), app_id),
+            None => match commands.app_of(shared, program) {
+                Some(command) => (command, from.app_id.clone()),
                 None => (from.app_id.clone(), from.app_id.clone()),
             },
         },
@@ -252,7 +264,11 @@ async fn new_process(
         arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
         handles: request.handles,
         service_manager: false,
-        working_directory: request.working_directory.unwrap_or_else(|| "/".into()),
+        working_directory: match &working_entry {
+            Some((folder, _)) => folder.clone(),
+            None => request.working_directory.unwrap_or_else(|| "/".into()),
+        },
+        working_entry,
         umask: match request.umask {
             start::DEFAULT_UMASK => start::UMASK,
             mask => mask & 0o777,
@@ -312,6 +328,37 @@ async fn exec(
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     shared.replace(caller, new, &control).await?;
     Ok(LauncherExecResponse {})
+}
+
+/// The app ID of the package that owns the command that the program of
+/// `request` of process `caller` reaches through its `/system/commands`,
+/// as the install service names it for the new process's user, and the
+/// folder of the caller's namespace that holds the request's working
+/// folder, at its real path, with the rights of the entry it lies in.
+/// `None` for a program reached otherwise.
+async fn command(
+    shared: &Shared,
+    caller: u32,
+    request: &SpawnRequest,
+) -> Result<Option<(String, Option<(String, Rights)>)>, Status> {
+    let (programs, user) = {
+        let records = shared.records.borrow();
+        let from = records.get(caller).ok_or(Status::BadState)?;
+        (from.programs.clone(), from.user)
+    };
+    let Some(name) = programs.command_of(&request.path) else {
+        return Ok(None);
+    };
+    let user = match request.user {
+        CALLER_USER => user,
+        user => user,
+    };
+    let app_id = crate::users::command_owner(shared, &name, user).await?;
+    let entry = request
+        .working_directory
+        .as_deref()
+        .and_then(|folder| programs.folder_of(folder));
+    Ok(Some((app_id, entry)))
 }
 
 /// Whether `program`, a path relative to the root, lies in the installed

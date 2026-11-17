@@ -18,7 +18,7 @@ use mikros_bootfs::server::Fs;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient};
+use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient, Rights};
 use mikros_rt::interfaces::mikros::process::{Launcher, NamespaceEntry, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, ProcessDirectoryAsyncClient,
@@ -114,6 +114,10 @@ pub struct NewProcess {
     pub service_manager: bool,
     /// The folder it starts in, as its spawner named it, or `/`.
     pub working_directory: String,
+    /// For a command of a package, the folder of its spawner's that holds
+    /// that folder, at its real path, and the rights it has there, which
+    /// it gets in its namespace and starts in (MIKSPEC-0101.R44).
+    pub working_entry: Option<(String, Rights)>,
     /// Its file creation mask, as its spawner named it, or 0o022 for the
     /// default.
     pub umask: u32,
@@ -254,7 +258,7 @@ impl Shared {
         let name = new.path.rsplit('/').next().unwrap_or("process");
         let budget = self.budget_of(new.user, &new.app_id)?;
         let namespaces = self.namespaces.clone();
-        let (namespace, programs, app) = namespaces
+        let (mut namespace, mut programs, app) = namespaces
             .of(
                 self,
                 &new.namespace_of,
@@ -263,6 +267,17 @@ impl Shared {
                 new.service_manager,
             )
             .await?;
+        // A command's folder of its spawner, unless the namespace has an
+        // entry at that path already.
+        let mut in_folder = false;
+        if let Some((folder, rights)) = &new.working_entry {
+            if !namespace.iter().any(|e| &e.path == folder) {
+                let (entry, origin) = namespaces.folder(self, folder, *rights).await?;
+                programs.add(entry.path.clone(), origin);
+                namespace.push(entry);
+            }
+            in_folder = true;
+        }
         let lookup = start::Lookup {
             first: new.programs_first.as_deref(),
             then: &new.programs,
@@ -328,7 +343,9 @@ impl Shared {
                 if !inherits_app {
                     variables.push(("HOME", app.folder.as_str()));
                     variables.push(("XDG_CACHE_HOME", cache.as_str()));
-                    working_directory = app.folder.clone();
+                    if !in_folder {
+                        working_directory = app.folder.clone();
+                    }
                 }
                 start::with_variables(arguments, &variables).inspect_err(|_| started.kill())?
             }
