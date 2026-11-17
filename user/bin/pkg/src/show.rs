@@ -109,7 +109,12 @@ pub fn describe(m: &Manifest) -> String {
         ));
     }
     for component in &m.components {
-        text.push_str(&format!("  component: {component}\n"));
+        let optional = if component.optional {
+            " (optional)"
+        } else {
+            ""
+        };
+        text.push_str(&format!("  component: {}{optional}\n", component.path));
     }
     if let Some(driver) = &m.driver {
         text.push_str(&format!("  driver: {driver}\n"));

@@ -681,11 +681,14 @@ async fn run_libraries(
     Ok(())
 }
 
-/// Installs for the user the app `org.example.editor` with its component
-/// `org.example.editor.spell`, a library package inside it, which `List`
-/// then shows as the app's, and checks that a component that the package
-/// does not have is refused and that removing the app removes the
-/// component too (MIKSPEC-0101.R59, MIKSPEC-0101.R60).
+/// Installs for the user the app `org.example.editor` with its required
+/// component `org.example.editor.spell`, which comes without being named,
+/// and later its optional `org.example.editor.themes`, which comes only
+/// once named; `List` shows both as the app's. Checks that a component
+/// that the package does not have is refused, that a package whose
+/// required component breaks the rules installs nothing, and that
+/// removing the app removes its components too (MIKSPEC-0101.R64,
+/// MIKSPEC-0101.R65, MIKSPEC-0101.R60).
 async fn run_components(
     shell: &Shell<'_>,
     installer: &mikros_rt::interfaces::mikros::packages::InstallerAsyncClient,
@@ -694,55 +697,97 @@ async fn run_components(
     use mikros_mika::format::{Builder, MANIFEST, checksum_text};
     use mikros_rt::interfaces::mikros::base::Status;
     const APP: &str = "org.example.editor";
+    const BROKEN: &str = "org.example.broken";
     const SPELL: &str = "org.example.editor.spell";
+    const THEMES: &str = "org.example.editor.themes";
     const FILE: &str = "editor.mika";
-    const COMPONENT: &str = "plugins/spell.mika";
-    let mut inner = Builder::default();
-    inner.file("words.txt", b"word".to_vec(), false);
-    let checksum = checksum_text(&inner.checksum(None));
-    let manifest = format!(
-        "id: {SPELL}\nkind: library\nversion: 1.0.0\nname: Spelling\n\
-         description: Checks spelling.\ninstall: local\nchecksum: {checksum}\n"
-    );
-    inner.file(MANIFEST, manifest.into_bytes(), false);
-    let app = format!(
-        "id: {APP}\nkind: app\nversion: 1.0.0\nname: Editor\ndescription: Edits.\n\
-         executable: bin/editor\ninstall: local\ncomponents: [{COMPONENT}]\n"
-    );
+    // A local library package of `id`, as a component.
+    let library = |id: &str| {
+        let mut inner = Builder::default();
+        inner.file("words.txt", b"word".to_vec(), false);
+        let checksum = checksum_text(&inner.checksum(None));
+        let manifest = format!(
+            "id: {id}\nkind: library\nversion: 1.0.0\nname: Part\n\
+             description: A part.\ninstall: local\nchecksum: {checksum}\n"
+        );
+        inner.file(MANIFEST, manifest.into_bytes(), false);
+        inner.finish()
+    };
+    let components = "components:\n  - plugins/spell.mika\n  \
+                      - path: plugins/themes.mika\n    optional: true\n";
+    let manifest = |id: &str| {
+        format!(
+            "id: {id}\nkind: app\nversion: 1.0.0\nname: Editor\ndescription: Edits.\n\
+             executable: bin/editor\ninstall: local\n{components}"
+        )
+    };
     let files = [
         ("bin/editor", b"editor".to_vec()),
-        (COMPONENT, inner.finish()),
+        ("plugins/spell.mika", library(SPELL)),
+        ("plugins/themes.mika", library(THEMES)),
     ];
-    let file = pack(shell, FILE, &app, &files, 81, reactor).await?;
-    let install = |components: Vec<String>, code: i64| {
-        let file = &file;
-        async move {
-            let (client, server) = endpoints::<Node>().map_err(|_| code)?;
-            let cloned = file.clone(server, Rights::READ).await;
-            check(matches!(cloned, Ok(Ok(_))), code)?;
-            installer
-                .install(client, components, false, false, vec![])
-                .await
-                .map_err(|_| code)
+    let listed = || async {
+        match installer.list(String::new()).await {
+            Ok(Ok(r)) => r.packages,
+            _ => Vec::new(),
         }
     };
+    // A package whose required component's ID is not its own's: nothing
+    // is installed.
+    let broken = pack(shell, FILE, &manifest(BROKEN), &files, 81, reactor).await?;
+    let refused = install_from(installer, &broken, Vec::new(), 81).await?;
+    check(matches!(refused, Err(Status::InvalidArgs)), 81)?;
+    check(!listed().await.iter().any(|p| p.id == BROKEN), 81)?;
+    let file = pack(shell, FILE, &manifest(APP), &files, 82, reactor).await?;
     // A component that the package does not have.
-    let wrong = install(vec!["plugins/none.mika".into()], 81).await?;
-    check(matches!(wrong, Err(Status::InvalidArgs)), 81)?;
-    let installed = install(vec![COMPONENT.into()], 82).await?;
-    check(installed.is_ok(), 82)?;
-    let listed = installer.list(String::new()).await;
-    let owned = matches!(&listed, Ok(Ok(r)) if r.packages.iter().any(|p| {
-        p.id == SPELL && p.owner == APP && !p.global
-    }));
-    check(owned, 83)?;
+    let wrong = install_from(installer, &file, vec!["plugins/none.mika".into()], 82).await?;
+    check(matches!(wrong, Err(Status::InvalidArgs)), 82)?;
+    let installed = install_from(installer, &file, Vec::new(), 83).await?;
+    check(installed.is_ok(), 83)?;
+    let packages = listed().await;
+    let owned = |id: &str| {
+        packages
+            .iter()
+            .any(|p| p.id == id && p.owner == APP && !p.global)
+    };
+    check(owned(SPELL) && !packages.iter().any(|p| p.id == THEMES), 84)?;
+    // The optional one, asked for later.
+    let installed = install_from(installer, &file, vec!["plugins/themes.mika".into()], 85).await?;
+    check(installed.is_ok(), 85)?;
+    let packages = listed().await;
+    let owned = |id: &str| {
+        packages
+            .iter()
+            .any(|p| p.id == id && p.owner == APP && !p.global)
+    };
+    check(owned(SPELL) && owned(THEMES), 85)?;
     let removed = installer.remove(APP.into(), false, false).await;
-    check(matches!(removed, Ok(Ok(_))), 84)?;
-    let listed = installer.list(String::new()).await;
-    let gone = matches!(&listed, Ok(Ok(r)) if !r.packages.iter().any(|p| p.id == SPELL));
-    check(gone, 84)?;
+    check(matches!(removed, Ok(Ok(_))), 86)?;
+    let packages = listed().await;
+    check(
+        !packages.iter().any(|p| p.id == SPELL || p.id == THEMES),
+        86,
+    )?;
     let unlinked = shell.home.unlink(FILE.into(), false).await;
-    check(matches!(unlinked, Ok(Ok(_))), 84)
+    check(matches!(unlinked, Ok(Ok(_))), 86)
+}
+
+/// What `Install` of the package `file` with `components` gives; fails
+/// with `code` when it cannot be called.
+async fn install_from(
+    installer: &mikros_rt::interfaces::mikros::packages::InstallerAsyncClient,
+    file: &NodeAsyncClient,
+    components: Vec<String>,
+    code: i64,
+) -> Result<Result<(), mikros_rt::interfaces::mikros::base::Status>, i64> {
+    let (client, server) = endpoints::<Node>().map_err(|_| code)?;
+    let cloned = file.clone(server, Rights::READ).await;
+    check(matches!(cloned, Ok(Ok(_))), code)?;
+    let installed = installer
+        .install(client, components, false, false, vec![])
+        .await
+        .map_err(|_| code)?;
+    Ok(installed.map(|_| ()))
 }
 
 /// Packs `files`, each executable, with the manifest `manifest` and its
@@ -782,8 +827,13 @@ async fn pack(
 ) -> Result<NodeAsyncClient, i64> {
     use mikros_mika::format::{Builder, MANIFEST, checksum_text};
     let mut builder = Builder::default();
+    // Each folder once, before the files in it.
+    let mut folders = Vec::new();
     for (path, bytes) in files {
-        if let Some((folder, _)) = path.rsplit_once('/') {
+        if let Some((folder, _)) = path.rsplit_once('/')
+            && !folders.contains(&folder)
+        {
+            folders.push(folder);
             builder.folder(folder);
         }
         builder.file(path, bytes.clone(), true);

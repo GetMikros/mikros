@@ -15,7 +15,12 @@ portable: false
 install: local
 needs:
   org.example.lib: '>=1.0.0,<2.0.0'
-components: [plugins/spell.mika]
+components:
+  - plugins/spell.mika
+  - path: plugins/themes.mika
+    optional: true
+  - path: plugins/fonts.mika
+    optional: false
 bins:
   - name: edit
     path: bin/editor
@@ -35,7 +40,18 @@ fn reads_every_key() {
     assert!(!m.portable && m.installable && !m.global);
     assert_eq!(m.needs.len(), 1);
     assert_eq!(m.needs[0].0, "org.example.lib");
-    assert_eq!(m.components, ["plugins/spell.mika"]);
+    let component = |path: &str, optional| Component {
+        path: path.into(),
+        optional,
+    };
+    assert_eq!(
+        m.components,
+        [
+            component("plugins/spell.mika", false),
+            component("plugins/themes.mika", true),
+            component("plugins/fonts.mika", false),
+        ]
+    );
     assert_eq!(m.bins[0].name, "edit");
     assert_eq!(m.services[0].0, "indexer");
     assert!(m.check().is_ok());
@@ -91,6 +107,12 @@ fn refuses_keys_in_the_wrong_form() {
         ("icon: share/icon.png", "icon: ../icon.png", "icon"),
         ("portable: false", "portable: maybe", "portable"),
         ("install: local", "install: everywhere", "install"),
+        ("optional: true", "optional: maybe", "components"),
+        (
+            "path: plugins/themes.mika",
+            "file: plugins/themes.mika",
+            "components",
+        ),
         ("kind: app", "kind: driver", "install"),
         ("'>=1.0.0,<2.0.0'", "'~1.0'", "needs"),
         ("org.example.lib:", "Lib:", "needs"),

@@ -168,13 +168,17 @@ fn install(
             continue;
         }
         let mut components = Vec::new();
+        // Only optional components are asked for (MIKSPEC-0101.R63).
         for component in &manifest.components {
-            println!("component {component} of {}", manifest.id);
-            if let Some(m) = component_of(file, component) {
+            let path = &component.path;
+            println!("component {path} of {}", manifest.id);
+            if let Some(m) = component_of(file, path) {
                 print!("{}", show::describe(&m));
             }
-            if agrees(&format!("install {component}? [y/N] ")) {
-                components.push(component.clone());
+            if !component.optional {
+                println!("installed with it");
+            } else if agrees(&format!("install {path}? [y/N] ")) {
+                components.push(path.clone());
             }
         }
         // A command that another installed package has stays with it

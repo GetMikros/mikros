@@ -4,9 +4,11 @@
 //! as its manifest's `install` says (MIKSPEC-0101.R61). A global install asks the broker for the
 //! permission of the package's kind first (MIKSPEC-0101.R43). A package
 //! with a command that a program in `/system/bin` has is refused
-//! (MIKSPEC-0101.R44). The components that `Install` names, and those
-//! of the package that are installed, are installed after it, each in
-//! the place its own manifest names (MIKSPEC-0101.R59).
+//! (MIKSPEC-0101.R44). Its required components, the optional ones that
+//! `Install` names and those of it that are installed are installed after
+//! it, each in the place its own manifest names, and everything is
+//! checked, and the permission asked for once, before anything is
+//! written (MIKSPEC-0101.R64, MIKSPEC-0101.R65).
 
 use super::files::{Root, user_name};
 use super::{Given, Shared, check, open};
@@ -72,13 +74,13 @@ fn installed_any(root: &Root, id: &str, scope: &Scope) -> Option<Version> {
         .find_map(|kind| installed(root, kind, id, scope))
 }
 
-/// A component (MIKSPEC-0101.R59) of a package being installed, read
+/// A component (MIKSPEC-0101.R65) of a package being installed, read
 /// from its file in the package, and where it goes.
 struct Component {
     bytes: Vec<u8>,
     package: Package,
     manifest: Manifest,
-    global: bool,
+    optional: bool,
 }
 
 /// The component at `path` in `package`, whose manifest is `owner`:
@@ -89,6 +91,7 @@ fn component(
     given: &Given,
     owner: &Manifest,
     path: &str,
+    optional: bool,
 ) -> Result<Component, Status> {
     let entry = package.find(path).ok_or(Status::InvalidArgs)?;
     let bytes = package
@@ -98,12 +101,11 @@ fn component(
     if !manifest.id.starts_with(&format!("{}.", owner.id)) {
         return Err(Status::InvalidArgs);
     }
-    let global = manifest.global;
     Ok(Component {
         package: inner,
         bytes,
         manifest,
-        global,
+        optional,
     })
 }
 
@@ -113,11 +115,17 @@ struct One<'a, S: format::Source + ?Sized> {
     source: &'a S,
     package: &'a Package,
     manifest: &'a Manifest,
-    global: bool,
     owner_of: Option<(&'a str, Owner)>,
     dependency: bool,
     dev: bool,
     commands: &'a [String],
+}
+
+/// Where a checked install goes.
+struct Checked {
+    kind: Kind,
+    scope: Scope,
+    owner: Owner,
 }
 
 pub fn install(
@@ -127,75 +135,115 @@ pub fn install(
 ) -> Result<(), Status> {
     let given = Given(NodeClient::new(q.package));
     let (package, manifest, _) = open(&given)?;
-    // The components it names, and those of it that are installed, which
-    // are updated with it, all checked before anything is written.
+    if let Some(path) = q
+        .components
+        .iter()
+        .find(|c| !manifest.components.iter().any(|m| &m.path == *c))
+    {
+        eprintln!("pkgsvc: {} has no component {path}", manifest.id);
+        return Err(Status::InvalidArgs);
+    }
+    // Every required component, the optional ones it names and those of
+    // it that are installed, which are updated with it (MIKSPEC-0101.R65).
     let (_, owner) = scope(shared, caller, manifest.global)?;
-    let records = shared.root()?.records()?;
+    let root = shared.root()?;
+    let records = root.records()?;
     let mut components = Vec::new();
-    for path in &manifest.components {
-        let named = q.components.iter().any(|c| c == path);
-        let component = match component(&package, &given, &manifest, path) {
-            Ok(component) => component,
-            Err(e) if named => return Err(e),
-            Err(_) => continue,
-        };
+    for c in &manifest.components {
+        let named = q.components.contains(&c.path);
+        let component = component(&package, &given, &manifest, &c.path, c.optional)?;
         let installed = records.0.iter().any(|((s, id), r)| {
             *id == component.manifest.id
                 && r.owner.as_deref() == Some(manifest.id.as_str())
                 && r.owner_in.unwrap_or(*s) == owner
         });
-        if named || installed {
+        if !c.optional || named || installed {
             components.push(component);
         }
     }
-    if let Some(path) = q
-        .components
-        .iter()
-        .find(|c| !manifest.components.contains(c))
-    {
-        eprintln!("pkgsvc: {} has no component {path}", manifest.id);
-        return Err(Status::InvalidArgs);
-    }
-    let one = One {
+    let package_one = One {
         source: &given,
         package: &package,
         manifest: &manifest,
-        global: manifest.global,
         owner_of: None,
         dependency: q.dependency,
         dev: q.dev,
         commands: &q.commands,
     };
-    if !install_one(shared, caller, one)? {
-        return Err(Status::AccessDenied);
-    }
-    for c in &components {
-        let one = One {
+    let ones: Vec<One<'_, [u8]>> = components
+        .iter()
+        .map(|c| One {
             source: &c.bytes[..],
             package: &c.package,
             manifest: &c.manifest,
-            global: c.global,
-            owner_of: Some((&manifest.id, owner)),
+            owner_of: Some((manifest.id.as_str(), owner)),
             dependency: false,
             dev: q.dev,
             commands: &[],
-        };
-        // One that needs a permission that is not granted is left out.
-        if !install_one(shared, caller, one)? {
-            eprintln!("pkgsvc: {} is left out", c.manifest.id);
-        }
+        })
+        .collect();
+    // Everything is checked before anything is written; what this
+    // install brings may satisfy what its components need.
+    let coming: Vec<(&str, Option<&Version>)> = core::iter::once(&manifest)
+        .chain(components.iter().map(|c| &c.manifest))
+        .map(|m| (m.id.as_str(), m.version.as_ref()))
+        .collect();
+    let checked = check_one(shared, caller, &root, &package_one, &coming)?;
+    let mut checked_ones = Vec::new();
+    for one in &ones {
+        checked_ones.push(check_one(shared, caller, &root, one, &coming)?);
     }
-    super::kept::clean(shared, &*shared.root()?)
+    // admin.packages.install, asked for once for everything that goes
+    // for every user; an optional component is left out without it.
+    let global: Vec<&Manifest> = core::iter::once((&checked, &manifest))
+        .chain(
+            checked_ones
+                .iter()
+                .zip(components.iter().map(|c| &c.manifest)),
+        )
+        .filter(|(c, _)| c.scope == Scope::Global)
+        .map(|(_, m)| m)
+        .collect();
+    let allowed =
+        global.is_empty() || super::request(shared, caller, PERMISSION, &reason(&global))?;
+    let needed = checked.scope == Scope::Global
+        || checked_ones
+            .iter()
+            .zip(&components)
+            .any(|(c, component)| c.scope == Scope::Global && !component.optional);
+    if !allowed && needed {
+        return Err(Status::AccessDenied);
+    }
+    write_one(shared, &root, package_one, checked)?;
+    for ((one, checked), c) in ones.into_iter().zip(checked_ones).zip(&components) {
+        if !allowed && checked.scope == Scope::Global {
+            eprintln!("pkgsvc: the optional {} is left out", c.manifest.id);
+            continue;
+        }
+        write_one(shared, &root, one, checked)?;
+    }
+    super::kept::clean(shared, &root)
 }
 
-/// Installs what `one` describes, once checked: false, with nothing
-/// written, when it needs `admin.packages.install`, which is not
-/// granted.
-fn install_one<S: format::Source + ?Sized>(
+/// The reason given with the question for `admin.packages.install`: the
+/// packages of `global`, which go for every user.
+fn reason(global: &[&Manifest]) -> String {
+    let names: Vec<String> = global
+        .iter()
+        .map(|m| format!("{} ({})", m.name.as_deref().unwrap_or(&m.id), m.id))
+        .collect();
+    format!("install {} for every user", names.join(", "))
+}
+
+/// Checks what `one` installs, where the packages of `coming` are about
+/// to be installed too, and where it goes.
+fn check_one<S: format::Source + ?Sized>(
     shared: &Shared,
     caller: &ClientIdentity,
-    one: One<'_, S>,
-) -> Result<bool, Status> {
+    root: &Root,
+    one: &One<'_, S>,
+    coming: &[(&str, Option<&Version>)],
+) -> Result<Checked, Status> {
     let (package, manifest) = (one.package, one.manifest);
     let kind = manifest.kind.ok_or(Status::InvalidArgs)?;
     if kind == Kind::Driver {
@@ -205,26 +253,25 @@ fn install_one<S: format::Source + ?Sized>(
     if !manifest.installable {
         return Err(Status::InvalidArgs);
     }
-    if kind == Kind::Driver && !one.global {
+    if kind == Kind::Driver && !manifest.global {
         return Err(Status::InvalidArgs);
     }
-    let root = shared.root()?;
     // A command of the system's keeps its name (MIKSPEC-0101.R44).
-    if let Some(bin) = manifest.bins.iter().find(|b| system_has(&root, &b.name)) {
+    if let Some(bin) = manifest.bins.iter().find(|b| system_has(root, &b.name)) {
         eprintln!(
             "pkgsvc: {} has the command {} of the system",
             manifest.id, bin.name
         );
         return Err(Status::AlreadyExists);
     }
-    let (scope, owner) = scope(shared, caller, one.global)?;
+    let (scope, owner) = scope(shared, caller, manifest.global)?;
     // Not for every user and for this user at once.
     let other = match &scope {
         Scope::Global => scope_of_caller(shared, caller).ok(),
         Scope::Local(_) => Some(Scope::Global),
     };
     if let Some(other) = other
-        && installed_any(&root, &manifest.id, &other).is_some()
+        && installed_any(root, &manifest.id, &other).is_some()
     {
         return Err(Status::AlreadyExists);
     }
@@ -234,7 +281,13 @@ fn install_one<S: format::Source + ?Sized>(
         let found = [Some(Scope::Global), local]
             .into_iter()
             .flatten()
-            .filter_map(|s| installed_any(&root, needed, &s))
+            .filter_map(|s| installed_any(root, needed, &s))
+            .chain(
+                coming
+                    .iter()
+                    .filter(|(id, _)| id == needed)
+                    .filter_map(|(_, v)| v.cloned()),
+            )
             .any(|version| range.contains(&version));
         if !found {
             eprintln!(
@@ -244,28 +297,36 @@ fn install_one<S: format::Source + ?Sized>(
             return Err(Status::NotFound);
         }
     }
-    if scope == Scope::Global && !super::allowed(shared, caller, PERMISSION, manifest, "install")? {
-        return Ok(false);
-    }
+    Ok(Checked { kind, scope, owner })
+}
+
+/// Writes what `one` installs, checked as `checked`.
+fn write_one<S: format::Source + ?Sized>(
+    shared: &Shared,
+    root: &Root,
+    one: One<'_, S>,
+    checked: Checked,
+) -> Result<(), Status> {
+    let (package, manifest) = (one.package, one.manifest);
+    let Checked { kind, scope, owner } = checked;
     let at = place::subvolume(kind, &manifest.id, &scope).ok_or(Status::InvalidArgs)?;
     // What the scope's other packages have of its commands.
-    let others = super::commands::others(&root, &scope, &manifest.id)?;
+    let others = super::commands::others(root, &scope, &manifest.id)?;
     // An old version of a library that a program still needs is kept
     // (MIKSPEC-0101.R51).
-    let old = installed(&root, kind, &manifest.id, &scope);
+    let old = installed(root, kind, &manifest.id, &scope);
     let old_manifest = old.as_ref().and_then(|_| {
-        let at = place::subvolume(kind, &manifest.id, &scope)?;
         Manifest::parse(&root.read(&format!("{at}/{}", format::MANIFEST)).ok()?).ok()
     });
     let keep = match (kind, &scope, old) {
         (Kind::Library, Scope::Global, Some(old)) => {
             let new = super::kept::package_files(package, one.dev);
-            super::kept::keep_old(shared, &root, &manifest.id, &at, &old.to_string(), &new)?
+            super::kept::keep_old(shared, root, &manifest.id, &at, &old.to_string(), &new)?
         }
         _ => None,
     };
     write(
-        &root,
+        root,
         shared,
         one.source,
         package,
@@ -286,10 +347,10 @@ fn install_one<S: format::Source + ?Sized>(
     );
     root.write_records(&records)?;
     let names: Vec<String> = manifest.bins.iter().map(|b| b.name.clone()).collect();
-    super::commands::installed(&root, owner, &manifest.id, &names, one.commands, &others)?;
+    super::commands::installed(root, owner, &manifest.id, &names, one.commands, &others)?;
     // A driver marked for boot changes the boot list (MIKSPEC-0101.R20).
     if kind == Kind::Driver {
-        super::drivers::boot_modules_changed(shared, &root)?;
+        super::drivers::boot_modules_changed(shared, root)?;
     }
     // The services of global packages run from their own folders, and
     // the service manager learns of them (MIKSPEC-0101.R55).
@@ -298,11 +359,11 @@ fn install_one<S: format::Source + ?Sized>(
         .is_some_and(|m| !m.services.is_empty());
     if scope == Scope::Global && (!manifest.services.is_empty() || old_services) {
         if !manifest.services.is_empty() {
-            super::services::make_folders(&root, &manifest.id)?;
+            super::services::make_folders(root, &manifest.id)?;
         }
         super::services::changed(shared);
     }
-    Ok(true)
+    Ok(())
 }
 
 /// The scope of the caller's own user.

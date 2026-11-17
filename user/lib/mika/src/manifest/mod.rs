@@ -25,6 +25,14 @@ pub struct Bin {
     pub path: String,
 }
 
+/// A package inside the package, required unless it is optional
+/// (MIKSPEC-0101.R62).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Component {
+    pub path: String,
+    pub optional: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub id: String,
@@ -41,10 +49,10 @@ pub struct Manifest {
     pub portable: bool,
     pub installable: bool,
     /// Whether the package is installed for every user, as `install`
-    /// says, which nothing changes (MIKSPEC-0101.R61).
+    /// says, which nothing changes (MIKSPEC-0101.R62).
     pub global: bool,
     pub needs: Vec<(String, Range)>,
-    pub components: Vec<String>,
+    pub components: Vec<Component>,
     pub bins: Vec<Bin>,
     pub services: Vec<(String, String)>,
     pub driver: Option<String>,
@@ -190,6 +198,37 @@ impl Manifest {
                 needs.push((entry.key.clone(), range));
             }
         }
+        let mut components = Vec::new();
+        if let Some(n) = map.get("components") {
+            let Ok(list) = n.list() else {
+                return error("components", "is not a list");
+            };
+            for item in list {
+                let component = match item.map() {
+                    Err(_) => Component {
+                        path: path(item, "components")?,
+                        optional: false,
+                    },
+                    Ok(entry) => {
+                        let Some(at) = entry.get("path") else {
+                            return error("components", "holds a map without a path");
+                        };
+                        let optional = match entry.get("optional") {
+                            None => false,
+                            Some(n) => n.boolean().or(error(
+                                "components",
+                                "has optional that is not true or false",
+                            ))?,
+                        };
+                        Component {
+                            path: path(at, "components")?,
+                            optional,
+                        }
+                    }
+                };
+                components.push(component);
+            }
+        }
         let mut bins = Vec::new();
         if let Some(n) = map.get("bins") {
             let Ok(list) = n.list() else {
@@ -237,7 +276,7 @@ impl Manifest {
             installable: boolean(map.get("installable"), "installable")?,
             global,
             needs,
-            components: list("components")?,
+            components,
             bins,
             services,
             driver: one_path("driver")?,
@@ -295,7 +334,7 @@ impl Manifest {
             .chain(&self.recordings)
             .chain(&self.signature)
             .chain(&self.executable)
-            .chain(&self.components)
+            .chain(self.components.iter().map(|c| &c.path))
             .chain(self.bins.iter().map(|b| &b.path))
             .chain(self.services.iter().map(|s| &s.1))
             .chain(&self.driver);
