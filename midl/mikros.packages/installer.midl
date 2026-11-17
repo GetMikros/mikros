@@ -1,4 +1,4 @@
-// MIKSPEC-0101.R43
+// MIKSPEC-0101.R45
 
 library mikros.packages;
 using mikros.base;
@@ -28,4 +28,7 @@ protocol Installer {
     @6 CommandOwner(name string<255>, user u32) -> (id string<128>)
         error base.Status;
     @7 Commands(server server_end<mikros.fs.Node>) -> () error base.Status;
+    @8 Open(package client_end<mikros.fs.Node>,
+            server server_end<mikros.fs.Node>)
+        -> (manifest vector<u8, 32768>) error base.Status;
 };

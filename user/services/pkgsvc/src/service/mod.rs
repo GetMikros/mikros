@@ -1,4 +1,4 @@
-//! pkgsvc on Mikros: it serves `mikros.packages.Installer` on each
+//! pkgsvc on Mikros (MIKSPEC-0101.R45): it serves `mikros.packages.Installer` on each
 //! connection that the service manager forwards, on a thread of its own,
 //! and works on the root file system, which it connects to itself
 //! (MIKSPEC-0101.R37).
@@ -7,6 +7,7 @@ mod commands;
 mod files;
 mod install;
 mod list;
+mod package;
 mod remove;
 
 use files::{Root, Subvolumes};
@@ -17,8 +18,8 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeClient};
 use mikros_rt::interfaces::mikros::packages::{
     Installer, InstallerCommandOwnerResponse, InstallerCommandsResponse, InstallerInspectResponse,
-    InstallerInstallResponse, InstallerListResponse, InstallerRemoveResponse, InstallerRequest,
-    InstallerServer,
+    InstallerInstallResponse, InstallerListResponse, InstallerOpenResponse,
+    InstallerRemoveResponse, InstallerRequest, InstallerServer,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
@@ -32,6 +33,8 @@ use std::sync::{Arc, Mutex};
 /// The role of the provider among the startup handles.
 const PROVIDER: u32 = 4;
 const INSTALLER: &str = "mikros.packages.Installer";
+/// The only caller of `Open`.
+const PROCESS_MANAGER: &str = "system.processmgr";
 const BROKER: &str = "mikros.permissions.Broker";
 pub const FOREVER: i64 = i64::MAX;
 const SAME_RIGHTS: u32 = 1 << 31;
@@ -153,6 +156,26 @@ pub fn open(package: &Given) -> Result<(Package, Manifest, Vec<u8>), Status> {
     Ok((checked, manifest, bytes))
 }
 
+/// Checks the package that `package` gives, serves its files on `server`
+/// and returns its manifest, for the process manager only
+/// (MIKSPEC-0101.R45).
+fn open_package(
+    caller: &ClientIdentity,
+    package: ClientEnd<Node>,
+    server: ServerEnd<Node>,
+) -> Result<InstallerOpenResponse, Status> {
+    if caller.app_id != PROCESS_MANAGER {
+        return Err(Status::AccessDenied);
+    }
+    let given = Given(NodeClient::new(package));
+    let (checked, _, manifest) = open(&given)?;
+    if manifest.len() > MANIFEST_MAX {
+        return Err(Status::InvalidArgs);
+    }
+    package::serve_package(checked, given, server);
+    Ok(InstallerOpenResponse { manifest })
+}
+
 fn inspect(package: ClientEnd<Node>) -> Result<InstallerInspectResponse, Status> {
     let (_, _, manifest) = open(&Given(NodeClient::new(package)))?;
     if manifest.len() > MANIFEST_MAX {
@@ -189,6 +212,7 @@ fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity)
                 commands::command_owner(&shared, &caller, &q.name, q.user)
                     .map(|id| InstallerCommandOwnerResponse { id }),
             ),
+            R::Open(q, r) => r.reply(s, open_package(&caller, q.package, q.server)),
             R::Commands(q, r) => r.reply(
                 s,
                 commands::commands(&shared, &caller, q.server)
