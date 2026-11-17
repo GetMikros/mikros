@@ -49,14 +49,7 @@ impl Acpi {
         let Some(broker) = &self.broker else {
             return false;
         };
-        let client = ClientIdentity {
-            pid: client.pid,
-            user: client.user,
-            app_id: client.app_id.clone(),
-            admin: client.admin,
-            koid: client.koid,
-            portable_checksum: client.portable_checksum.clone(),
-        };
+        let client = client.clone();
         let decision = match reason {
             None => broker
                 .check(client, POWER_CONTROL.into())

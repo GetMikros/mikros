@@ -71,14 +71,7 @@ pub async fn start(
         }
     });
     let start = order.start.clone();
-    let own = ClientIdentity {
-        pid: me.pid,
-        user: me.user,
-        app_id: me.app_id.clone(),
-        admin: me.admin,
-        koid: me.koid,
-        portable_checksum: me.portable_checksum.clone(),
-    };
+    let own = me.clone();
     let sources = Sources::new(own, reactor.clone(), dir.spawner().clone());
     let supervisor = Rc::new(Supervisor {
         launcher,

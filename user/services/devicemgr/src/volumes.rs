@@ -213,14 +213,7 @@ async fn allowed(m: &Manager, client: &ClientIdentity, permission: &str) -> bool
     let Some(broker) = &m.starter.broker else {
         return false;
     };
-    let client = ClientIdentity {
-        pid: client.pid,
-        user: client.user,
-        app_id: client.app_id.clone(),
-        admin: client.admin,
-        koid: client.koid,
-        portable_checksum: client.portable_checksum.clone(),
-    };
+    let client = client.clone();
     let reason = format!("{} wants {permission}", client.app_id);
     matches!(
         broker.request(client, permission.into(), reason).await,

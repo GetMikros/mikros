@@ -191,17 +191,6 @@ fn identity(client: &ClientIdentity) -> Identity<'_> {
     }
 }
 
-fn copy(client: &ClientIdentity) -> ClientIdentity {
-    ClientIdentity {
-        pid: client.pid,
-        user: client.user,
-        app_id: client.app_id.clone(),
-        admin: client.admin,
-        koid: client.koid,
-        portable_checksum: client.portable_checksum.clone(),
-    }
-}
-
 /// Logs that `permission` was allowed to `client` only because an
 /// administrator elevated it.
 fn log_elevated(client: &ClientIdentity, permission: &str) {
@@ -262,7 +251,7 @@ impl Inner {
         }
         let authorization = AuthorizationAsyncClient::new(authorization, self.reactor.clone());
         let answer = authorization
-            .authorize(copy(client), permission.into(), reason)
+            .authorize(client.clone(), permission.into(), reason)
             .await;
         let allowed = matches!(answer, Ok(Ok(a)) if a.allowed);
         if allowed {
@@ -574,7 +563,7 @@ async fn decide_request(
             match prompter {
                 None => Decision::Denied,
                 Some(prompter) => {
-                    let asked = prompter.ask(copy(&q.client), q.permission.clone(), q.reason);
+                    let asked = prompter.ask(q.client.clone(), q.permission.clone(), q.reason);
                     match asked.await {
                         // Nobody answered: denied, and nothing recorded
                         // (MIKSPEC-0037.R41).

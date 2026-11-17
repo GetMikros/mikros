@@ -454,7 +454,7 @@ async fn named_app(
     let holds = |permission| {
         shared
             .permissions
-            .holds(clone(&client), bootstrap, permission)
+            .holds(client.clone(), bootstrap, permission)
     };
     if app_id == CLI && shared.fs.lies_in(program, CLI_PROGRAMS) && holds(FULL_DISK).await {
         return Ok(app_id.into());
@@ -836,15 +836,4 @@ fn set_process_group(
         .ok_or(Status::BadState)?
         .process_group = group;
     Ok(LauncherSetProcessGroupResponse {})
-}
-
-fn clone(identity: &ClientIdentity) -> ClientIdentity {
-    ClientIdentity {
-        pid: identity.pid,
-        user: identity.user,
-        app_id: identity.app_id.clone(),
-        admin: identity.admin,
-        koid: identity.koid,
-        portable_checksum: identity.portable_checksum.clone(),
-    }
 }

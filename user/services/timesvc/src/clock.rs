@@ -199,14 +199,7 @@ impl Time {
         let Some(broker) = &self.broker else {
             return false;
         };
-        let client = ClientIdentity {
-            pid: client.pid,
-            user: client.user,
-            app_id: client.app_id.clone(),
-            admin: client.admin,
-            koid: client.koid,
-            portable_checksum: client.portable_checksum.clone(),
-        };
+        let client = client.clone();
         let requested = broker.request(client, TIME_SET.into(), reason).await;
         matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)
     }

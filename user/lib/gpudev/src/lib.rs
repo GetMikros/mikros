@@ -168,14 +168,7 @@ impl<B: Backend + 'static> GpuDevice<B> {
         let Some(broker) = &self.broker else {
             return false;
         };
-        let client = ClientIdentity {
-            pid: client.pid,
-            user: client.user,
-            app_id: client.app_id.clone(),
-            admin: client.admin,
-            koid: client.koid,
-            portable_checksum: client.portable_checksum.clone(),
-        };
+        let client = client.clone();
         let checked = broker.check(client, GPU_DISPLAY.into()).await;
         matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
     }

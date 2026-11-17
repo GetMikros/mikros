@@ -547,7 +547,7 @@ impl Dir {
             return false;
         };
         let requested = broker
-            .request(clone(caller), permission.into(), reason)
+            .request(caller.clone(), permission.into(), reason)
             .await;
         matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)
     }
@@ -651,7 +651,7 @@ impl Dir {
             };
             let reason = alloc::format!("connect to {protocol}");
             let requested = broker
-                .request(clone(caller), USER_CONTROL_PERMISSION.into(), reason)
+                .request(caller.clone(), USER_CONTROL_PERMISSION.into(), reason)
                 .await;
             return matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed);
         }
@@ -663,7 +663,7 @@ impl Dir {
         };
         let reason = alloc::format!("connect to {protocol}");
         let requested = broker
-            .request(clone(caller), permission.into(), reason)
+            .request(caller.clone(), permission.into(), reason)
             .await;
         matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)
     }
@@ -709,7 +709,7 @@ impl Dir {
         // The provider may have changed while the broker answered.
         let mut provided = self.provided.borrow_mut();
         if let Some(p) = provided.get_mut(&protocol) {
-            let client = clone(caller);
+            let client = caller.clone();
             let demanded = match &mut p.provider {
                 Provider::Waiting(waiting) => {
                     waiting.push((server, client));
@@ -731,7 +731,7 @@ impl Dir {
                 Provider::Registrar => {
                     drop(provided);
                     let server = ServerEnd::new(server);
-                    crate::registrar::serve(self.clone(), server, clone(caller));
+                    crate::registrar::serve(self.clone(), server, caller.clone());
                     return Ok(());
                 }
                 Provider::Control => {
@@ -746,7 +746,7 @@ impl Dir {
                 }
                 Provider::ServiceControl => {
                     drop(provided);
-                    crate::manage::serve(self.clone(), ServerEnd::new(server), clone(caller));
+                    crate::manage::serve(self.clone(), ServerEnd::new(server), caller.clone());
                     return Ok(());
                 }
                 Provider::PackageServices => {
@@ -782,7 +782,7 @@ impl Dir {
         let instance_ = found.ok_or(Status::NotFound)?;
         let _ = instance_
             .provider
-            .connect(protocol, instance, server, clone(caller));
+            .connect(protocol, instance, server, caller.clone());
         Ok(())
     }
 
@@ -941,7 +941,7 @@ impl Dir {
     async fn known(&self, owner: &ClientIdentity, permission: &str) -> Result<(), Status> {
         let broker = self.broker.borrow().clone();
         let broker = broker.ok_or(Status::AccessDenied)?;
-        match broker.check(clone(owner), permission.into()).await {
+        match broker.check(owner.clone(), permission.into()).await {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(Status::NotFound)) => Err(Status::InvalidArgs),
             _ => Err(Status::AccessDenied),
@@ -1033,19 +1033,8 @@ async fn allowed(
     let Some(broker) = broker else {
         return false;
     };
-    let checked = broker.check(clone(caller), permission.into()).await;
+    let checked = broker.check(caller.clone(), permission.into()).await;
     matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
-}
-
-fn clone(identity: &ClientIdentity) -> ClientIdentity {
-    ClientIdentity {
-        pid: identity.pid,
-        user: identity.user,
-        app_id: identity.app_id.clone(),
-        admin: identity.admin,
-        koid: identity.koid,
-        portable_checksum: identity.portable_checksum.clone(),
-    }
 }
 
 async fn serve(dir: Rc<Dir>, end: ServerEnd<Directory>, caller: Rc<ClientIdentity>) {

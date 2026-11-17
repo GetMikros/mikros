@@ -178,14 +178,7 @@ impl Supervisor {
         let service = self.service(i);
         let service = &service;
         if service.name == broker::NAME {
-            let me = ClientIdentity {
-                pid: self.me.pid,
-                user: self.me.user,
-                app_id: self.me.app_id.clone(),
-                admin: self.me.admin,
-                koid: self.me.koid,
-                portable_checksum: self.me.portable_checksum.clone(),
-            };
+            let me = self.me.clone();
             let (launcher, boot, reactor) = (&self.launcher, &self.boot, &self.reactor);
             let manifest = &self.manifests.borrow()[i].clone();
             let (started, broker) =

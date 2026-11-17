@@ -115,14 +115,7 @@ pub fn request(
         }
     }
     let broker = BrokerClient::new(client);
-    let identity = ClientIdentity {
-        pid: caller.pid,
-        user: caller.user,
-        app_id: caller.app_id.clone(),
-        admin: caller.admin,
-        koid: caller.koid,
-        portable_checksum: caller.portable_checksum.clone(),
-    };
+    let identity = caller.clone();
     let requested = broker.request(identity, permission.into(), reason.into(), FOREVER);
     Ok(matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed))
 }

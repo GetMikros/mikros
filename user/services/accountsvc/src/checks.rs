@@ -40,7 +40,7 @@ impl Checks {
         let Some(broker) = self.broker().await else {
             return false;
         };
-        match broker.check(copy(client), permission.into()).await {
+        match broker.check(client.clone(), permission.into()).await {
             Ok(Ok(checked)) => checked.decision == Decision::Allowed,
             Ok(Err(_)) => false,
             Err(_) => {
@@ -79,7 +79,7 @@ impl Checks {
             return false;
         };
         match broker
-            .request(copy(client), permission.into(), reason)
+            .request(client.clone(), permission.into(), reason)
             .await
         {
             Ok(Ok(requested)) => requested.decision == Decision::Allowed,
@@ -89,17 +89,5 @@ impl Checks {
                 false
             }
         }
-    }
-}
-
-/// A copy of `client`.
-pub fn copy(client: &ClientIdentity) -> ClientIdentity {
-    ClientIdentity {
-        pid: client.pid,
-        user: client.user,
-        app_id: client.app_id.clone(),
-        admin: client.admin,
-        koid: client.koid,
-        portable_checksum: client.portable_checksum.clone(),
     }
 }
