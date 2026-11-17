@@ -222,6 +222,7 @@ async fn packages(shell: &Shell<'_>, reactor: &mikros_rt::exec::Reactor) -> Resu
     }
     run_app(shell, ID, reactor).await?;
     run_command(shell, &installer, ID, reactor).await?;
+    run_portable(shell, &probe, reactor).await?;
     run_libraries(shell, &installer, reactor).await?;
     let removed = installer.remove(ID.into(), false, false).await;
     check(matches!(removed, Ok(Ok(_))), 28)?;
@@ -417,6 +418,187 @@ async fn run_command(
     check(matches!(installed, Ok(Err(Status::AlreadyExists))), 75)?;
     let unlinked = shell.home.unlink("shell.mika".into(), false).await;
     check(matches!(unlinked, Ok(Ok(_))), 75)
+}
+
+/// Starts the program of `request`, checks that it runs as `id`, and waits
+/// for it: fails with `code` when it does not, and with the program's own
+/// code when that is not 0.
+async fn run_as(
+    shell: &Shell<'_>,
+    request: mikros_rt::interfaces::mikros::process::SpawnRequest,
+    id: &str,
+    code: i64,
+) -> Result<(), i64> {
+    use mikros_rt::interfaces::mikros::process::{StatusKind, WaitOptions};
+    let spawned = shell.launcher.spawn(request).await;
+    let pid = spawned.ok().and_then(|r| r.ok()).ok_or(code)?.pid;
+    let info = shell.launcher.get_info(pid).await;
+    let info = info.ok().and_then(|r| r.ok()).ok_or(code)?.info;
+    check(info.app_id == id, code)?;
+    let waited = shell
+        .launcher
+        .wait(pid as i32, WaitOptions(0), now() + 60 * SECOND)
+        .await;
+    let status = waited.ok().and_then(|r| r.ok()).ok_or(code)?.status;
+    check(status.kind == StatusKind::Exited, code)?;
+    match status.exit_code {
+        0 => Ok(()),
+        own => Err(own),
+    }
+}
+
+/// A request to start the program at `path` with `args` and no app ID.
+fn request(
+    path: &str,
+    args: &[&str],
+) -> Option<mikros_rt::interfaces::mikros::process::SpawnRequest> {
+    Some(mikros_rt::interfaces::mikros::process::SpawnRequest {
+        path: path.into(),
+        arguments: arguments(args)?,
+        handles: Vec::new(),
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+        new_session: false,
+        working_directory: None,
+        umask: u32::MAX,
+    })
+}
+
+/// Writes `contents` to the new file `path` of `home` with `mode`.
+async fn write_file(
+    home: &NodeAsyncClient,
+    path: &str,
+    contents: &[u8],
+    mode: u32,
+    code: i64,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    let (file, server) = endpoints::<Node>().map_err(|_| code)?;
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+    let opened = home.open(path.into(), flags, mode, rw, server).await;
+    check(matches!(opened, Ok(Ok(_))), code)?;
+    let file = NodeAsyncClient::new(file, reactor.clone());
+    for (at, chunk) in contents.chunks(32768).enumerate() {
+        let written = file.write((at * 32768) as u64, chunk.to_vec()).await;
+        check(matches!(written, Ok(Ok(_))), code)?;
+    }
+    Ok(())
+}
+
+/// Removes the files `names` of the folder `folder` of `home`, and the
+/// folder itself; fails with `code`.
+async fn remove(
+    home: &NodeAsyncClient,
+    folder: &str,
+    names: &[&str],
+    code: i64,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    let (dir, server) = endpoints::<Node>().map_err(|_| code)?;
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+    let opened = home
+        .open(folder.into(), OpenFlags::DIRECTORY, 0, rw, server)
+        .await;
+    check(matches!(opened, Ok(Ok(_))), code)?;
+    let dir = NodeAsyncClient::new(dir, reactor.clone());
+    for name in names {
+        let unlinked = dir.unlink((*name).into(), false).await;
+        check(matches!(unlinked, Ok(Ok(_))), code)?;
+    }
+    let unlinked = home.unlink(folder.into(), true).await;
+    check(matches!(unlinked, Ok(Ok(_))), code)
+}
+
+/// Starts the app probe from the portable package `Probe.mika` in the
+/// home folder, which makes it the portable app `org.example.portable`
+/// with `Probe/` as its folder, and checks that the probe passed its
+/// checks there and that the note it wrote is in that folder; that the
+/// same package by another name is refused; and that the probe started
+/// from a build folder, `build/`, runs as the build's app
+/// `org.example.build` there (MIKSPEC-0101.R46, MIKSPEC-0101.R47).
+async fn run_portable(
+    shell: &Shell<'_>,
+    probe: &[u8],
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    use mikros_rt::interfaces::mikros::base::Status;
+    const PORTABLE: &str = "org.example.portable";
+    const BUILD: &str = "org.example.build";
+    let home = format!("/users/{}", shell.name);
+    let manifest = format!(
+        "id: {PORTABLE}\nkind: app\nversion: 1.0.0\nname: Probe\ndescription: Checks itself.\n\
+         executable: bin/probe\nportable: true\n"
+    );
+    pack(
+        shell,
+        "Probe.mika",
+        &manifest,
+        &[("bin/probe", probe.to_vec())],
+        76,
+        reactor,
+    )
+    .await?;
+    let package = format!("{home}/Probe.mika");
+    let folder = format!("{home}/Probe");
+    let args = [package.as_str(), "portable", &folder, &package, PORTABLE];
+    run_as(shell, request(&package, &args).ok_or(76)?, PORTABLE, 76).await?;
+    let note = read_all(shell.home, "Probe/note", reactor).await;
+    check(
+        note.as_deref() == Ok(b"from the portable app".as_slice()),
+        77,
+    )?;
+    remove(shell.home, "Probe", &["note"], 77, reactor).await?;
+    // A package starts only by a name that ends in `.mika`.
+    let renamed = shell
+        .home
+        .rename(
+            "Probe.mika".into(),
+            token(shell.home).await.ok_or(78)?,
+            "probe.pkg".into(),
+        )
+        .await;
+    check(matches!(renamed, Ok(Ok(_))), 78)?;
+    let other = format!("{home}/probe.pkg");
+    let spawned = shell
+        .launcher
+        .spawn(request(&other, &[&other]).ok_or(78)?)
+        .await;
+    check(matches!(spawned, Ok(Err(Status::InvalidArgs))), 78)?;
+    let unlinked = shell.home.unlink("probe.pkg".into(), false).await;
+    check(matches!(unlinked, Ok(Ok(_))), 78)?;
+    // A build: a folder with a manifest and the program.
+    let (_, server) = endpoints::<Node>().map_err(|_| 79)?;
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+    let made = shell
+        .home
+        .open("build".into(), flags, 0o755, rw, server)
+        .await;
+    check(matches!(made, Ok(Ok(_))), 79)?;
+    let manifest = format!("id: {BUILD}\n");
+    write_file(
+        shell.home,
+        "build/manifest.yaml",
+        manifest.as_bytes(),
+        0o644,
+        79,
+        reactor,
+    )
+    .await?;
+    write_file(shell.home, "build/probe", probe, 0o755, 79, reactor).await?;
+    let program = format!("{home}/build/probe");
+    let folder = format!("{home}/build");
+    let args = [program.as_str(), "build", &folder, &program, BUILD];
+    run_as(shell, request(&program, &args).ok_or(80)?, BUILD, 80).await?;
+    let files = ["note", "manifest.yaml", "probe"];
+    remove(shell.home, "build", &files, 80, reactor).await
+}
+
+/// A token of `dir`, for renaming in it.
+async fn token(dir: &NodeAsyncClient) -> Option<OwnedHandle> {
+    dir.get_token().await.ok()?.ok().map(|r| r.token)
 }
 
 /// Where the console image keeps the program and the libraries that

@@ -12,6 +12,13 @@
 //! Started as the package's command `hello-probe` with the arguments
 //! `command <folder>`, it checks that it runs as the app, with the app's
 //! home, in `<folder>`, the shell's, which it can write to.
+//!
+//! Started from a portable package with `portable <folder> <package>
+//! <id>`, or from a build with `build <folder> <program> <id>`, it checks
+//! that it runs portable, with `<folder>` as its home and working folder,
+//! which it can write to, and `<package>` or `<program>` as
+//! `MIKA_EXECUTABLE`, with the package's files at `/apps/<id>` but no
+//! cache there, or, for a build, nothing there.
 
 use std::env;
 use std::fs;
@@ -31,6 +38,10 @@ fn main() -> ExitCode {
     let result = match args.get(1).map(String::as_str) {
         Some("child") => child_checks(),
         Some("command") => command_checks(args.get(2).map(String::as_str).unwrap_or("")),
+        Some(mode @ ("portable" | "build")) => {
+            let arg = |at: usize| args.get(at).map(String::as_str).unwrap_or("");
+            portable_checks(mode == "build", arg(2), arg(3), arg(4))
+        }
         _ => checks(),
     };
     match result {
@@ -89,5 +100,30 @@ fn command_checks(folder: &str) -> Result<(), u8> {
     let cwd = env::current_dir().map_err(|_| 83)?;
     check(!folder.is_empty() && cwd == Path::new(folder), 83)?;
     check(fs::write("from-command", b"from the command").is_ok(), 84)?;
+    Ok(())
+}
+
+fn portable_checks(build: bool, folder: &str, executable: &str, id: &str) -> Result<(), u8> {
+    let code = if build { 100 } else { 90 };
+    check(var_is("MIKA_MODE", "portable"), code + 1)?;
+    check(!folder.is_empty() && var_is("HOME", folder), code + 2)?;
+    let cwd = env::current_dir().map_err(|_| code + 3)?;
+    check(cwd == Path::new(folder), code + 3)?;
+    check(var_is("MIKA_EXECUTABLE", executable), code + 4)?;
+    check(
+        fs::write("note", b"from the portable app").is_ok(),
+        code + 5,
+    )?;
+    let files = format!("/apps/{id}");
+    match build {
+        false => {
+            check(
+                Path::new(&format!("{files}/manifest.yaml")).is_file(),
+                code + 6,
+            )?;
+            check(!Path::new(&format!("{files}/cache")).exists(), code + 7)?;
+        }
+        true => check(!Path::new(&files).exists(), code + 6)?,
+    }
     Ok(())
 }
