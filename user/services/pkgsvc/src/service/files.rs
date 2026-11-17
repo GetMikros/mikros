@@ -1,8 +1,9 @@
 //! The root file system, which pkgsvc connects to itself, its folders and
-//! files by path from the root, and the names of users, which the
-//! folders of local packages are named by.
+//! files by path from the root, the records it keeps there, and the
+//! names of users, which the folders of local packages are named by.
 
 use super::FOREVER;
+use crate::commands::Owners;
 use crate::records::Records;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -18,13 +19,13 @@ const FILESYSTEM: &str = "device.filesystem";
 const ROOT: &str = "root";
 const ACCOUNTS: &str = "mikros.session.Accounts";
 const SUBVOLUMES: &str = "device.subvolumes";
-/// The folder of the records, from the root, and their file in it.
+/// The folder of the records, from the root, and their files in it: the
+/// packages' and the commands' owners.
 const RECORDS_FOLDER: &str = "state/pkgsvc";
 const RECORDS_NAME: &str = "records";
+const OWNERS_NAME: &str = "commands";
 /// The most bytes one write moves.
 const WRITE_MAX: usize = 32768;
-/// Where the records are, from the root.
-const RECORDS: &str = "state/pkgsvc/records";
 /// The longest records file and manifest that are read.
 const FILE_MAX: usize = 1 << 20;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
@@ -228,29 +229,46 @@ impl Root {
         flat(dir.unlink(name.into(), true, FOREVER)).map(|_| ())
     }
 
-    /// Writes `records`, through a new file that replaces the old one.
-    pub fn write_records(&self, records: &Records) -> Result<(), Status> {
+    /// Writes `text` as the file `name` of the records' folder, through a
+    /// new file that replaces the old one.
+    fn write_state(&self, name: &str, text: &str) -> Result<(), Status> {
         self.make_folders(RECORDS_FOLDER)?;
-        let new = format!("{RECORDS_FOLDER}/{RECORDS_NAME}.new");
-        self.write_file(&new, records.encode().as_bytes(), 0o600)?;
+        let new = format!("{RECORDS_FOLDER}/{name}.new");
+        self.write_file(&new, text.as_bytes(), 0o600)?;
         let dir = self.open(RECORDS_FOLDER, OpenFlags::DIRECTORY, 0, RW)?;
         let token = flat(dir.get_token(FOREVER))?.token;
-        flat(dir.rename(
-            format!("{RECORDS_NAME}.new"),
-            token,
-            RECORDS_NAME.into(),
-            FOREVER,
-        ))?;
+        flat(dir.rename(format!("{name}.new"), token, name.into(), FOREVER))?;
         flat(dir.sync(FOREVER)).map(|_| ())
+    }
+
+    /// The text of the file `name` of the records' folder, empty when
+    /// there is none yet.
+    fn state(&self, name: &str) -> Result<String, Status> {
+        match self.read(&format!("{RECORDS_FOLDER}/{name}")) {
+            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(Status::NotFound) => Ok(String::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Writes `records`.
+    pub fn write_records(&self, records: &Records) -> Result<(), Status> {
+        self.write_state(RECORDS_NAME, &records.encode())
     }
 
     /// The records, none when there are none yet.
     pub fn records(&self) -> Result<Records, Status> {
-        match self.read(RECORDS) {
-            Ok(bytes) => Ok(Records::parse(&String::from_utf8_lossy(&bytes))),
-            Err(Status::NotFound) => Ok(Records::default()),
-            Err(e) => Err(e),
-        }
+        self.state(RECORDS_NAME).map(|text| Records::parse(&text))
+    }
+
+    /// Writes the owners of commands (MIKSPEC-0101.R43).
+    pub fn write_owners(&self, owners: &Owners) -> Result<(), Status> {
+        self.write_state(OWNERS_NAME, &owners.encode())
+    }
+
+    /// The owners of commands, none when there are none yet.
+    pub fn owners(&self) -> Result<Owners, Status> {
+        self.state(OWNERS_NAME).map(|text| Owners::parse(&text))
     }
 }
 

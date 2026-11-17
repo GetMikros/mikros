@@ -3,6 +3,7 @@
 //! and works on the root file system, which it connects to itself
 //! (MIKSPEC-0101.R37).
 
+mod commands;
 mod files;
 mod install;
 mod list;
@@ -15,8 +16,8 @@ use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeClient};
 use mikros_rt::interfaces::mikros::packages::{
-    Installer, InstallerInspectResponse, InstallerInstallResponse, InstallerListResponse,
-    InstallerRemoveResponse, InstallerRequest, InstallerServer,
+    Installer, InstallerCommandOwnerResponse, InstallerInspectResponse, InstallerInstallResponse,
+    InstallerListResponse, InstallerRemoveResponse, InstallerRequest, InstallerServer,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
@@ -181,7 +182,12 @@ fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity)
                     .map(|()| InstallerRemoveResponse {}),
             ),
             R::CreatePublic(_, r) => r.reply(s, Err(Status::NotSupported)),
-            R::CommandOwner(_, r) => r.reply(s, Err(Status::NotSupported)),
+            R::CommandOwner(q, r) => r.reply(
+                s,
+                commands::command_owner(&shared, &caller, &q.name, q.user)
+                    .map(|id| InstallerCommandOwnerResponse { id }),
+            ),
+            R::Commands(_, r) => r.reply(s, Err(Status::NotSupported)),
         };
     }
 }

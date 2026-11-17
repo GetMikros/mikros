@@ -1,7 +1,9 @@
 //! `Install`: a package is written into a new subvolume next to where it
 //! is installed, which then takes the place of the old version, if one is
 //! installed (MIKSPEC-0101.R36). A global install asks the broker for the
-//! permission of the package's kind first (MIKSPEC-0101.R35).
+//! permission of the package's kind first (MIKSPEC-0101.R43). A package
+//! with a command that a program in `/system/bin` has is refused
+//! (MIKSPEC-0101.R44).
 
 use super::files::{Root, user_name};
 use super::{Given, Shared, open};
@@ -11,13 +13,15 @@ use mikros_mika::format::{self, Kind as EntryKind, Package};
 use mikros_mika::manifest::{Kind, Manifest};
 use mikros_mika::version::Version;
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::fs::NodeClient;
+use mikros_rt::interfaces::mikros::fs::{NodeClient, OpenFlags, Rights};
 use mikros_rt::interfaces::mikros::packages::InstallerInstallRequest;
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 
 /// The folder of a library's headers, which an install leaves out unless
 /// it is for development (MIKSPEC-0101.R21).
 const INCLUDE: &str = "include";
+/// The folder of the system's programs, from the root.
+const SYSTEM_BIN: &str = "system/bin";
 
 /// The permission that installing a package of `kind` for every user
 /// needs.
@@ -52,6 +56,17 @@ pub fn installed(root: &Root, kind: Kind, id: &str, scope: &Scope) -> Option<Ver
     Manifest::parse(&bytes).ok()?.version
 }
 
+/// Whether a program of the system in `/system/bin` is named `name`.
+fn system_has(root: &Root, name: &str) -> bool {
+    root.open(
+        &format!("{SYSTEM_BIN}/{name}"),
+        OpenFlags(0),
+        0,
+        Rights::READ,
+    )
+    .is_ok()
+}
+
 /// Which installed package of any kind has `id` in `scope`, and its
 /// version.
 fn installed_any(root: &Root, id: &str, scope: &Scope) -> Option<Version> {
@@ -75,6 +90,14 @@ pub fn install(
         return Err(Status::InvalidArgs);
     }
     let root = shared.root()?;
+    // A command of the system's keeps its name (MIKSPEC-0101.R44).
+    if let Some(bin) = manifest.bins.iter().find(|b| system_has(&root, &b.name)) {
+        eprintln!(
+            "pkgsvc: {} has the command {} of the system",
+            manifest.id, bin.name
+        );
+        return Err(Status::AlreadyExists);
+    }
     let (scope, owner) = scope(shared, caller, q.global)?;
     // Not for every user and for this user at once.
     let other = match &scope {
@@ -108,6 +131,8 @@ pub fn install(
         return Err(Status::AccessDenied);
     }
     let at = place::subvolume(kind, &manifest.id, &scope).ok_or(Status::InvalidArgs)?;
+    // What the scope's other packages have of its commands.
+    let others = super::commands::others(&root, &scope, &manifest.id)?;
     write(
         &root,
         shared,
@@ -126,7 +151,9 @@ pub fn install(
             dependency: q.dependency,
         },
     );
-    root.write_records(&records)
+    root.write_records(&records)?;
+    let names: Vec<String> = manifest.bins.iter().map(|b| b.name.clone()).collect();
+    super::commands::installed(&root, owner, &manifest.id, &names, &q.commands, &others)
 }
 
 /// The scope of the caller's own user.

@@ -136,6 +136,7 @@ fn install(
             Place::Local => false,
             Place::Preferred => manifest.global,
         };
+        let commands = Vec::new();
         status(
             &manifest.id,
             installer
@@ -145,6 +146,7 @@ fn install(
                     components,
                     dependency,
                     dev,
+                    commands,
                     FOREVER,
                 )
                 .map(|r| r.map(|_| ())),

@@ -152,6 +152,7 @@ fn delete(
     }
     let at = place::subvolume(kind, id, scope).ok_or(Status::InvalidArgs)?;
     subvolumes.delete(&at)?;
+    super::commands::removed(root, owner, id)?;
     let _ = subvolumes.delete(&format!("public/{id}"));
     if kind == Kind::App && !keep_data {
         let homes: Vec<String> = match scope {

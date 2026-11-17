@@ -201,7 +201,9 @@ async fn packages(shell: &Shell<'_>, reactor: &mikros_rt::exec::Reactor) -> Resu
             matches!(file.clone(server, Rights::READ).await, Ok(Ok(_))),
             step + 1,
         )?;
-        let installed = installer.install(client, false, vec![], false, false).await;
+        let installed = installer
+            .install(client, false, vec![], false, false, vec![])
+            .await;
         check(matches!(installed, Ok(Ok(_))), step + 1)?;
         let listed = installer.list(String::new()).await;
         let shown = matches!(&listed, Ok(Ok(r)) if r.packages.iter().any(|p| p.id == ID && !p.global && p.version == version));
@@ -457,7 +459,9 @@ async fn install(
     let (client, server) = endpoints::<Node>().map_err(|_| code)?;
     let cloned = file.clone(server, Rights::READ).await;
     check(matches!(cloned, Ok(Ok(_))), code)?;
-    let installed = installer.install(client, false, vec![], false, false).await;
+    let installed = installer
+        .install(client, false, vec![], false, false, vec![])
+        .await;
     check(matches!(installed, Ok(Ok(_))), code)?;
     let unlinked = shell.home.unlink(name.into(), false).await;
     check(matches!(unlinked, Ok(Ok(_))), code)
