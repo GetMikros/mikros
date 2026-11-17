@@ -58,6 +58,7 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("user.background_controllers.use", Scope::User),
     ("user.bluetooth.use", Scope::User),
     ("user.camera.use", Scope::User),
+    ("user.components.install", Scope::User),
     ("user.desktop.access", Scope::User),
     ("user.developer.access", Scope::User),
     ("user.documents.access", Scope::User),

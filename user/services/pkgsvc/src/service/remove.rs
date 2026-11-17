@@ -176,6 +176,8 @@ fn delete(
     let at = place::subvolume(kind, id, scope).ok_or(Status::InvalidArgs)?;
     subvolumes.delete(&at)?;
     super::commands::removed(root, owner, id)?;
+    // The files of its components that were left out (MIKSPEC-0101.R71).
+    super::components::forget(root, owner, id);
     if kind == Kind::Driver {
         super::drivers::boot_modules_changed(shared, root)?;
     }

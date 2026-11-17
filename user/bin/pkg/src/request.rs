@@ -1,10 +1,10 @@
-//! What pkg is asked to do (MIKSPEC-0101.R28).
+//! What pkg is asked to do (MIKSPEC-0101.R73).
 
 use mikros_cli::{Arguments, Command, value};
 
 pub const COMMAND: Command = Command {
     name: "pkg",
-    operands: "install <file>...|remove <id>|list|info <file|id>|pack <folder>",
+    operands: "install <file>...|add <id> <component-id>|remove <id>|list|info <file|id>|pack <folder>",
     most: usize::MAX,
     about: "Installs, removes, lists, shows and makes .mika packages.",
     options: &[
@@ -35,6 +35,11 @@ pub enum Request {
         files: Vec<String>,
         dependency: bool,
         dev: bool,
+    },
+    /// A left-out optional component of an installed package, by its ID.
+    Add {
+        id: String,
+        component: String,
     },
     Remove {
         id: String,
@@ -70,6 +75,7 @@ pub fn read(arguments: Vec<String>) -> Request {
     // The options that each subcommand takes.
     let allowed: &[&str] = match subcommand.as_str() {
         "install" => &["--dependency", "--dev"],
+        "add" => &[],
         "remove" => &["--keep-data"],
         "list" => &["--json"],
         "info" | "pack" => &[],
@@ -102,6 +108,13 @@ pub fn read(arguments: Vec<String>) -> Request {
                 dev: options.contains(&"--dev"),
             }
         }
+        "add" => match &operands[..] {
+            [id, component] => Request::Add {
+                id: id.clone(),
+                component: component.clone(),
+            },
+            _ => Request::Invalid("add takes a package ID and a component's ID".into()),
+        },
         "remove" => match one("a package ID") {
             Ok(id) => Request::Remove {
                 id,
@@ -144,6 +157,13 @@ mod tests {
                 files: vec!["a.mika".into(), "b.mika".into()],
                 dependency: true,
                 dev: true
+            }
+        );
+        assert_eq!(
+            r(&["add", "org.example.x", "org.example.x.part"]),
+            Request::Add {
+                id: "org.example.x".into(),
+                component: "org.example.x.part".into(),
             }
         );
         assert_eq!(
@@ -192,6 +212,9 @@ mod tests {
             &["info", "a", "-o", "b"],
             &["list", "--sysroot", "s"],
             &["pack"],
+            &["add", "org.example.x"],
+            &["add", "a", "b", "c"],
+            &["add", "a", "b", "--json"],
         ] {
             assert!(matches!(r(args), Request::Invalid(_)), "{args:?}");
         }

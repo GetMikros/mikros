@@ -68,7 +68,7 @@ fn system_has(root: &Root, name: &str) -> bool {
 
 /// Which installed package of any kind has `id` in `scope`, and its
 /// version.
-fn installed_any(root: &Root, id: &str, scope: &Scope) -> Option<Version> {
+pub(super) fn installed_any(root: &Root, id: &str, scope: &Scope) -> Option<Version> {
     [Kind::App, Kind::Library, Kind::Driver]
         .into_iter()
         .find_map(|kind| installed(root, kind, id, scope))
@@ -76,17 +76,17 @@ fn installed_any(root: &Root, id: &str, scope: &Scope) -> Option<Version> {
 
 /// A component (MIKSPEC-0101.R65) of a package being installed, read
 /// from its file in the package, and where it goes.
-struct Component {
-    bytes: Vec<u8>,
-    package: Package,
-    manifest: Manifest,
+pub(super) struct Component {
+    pub(super) bytes: Vec<u8>,
+    pub(super) package: Package,
+    pub(super) manifest: Manifest,
     optional: bool,
 }
 
 /// The component at `path` in `package`, whose manifest is `owner`:
 /// `INVALID_ARGS` unless it is a package whose ID starts with the
 /// package's ID and `.`.
-fn component(
+pub(super) fn component(
     package: &Package,
     given: &Given,
     owner: &Manifest,
@@ -111,20 +111,20 @@ fn component(
 
 /// What one install writes: a package or a component, with its owner,
 /// the owner's records scope, when it is a component.
-struct One<'a, S: format::Source + ?Sized> {
-    source: &'a S,
-    package: &'a Package,
-    manifest: &'a Manifest,
-    owner_of: Option<(&'a str, Owner)>,
-    dependency: bool,
-    dev: bool,
-    commands: &'a [String],
+pub(super) struct One<'a, S: format::Source + ?Sized> {
+    pub(super) source: &'a S,
+    pub(super) package: &'a Package,
+    pub(super) manifest: &'a Manifest,
+    pub(super) owner_of: Option<(&'a str, Owner)>,
+    pub(super) dependency: bool,
+    pub(super) dev: bool,
+    pub(super) commands: &'a [String],
 }
 
 /// Where a checked install goes.
-struct Checked {
+pub(super) struct Checked {
     kind: Kind,
-    scope: Scope,
+    pub(super) scope: Scope,
     owner: Owner,
 }
 
@@ -149,6 +149,9 @@ pub fn install(
     let root = shared.root()?;
     let records = root.records()?;
     let mut components = Vec::new();
+    // The optional components that are left out, whose files are kept
+    // (MIKSPEC-0101.R71).
+    let mut left_out = Vec::new();
     for c in &manifest.components {
         let named = q.components.contains(&c.path);
         let component = component(&package, &given, &manifest, &c.path, c.optional)?;
@@ -159,6 +162,8 @@ pub fn install(
         });
         if !c.optional || named || installed {
             components.push(component);
+        } else {
+            left_out.push(component);
         }
     }
     let package_one = One {
@@ -215,13 +220,24 @@ pub fn install(
         return Err(Status::AccessDenied);
     }
     write_one(shared, &root, package_one, checked)?;
+    let mut refused = Vec::new();
     for ((one, checked), c) in ones.into_iter().zip(checked_ones).zip(&components) {
         if !allowed && checked.scope == Scope::Global {
             eprintln!("pkgsvc: the optional {} is left out", c.manifest.id);
+            refused.push(c.manifest.id.clone());
             continue;
         }
         write_one(shared, &root, one, checked)?;
     }
+    let kept: Vec<&Component> = left_out
+        .iter()
+        .chain(
+            components
+                .iter()
+                .filter(|c| refused.contains(&c.manifest.id)),
+        )
+        .collect();
+    super::components::keep(&root, owner, &manifest.id, &kept)?;
     super::kept::clean(shared, &root)
 }
 
@@ -237,7 +253,7 @@ fn reason(global: &[&Manifest]) -> String {
 
 /// Checks what `one` installs, where the packages of `coming` are about
 /// to be installed too, and where it goes.
-fn check_one<S: format::Source + ?Sized>(
+pub(super) fn check_one<S: format::Source + ?Sized>(
     shared: &Shared,
     caller: &ClientIdentity,
     root: &Root,
@@ -301,7 +317,7 @@ fn check_one<S: format::Source + ?Sized>(
 }
 
 /// Writes what `one` installs, checked as `checked`.
-fn write_one<S: format::Source + ?Sized>(
+pub(super) fn write_one<S: format::Source + ?Sized>(
     shared: &Shared,
     root: &Root,
     one: One<'_, S>,
@@ -367,7 +383,7 @@ fn write_one<S: format::Source + ?Sized>(
 }
 
 /// The scope of the caller's own user.
-fn scope_of_caller(shared: &Shared, caller: &ClientIdentity) -> Result<Scope, Status> {
+pub(super) fn scope_of_caller(shared: &Shared, caller: &ClientIdentity) -> Result<Scope, Status> {
     scope(shared, caller, false).map(|(scope, _)| scope)
 }
 

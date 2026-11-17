@@ -250,6 +250,13 @@ pub fn main() -> ExitCode {
             dependency,
             dev,
         } => install(&installer, &files, dependency, dev),
+        Request::Add { id, component } => status(
+            &component,
+            installer
+                .add_component(id, component.clone(), FOREVER)
+                .map(|r| r.map(|_| ())),
+        )
+        .map(|()| println!("installed {component}")),
         Request::Remove { id, keep_data } => installed(&installer).and_then(|all| {
             let package = all
                 .iter()

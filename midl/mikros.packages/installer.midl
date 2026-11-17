@@ -1,4 +1,4 @@
-// MIKSPEC-0101.R58
+// MIKSPEC-0101.R69
 
 library mikros.packages;
 using mikros.base;
@@ -42,4 +42,9 @@ protocol Installer {
         -> (services vector<PackageService, 64>) error base.Status;
     @11 ServiceManifest(name string<255>)
         -> (manifest vector<u8, 16384>) error base.Status;
+    @12 AddComponent(id string<128>, component string<255>)
+        -> () error base.Status;
+    @13 InstallComponent(id string<128>,
+                         package client_end<mikros.fs.Node>)
+        -> () error base.Status;
 };

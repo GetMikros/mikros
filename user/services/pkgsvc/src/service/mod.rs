@@ -4,6 +4,7 @@
 //! (MIKSPEC-0101.R37).
 
 mod commands;
+mod components;
 mod drivers;
 mod files;
 mod install;
@@ -21,11 +22,11 @@ use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeClient};
 use mikros_rt::interfaces::mikros::packages::{
-    Installer, InstallerCommandOwnerResponse, InstallerCommandsResponse,
-    InstallerCreatePublicResponse, InstallerInspectResponse, InstallerInstallResponse,
-    InstallerListResponse, InstallerOpenPublicResponse, InstallerOpenResponse,
-    InstallerRemoveResponse, InstallerRequest, InstallerServer, InstallerServiceManifestResponse,
-    InstallerServicesResponse,
+    Installer, InstallerAddComponentResponse, InstallerCommandOwnerResponse,
+    InstallerCommandsResponse, InstallerCreatePublicResponse, InstallerInspectResponse,
+    InstallerInstallComponentResponse, InstallerInstallResponse, InstallerListResponse,
+    InstallerOpenPublicResponse, InstallerOpenResponse, InstallerRemoveResponse, InstallerRequest,
+    InstallerServer, InstallerServiceManifestResponse, InstallerServicesResponse,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
@@ -260,6 +261,16 @@ fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity)
                 s,
                 commands::commands(&shared, &caller, q.server)
                     .map(|()| InstallerCommandsResponse {}),
+            ),
+            R::AddComponent(q, r) => r.reply(
+                s,
+                components::add(&shared, &caller, &q.id, &q.component)
+                    .map(|()| InstallerAddComponentResponse {}),
+            ),
+            R::InstallComponent(q, r) => r.reply(
+                s,
+                components::install_given(&shared, &caller, &q.id, q.package)
+                    .map(|()| InstallerInstallComponentResponse {}),
             ),
         };
     }
