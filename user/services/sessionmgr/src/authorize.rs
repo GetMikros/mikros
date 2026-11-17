@@ -7,7 +7,7 @@
 //! client's login session runs on, with `OnAuthorize` or `OnAsk`, one
 //! request per console at a time, and ends the request on `Answer`,
 //! `AnswerAsk` or `Cancel`, after 60 seconds, or when the client
-//! terminates (MIKSPEC-0057.R32).
+//! terminates (MIKSPEC-0057.R33).
 
 use crate::wait::{Either, Slot, Waiters, select};
 use crate::{SECOND, now};
@@ -22,7 +22,9 @@ use mikros_rt::interfaces::mikros::permissions::{
     Broker, BrokerAsyncClient, Decision, Prompter, PrompterAskResponse, PrompterAsyncServer,
     PrompterRequest,
 };
-use mikros_rt::interfaces::mikros::process::{ElevationsAsyncClient, LauncherAsyncClient};
+use mikros_rt::interfaces::mikros::process::{
+    ElevationsAsyncClient, LauncherAsyncClient, ProcessInfo,
+};
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{
@@ -191,8 +193,11 @@ impl Requests {
 
     /// The text console of the client's login session, and the
     /// `TextLogin` server to ask there, or none when it runs in no text
-    /// console's session or is no longer the process it was
-    /// (MIKSPEC-0057.R32).
+    /// console's session or when the process that the launcher describes
+    /// is not the one that `client` names: its kernel object ID, user, app
+    /// ID and portable checksum must all be the client's, so that a
+    /// question names the app of the process that holds the answer
+    /// (MIKSPEC-0057.R33).
     async fn console_of(
         &self,
         client: &ClientIdentity,
@@ -206,15 +211,19 @@ impl Requests {
                 return None;
             }
         };
-        let console = (info.koid == client.koid)
-            .then(|| {
-                self.sessions
-                    .borrow()
-                    .iter()
-                    .find(|&(_, &s)| s != 0 && s == info.login_session)
-                    .map(|(&c, _)| c)
-            })
-            .flatten();
+        if !is_client(&info, client) {
+            mikros_rt::log!(
+                Warning,
+                "sessionmgr: {what}: process {pid} is not the client that was named; refused"
+            );
+            return None;
+        }
+        let console = self
+            .sessions
+            .borrow()
+            .iter()
+            .find(|&(_, &s)| s != 0 && s == info.login_session)
+            .map(|(&c, _)| c);
         let (Some(console), Some(server)) = (console, self.text_login.borrow().clone()) else {
             mikros_rt::log!(
                 Info,
@@ -315,7 +324,7 @@ impl Requests {
     /// `Ask` of the broker for the `user` permission `permission` of
     /// `client`: asked as a `[y/N]` line on the client's text console, and
     /// `UNDETERMINED` when nobody answers there or it runs in no text
-    /// console's session (MIKSPEC-0057.R32).
+    /// console's session (MIKSPEC-0057.R33).
     pub async fn ask_permission(
         &self,
         client: &ClientIdentity,
@@ -339,6 +348,15 @@ impl Requests {
             _ => Decision::Undetermined,
         }
     }
+}
+
+/// Whether `info`, as the launcher describes the process of `client`'s
+/// process ID, is the process that `client` names (MIKSPEC-0057.R33).
+fn is_client(info: &ProcessInfo, client: &ClientIdentity) -> bool {
+    info.koid == client.koid
+        && info.user == client.user
+        && info.app_id == client.app_id
+        && info.portable_checksum == client.portable_checksum
 }
 
 /// The account of user `id`, when there is one.

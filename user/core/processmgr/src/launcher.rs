@@ -629,6 +629,7 @@ async fn get_info(
             app_id: record.app_id.clone(),
             path: record.path.clone(),
             koid: record.koid,
+            portable_checksum: record.checksum(),
         },
     })
 }
