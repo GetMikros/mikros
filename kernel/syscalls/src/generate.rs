@@ -303,14 +303,22 @@ fn user_register(arg: &crate::table::Arg) -> String {
     }
 }
 
-/// The user-space bindings for x86_64: one function per call, each making
-/// the call with `SYSCALL`.
+/// The user-space bindings for x86_64: one function per call, which makes
+/// the call with `SYSCALL`, or, for a call of production builds in a
+/// program without mikros-rt's `runtime` feature, calls the C library's
+/// function for it.
 pub fn user_bindings_x86_64(table: &Table) -> String {
     let mut out = String::from(HEADER);
     out.push_str(
         "/// A handle value.\npub type Handle = u32;\n\
          /// The status a system call returns.\npub type Status = i64;\n\n",
     );
+    // In a program whose runtime is the C library, mikros-rt has no
+    // `runtime` feature, and the calls of production builds go through
+    // the C library's `mikros_<name>` functions (MIKSPEC-0068.R3,
+    // MIKSPEC-0068.R4); the others, and the C library itself and the
+    // programs of mikros-rt's own runtime, execute SYSCALL.
+    let mut through_libc = String::new();
     for call in calls_for(table, "x86_64") {
         let params = call
             .args
@@ -318,6 +326,31 @@ pub fn user_bindings_x86_64(table: &Table) -> String {
             .map(|a| format!("{}: {}", a.name, user_type(&a.ty)))
             .collect::<Vec<_>>()
             .join(", ");
+        let production = !call.fuzz_only && !call.diag_only;
+        if production {
+            let names = call
+                .args
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                through_libc,
+                "        pub(super) fn mikros_{name}({params}) -> Status;",
+                name = call.name,
+            );
+            let _ = writeln!(
+                out,
+                "/// `{name}`: {spec}, through the C library.\n///\n/// # Safety\n///\n\
+                 /// Pointer arguments must be valid as the call requires.\n\
+                 #[cfg(not(feature = \"runtime\"))]\n#[inline]\n\
+                 pub unsafe fn {name}({params}) -> Status {{\n    \
+                 // SAFETY: as the caller ensures.\n    \
+                 unsafe {{ libc::mikros_{name}({names}) }}\n}}\n",
+                name = call.name,
+                spec = call.spec.join(", "),
+            );
+        }
         let mut registers = String::new();
         for (arg, reg) in call.args.iter().zip(X86_64_ARG_REGISTERS) {
             let _ = writeln!(
@@ -326,6 +359,10 @@ pub fn user_bindings_x86_64(table: &Table) -> String {
                 user_register(arg)
             );
         }
+        let cfg = match production {
+            true => "#[cfg(feature = \"runtime\")]\n",
+            false => user_cfg(call),
+        };
         let _ = writeln!(
             out,
             "/// `{name}`: {spec}.\n///\n/// # Safety\n///\n\
@@ -347,9 +384,16 @@ pub fn user_bindings_x86_64(table: &Table) -> String {
              status\n}}\n",
             name = call.name,
             spec = call.spec.join(", "),
-            cfg = user_cfg(call),
             number = call.number,
         );
     }
+    let _ = writeln!(
+        out,
+        "/// The C library's system call functions.\n\
+         #[cfg(not(feature = \"runtime\"))]\n\
+         mod libc {{\n    \
+         use super::{{Handle, Status}};\n\n    \
+         unsafe extern \"C\" {{\n{through_libc}    }}\n}}"
+    );
     out
 }

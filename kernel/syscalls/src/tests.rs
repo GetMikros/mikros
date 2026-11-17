@@ -208,11 +208,19 @@ fn generates_handle_checks_and_bindings() {
     assert!(user.contains("in(\"rdi\") a as u64"));
     assert!(user.contains("in(\"rdx\") c as u32 as u64"));
     assert!(user.contains("in(\"r10\") d as u64"));
+    // Without mikros-rt's runtime, through the C library.
+    assert!(user.contains("#[cfg(feature = \"runtime\")]\n#[inline]\npub unsafe fn obj_op("));
+    assert!(user.contains("unsafe { libc::mikros_obj_op(a, b, c, d) }"));
+    assert!(user.contains(
+        "pub(super) fn mikros_obj_op(a: Handle, b: Handle, c: i32, d: *mut Handle) -> Status;"
+    ));
 
     table.calls[0].diag_only = true;
     let kernel = kernel_dispatch(&table, "x86_64");
     assert_eq!(kernel.matches("#[cfg(feature = \"diag\")]").count(), 3);
-    assert!(user_bindings_x86_64(&table).contains("#[cfg(mikros_diag)]\n#[inline]"));
+    let user = user_bindings_x86_64(&table);
+    assert!(user.contains("#[cfg(mikros_diag)]\n#[inline]"));
+    assert!(!user.contains("mikros_obj_op"));
     assert!(!fuzz_harness(&table, "x86_64").contains("obj_op"));
     assert!(!c::header(&table, "x86_64").contains("obj_op"));
     assert!(!crate::syzkaller::descriptions(&table, "x86_64").contains("obj_op"));
