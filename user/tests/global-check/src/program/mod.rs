@@ -3,11 +3,14 @@
 //! every user asks for `admin.packages.install`; the broker then holds it
 //! for this process, so that the others do not ask again.
 
+mod app;
+
 use mikros_command::Directory;
 use mikros_mika::format::{Builder, MANIFEST, checksum_text};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeClient, Rights};
-use mikros_rt::interfaces::mikros::packages::InstallerClient;
+use mikros_rt::interfaces::mikros::packages::{InstallerClient, PackageInfo};
 use std::os::mikros::io::AsHandleExt;
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
@@ -25,6 +28,8 @@ const SERVICE: &str = "org.example.daemon.idle";
 const DRIVER: &str = "org.example.thing";
 const LIBRARY: &str = "org.example.greet";
 const APP: &str = "org.example.libs";
+const SUITE: &str = "org.example.suite";
+const EXTRA: &str = "org.example.suite.extra";
 /// How long a service has to start or stop.
 const SERVICE_WAIT: Duration = Duration::from_secs(30);
 
@@ -40,14 +45,22 @@ fn ensure(ok: bool, code: u8, what: &str) -> Result<(), Failed> {
 }
 
 pub fn main() -> ExitCode {
-    // As the package's service, which runs until it is stopped.
+    // As the package's service, which the service manager starts without
+    // arguments, and which runs until it is stopped.
     let name = std::env::args().next().unwrap_or_default();
-    if name.rsplit('/').next() == Some(IDLE) {
+    if name.rsplit('/').next() == Some(IDLE) && std::env::args().len() == 1 {
+        eprintln!("{}", app::STARTED);
         loop {
             std::thread::sleep(Duration::from_secs(3600));
         }
     }
-    match all() {
+    let checked = match std::env::args().nth(1).as_deref() {
+        // As the installed app of the package with the service.
+        Some("app") => app::checks(),
+        Some("write") => app::write_public(),
+        _ => all(),
+    };
+    match checked {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failed(code, what)) => {
             eprintln!("global-check: {code}: {what}");
@@ -129,6 +142,19 @@ fn read(path: &str, code: u8) -> Result<Vec<u8>, Failed> {
     std::fs::read(path).or(failed(code, format!("reading {path}")))
 }
 
+/// Runs the app's checks as `path`, and fails with the number of the
+/// check that failed there.
+fn run_app(path: &str) -> Result<(), Failed> {
+    match Command::new(path).arg("app").status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => match status.code().and_then(|c| u8::try_from(c).ok()) {
+            Some(code) => failed(code, "as the app"),
+            None => failed(31, format!("{path}: {status:?}")),
+        },
+        Err(e) => failed(31, format!("{path}: {e}")),
+    }
+}
+
 /// Runs `path` with `args`, which must exit with 0; fails with `code`.
 fn run(path: &str, args: &[&str], code: u8) -> Result<(), Failed> {
     match Command::new(path).args(args).status() {
@@ -168,13 +194,17 @@ fn all() -> Result<(), Failed> {
     service(&installer)?;
     driver(&installer)?;
     kept(&installer)?;
+    protocol_names(&installer)?;
+    components(&installer)?;
+    run_app(&format!("/apps/{DAEMON}/bin/idle"))?;
     remove(&installer, DAEMON, 13)?;
     wait_service(SERVICE, |s| s.is_none(), 14)
 }
 
 /// A global app with a service, this program as `bin/idle`, which the
 /// service manager starts from the package's folder as soon as it is
-/// installed (MIKSPEC-0101.R55). It stays until the end.
+/// installed (MIKSPEC-0101.R55), and which runs the app's checks when it
+/// is given `app`. It stays until the end.
 fn service(installer: &InstallerClient) -> Result<(), Failed> {
     let manifest = format!(
         "id: {DAEMON}\nkind: app\nversion: 1.0.0\nname: Daemon\ndescription: Idles.\n\
@@ -269,4 +299,134 @@ fn kept(installer: &InstallerClient) -> Result<(), Failed> {
     run(&program, &[], 24)?;
     remove(installer, APP, 25)?;
     remove(installer, LIBRARY, 25)
+}
+
+/// Every package that `List` gives.
+fn listed(installer: &InstallerClient, code: u8) -> Result<Vec<PackageInfo>, Failed> {
+    let mut all: Vec<PackageInfo> = Vec::new();
+    loop {
+        let after = all.last().map(|p| p.id.clone()).unwrap_or_default();
+        let page = match installer.list(after, FOREVER) {
+            Ok(Ok(r)) => r.packages,
+            other => return failed(code, format!("List: {other:?}")),
+        };
+        if page.is_empty() {
+            return Ok(all);
+        }
+        all.extend(page);
+    }
+}
+
+/// A package whose service provides a protocol that is not named under
+/// the package's ID is refused (MIKSPEC-0101.R66).
+fn protocol_names(installer: &InstallerClient) -> Result<(), Failed> {
+    let manifest = "id: org.example.bad\nkind: app\nversion: 1.0.0\nname: Bad\n\
+                    description: Squats.\nexecutable: bin/idle\nservices:\n  idle: idle.yaml\n";
+    let service = "name: idle\nbinary: /apps/org.example.bad/bin/idle\nstart: on-demand\n\
+                   provides:\n  - protocol: mikros.example.Bad\n";
+    let files = [
+        ("bin/idle", read(ITSELF, 18)?, true),
+        ("idle.yaml", service.as_bytes().to_vec(), false),
+    ];
+    pack("bad.mika", manifest, &files)?;
+    let package = connection("bad.mika").ok_or(Failed(18, "opening bad.mika".into()))?;
+    let installed = installer.install(package, vec![], false, false, vec![], FOREVER);
+    let _ = std::fs::remove_file("bad.mika");
+    ensure(
+        matches!(installed, Ok(Err(Status::InvalidArgs))),
+        18,
+        &format!("a squatted protocol gave {installed:?}"),
+    )
+}
+
+/// The bytes of a package of the library `id` in `version`.
+fn library_package(id: &str, version: &str) -> Vec<u8> {
+    let mut builder = Builder::default();
+    builder.file("words.txt", b"word".to_vec(), false);
+    let checksum = checksum_text(&builder.checksum(None));
+    let manifest = format!(
+        "id: {id}\nkind: library\nversion: {version}\nname: Extra\ndescription: More.\n\
+         checksum: {checksum}\n"
+    );
+    builder.file(MANIFEST, manifest.into_bytes(), false);
+    builder.finish()
+}
+
+/// `InstallComponent` of the file `name` holding `bytes` for `SUITE`.
+fn install_component(
+    installer: &InstallerClient,
+    name: &str,
+    bytes: &[u8],
+    code: u8,
+) -> Result<Result<(), Status>, Failed> {
+    std::fs::write(name, bytes).or(failed(code, format!("writing {name}")))?;
+    let package = connection(name).ok_or(Failed(code, format!("opening {name}")))?;
+    let installed = installer.install_component(SUITE.into(), package, FOREVER);
+    let _ = std::fs::remove_file(name);
+    match installed {
+        Ok(r) => Ok(r.map(|_| ())),
+        Err(e) => failed(code, format!("InstallComponent: {e:?}")),
+    }
+}
+
+/// An optional component that an install leaves out is kept, and comes
+/// with `AddComponent` by its ID; `InstallComponent` updates it from a
+/// file of a newer version only; and it goes with its package
+/// (MIKSPEC-0101.R71, MIKSPEC-0101.R72).
+fn components(installer: &InstallerClient) -> Result<(), Failed> {
+    let manifest = format!(
+        "id: {SUITE}\nkind: app\nversion: 1.0.0\nname: Suite\ndescription: Parts.\n\
+         executable: bin/app\ncomponents:\n  - path: parts/extra.mika\n    optional: true\n"
+    );
+    let files = [
+        ("bin/app", b"app".to_vec(), true),
+        ("parts/extra.mika", library_package(EXTRA, "1.0.0"), false),
+    ];
+    install(installer, "suite.mika", &manifest, &files, 26)?;
+    let ids = |all: &[PackageInfo]| all.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+    let all = listed(installer, 26)?;
+    ensure(
+        ids(&all).contains(&SUITE.into()) && !ids(&all).contains(&EXTRA.into()),
+        26,
+        "the suite without its optional part",
+    )?;
+    let added = installer.add_component(SUITE.into(), EXTRA.into(), FOREVER);
+    ensure(
+        matches!(added, Ok(Ok(_))),
+        27,
+        &format!("AddComponent gave {added:?}"),
+    )?;
+    let owned = listed(installer, 27)?
+        .iter()
+        .any(|p| p.id == EXTRA && p.owner == SUITE && p.version == "1.0.0");
+    ensure(owned, 27, "the added part, owned by the suite")?;
+    let again = installer.add_component(SUITE.into(), EXTRA.into(), FOREVER);
+    ensure(
+        matches!(again, Ok(Err(Status::AlreadyExists))),
+        28,
+        &format!("a second AddComponent gave {again:?}"),
+    )?;
+    let newer = library_package(EXTRA, "1.1.0");
+    let updated = install_component(installer, "extra.mika", &newer, 29)?;
+    ensure(
+        updated.is_ok(),
+        29,
+        &format!("InstallComponent gave {updated:?}"),
+    )?;
+    let same = install_component(installer, "extra.mika", &newer, 29)?;
+    ensure(
+        same == Err(Status::BadState),
+        29,
+        &format!("the same version gave {same:?}"),
+    )?;
+    let foreign = library_package("org.example.other", "1.0.0");
+    let refused = install_component(installer, "other.mika", &foreign, 29)?;
+    ensure(
+        refused == Err(Status::InvalidArgs),
+        29,
+        &format!("another package's component gave {refused:?}"),
+    )?;
+    remove(installer, SUITE, 30)?;
+    let gone = !ids(&listed(installer, 30)?).contains(&EXTRA.into());
+    ensure(gone, 30, "the part, gone with the suite")
 }
