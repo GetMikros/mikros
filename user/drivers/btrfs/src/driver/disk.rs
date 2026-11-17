@@ -12,7 +12,9 @@
 //! buffer again; then the requests that had not completed go again, one
 //! at a time and in the order in which they first came, before any
 //! other, each copying what it writes into the new buffer. When no new
-//! channel is up within 10 seconds, or the driver stops, they fail.
+//! channel is up within 10 seconds, or the driver stops, they fail; and
+//! so they do, with none sent, when the new channel's partition is not
+//! the old one (MIKSPEC-0044.R21).
 
 use crate::driver::host::Spin;
 use alloc::collections::{BTreeSet, VecDeque};
@@ -104,6 +106,15 @@ enum Attempt {
     Done(bool),
     /// The channel failed.
     Lost,
+}
+
+/// Whether `new` describes the disk of `old`: the same block size and
+/// count, model and serial.
+fn same_disk(new: &BlockInfo, old: &BlockInfo) -> bool {
+    new.block_size == old.block_size
+        && new.block_count == old.block_count
+        && new.model == old.model
+        && new.serial == old.serial
 }
 
 pub struct Disk {
@@ -274,6 +285,16 @@ impl Disk {
         }
         self.changed();
         let block = BlockClient::new(ClientEnd::new(bus));
+        let info = block.get_info(FOREVER).ok().map(|r| r.info);
+        if !info.is_some_and(|i| same_disk(&i, &self.info)) {
+            mikros_rt::log!(
+                Error,
+                "btrfs: the restarted partition driver serves another disk; failing the requests"
+            );
+            self.gate.lock().failed = true;
+            self.changed();
+            return Err(Status::Io);
+        }
         let link =
             Link::new(block, self.slot_size * SLOTS as u64, process).ok_or(Status::NoResources)?;
         *self.link.lock() = Arc::new(link);

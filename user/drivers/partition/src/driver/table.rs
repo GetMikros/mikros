@@ -177,6 +177,24 @@ pub async fn find(
 }
 
 /// `bytes` bytes of the disk from block `block`.
+/// The disk GUID of the disk's GPT, from its primary header or, when
+/// that is not valid, its backup header (MIKSPEC-0044.R21).
+pub async fn disk_guid(
+    disk: &BlockAsyncClient,
+    info: &BlockInfo,
+    process: sys::Handle,
+) -> Option<[u8; 16]> {
+    let size = u64::from(info.block_size);
+    let last = info.block_count.checked_sub(1)?;
+    for lba in [1, last] {
+        let block = read_bytes(disk, info, process, lba, size).await;
+        if let Some(header) = block.as_deref().and_then(|b| crate::gpt::header(b, lba)) {
+            return Some(header.disk_guid);
+        }
+    }
+    None
+}
+
 async fn read_bytes(
     disk: &BlockAsyncClient,
     info: &BlockInfo,

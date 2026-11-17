@@ -141,6 +141,15 @@ impl Gate {
     }
 }
 
+/// Whether `new` describes the disk of `old`: the same block size and
+/// count, model and serial.
+fn same_disk(new: &BlockInfo, old: &BlockInfo) -> bool {
+    new.block_size == old.block_size
+        && new.block_count == old.block_count
+        && new.model == old.model
+        && new.serial == old.serial
+}
+
 pub struct BlockDevice {
     link: Box<Link>,
     gate: &'static Gate,
@@ -203,6 +212,17 @@ impl BlockDevice {
         let Some(next) = self.gate.take() else {
             return;
         };
+        // The new channel's partition must be the old one; otherwise its
+        // requests fail and none is sent (MIKSPEC-0044.R21).
+        let info = next.block.get_info(FOREVER).ok().map(|r| r.info);
+        if !info.is_some_and(|i| same_disk(&i, &self.info)) {
+            mikros_rt::log!(
+                Error,
+                "fat: the restarted partition driver serves another disk; failing the requests"
+            );
+            self.failed = true;
+            return;
+        }
         // SAFETY: both buffers are mapped for `BUFFER` bytes, and only
         // this device uses them.
         unsafe {

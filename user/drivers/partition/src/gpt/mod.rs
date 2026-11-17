@@ -30,6 +30,7 @@ const NAME_UNITS: usize = 36;
 /// it has of which size, and the array's CRC32.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
+    pub disk_guid: [u8; 16],
     pub my_lba: u64,
     pub alternate_lba: u64,
     pub first_usable_lba: u64,
@@ -109,6 +110,7 @@ pub fn header(block: &[u8], lba: u64) -> Option<Header> {
         return None;
     }
     let header = Header {
+        disk_guid: block[56..72].try_into().expect("16 bytes"),
         my_lba: u64_at(block, 24),
         alternate_lba: u64_at(block, 32),
         first_usable_lba: u64_at(block, 40),

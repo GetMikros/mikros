@@ -311,8 +311,10 @@ async fn start(
     let block = BlockAsyncClient::new(ClientEnd::new(bus), reactor.clone());
     let info = block.get_info().await.map_err(|_| Status::PeerClosed)?.info;
     let name = &request.device.name;
+    let mut disk_guid = None;
     let mut slots: Vec<Slot> = match crate::driver::table::layout(&block, &info, process).await {
         Layout::Gpt(table, partitions) => {
+            disk_guid = crate::driver::table::disk_guid(&block, &info, process).await;
             let count = partitions.len();
             match table {
                 Table::Primary => mikros_rt::log!(
@@ -375,9 +377,16 @@ async fn start(
         })
         .collect();
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
+    let identity = crate::driver::link::Identity {
+        block_size: info.block_size,
+        block_count: info.block_count,
+        model: info.model.clone(),
+        serial: info.serial.clone(),
+        disk_guid,
+    };
     let link = Link::new(
         Rc::new(block),
-        block_size,
+        identity,
         process,
         reactor.clone(),
         spawner.clone(),

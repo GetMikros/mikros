@@ -6,7 +6,10 @@
 //! again if it was held; then it sends those requests again one at a
 //! time, in the order in which they first came, before any other. When
 //! no channel comes within 10 seconds, or the driver stops, they fail
-//! with `IO`.
+//! with `IO`. A new channel's disk must be the old one: the same block
+//! size and count, model and serial, and the same GPT disk GUID when it
+//! had a GPT; otherwise the requests fail with `IO` and none is sent
+//! (MIKSPEC-0044.R21).
 //!
 //! The link numbers buffers itself, so that their numbers stay when the
 //! disk's change. A buffer that a client created before the disk driver
@@ -54,8 +57,19 @@ struct Buffer {
     copy: Option<(OwnedHandle, u64)>,
 }
 
+/// What the disk of a new channel must match to be the same disk.
+pub struct Identity {
+    pub block_size: u32,
+    pub block_count: u64,
+    pub model: alloc::string::String,
+    pub serial: alloc::string::String,
+    /// The disk GUID of its GPT, when it has one.
+    pub disk_guid: Option<[u8; 16]>,
+}
+
 pub struct Link {
     process: sys::Handle,
+    identity: Identity,
     block_size: u64,
     reactor: Reactor,
     spawner: Spawner,
@@ -94,13 +108,15 @@ fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, Status> {
 impl Link {
     pub fn new(
         disk: Rc<BlockAsyncClient>,
-        block_size: u64,
+        identity: Identity,
         process: sys::Handle,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Rc<Link> {
+        let block_size = u64::from(identity.block_size);
         Rc::new(Link {
             process,
+            identity,
             block_size,
             reactor,
             spawner,
@@ -232,6 +248,14 @@ impl Link {
             ClientEnd::new(bus),
             self.reactor.clone(),
         ));
+        if !self.same_disk(&disk).await? {
+            mikros_rt::log!(
+                Error,
+                "partition: the restarted disk driver serves another disk; failing its requests"
+            );
+            self.fail();
+            return Err(Status::Io);
+        }
         let ids: Vec<u32> = self.buffers.borrow().keys().copied().collect();
         for id in ids {
             let Some(size) = self.buffers.borrow().get(&id).map(|b| b.size) else {
@@ -264,6 +288,26 @@ impl Link {
         self.state.set(State::Up);
         self.wake();
         Ok(())
+    }
+
+    /// Whether `disk` is the disk that the link had: the same block size
+    /// and count, model and serial, and GPT disk GUID.
+    async fn same_disk(&self, disk: &BlockAsyncClient) -> Result<bool, Status> {
+        let info = disk.get_info().await.map_err(|_| Status::PeerClosed)?.info;
+        let id = &self.identity;
+        let same = info.block_size == id.block_size
+            && info.block_count == id.block_count
+            && info.model == id.model
+            && info.serial == id.serial;
+        if !same {
+            return Ok(false);
+        }
+        Ok(match id.disk_guid {
+            Some(guid) => {
+                crate::driver::table::disk_guid(disk, &info, self.process).await == Some(guid)
+            }
+            None => true,
+        })
     }
 
     fn map(&self, memory: &OwnedHandle, size: u64) -> Result<u64, Status> {
