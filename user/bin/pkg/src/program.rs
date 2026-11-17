@@ -20,6 +20,8 @@ use std::process::ExitCode;
 
 const INSTALLER: &str = "mikros.packages.Installer";
 const FOREVER: i64 = i64::MAX;
+/// The commands of installed packages.
+const COMMANDS: &str = "/system/commands";
 
 fn fail(code: u8, message: &str) -> ExitCode {
     eprintln!("{}", COMMAND.error(message));
@@ -69,6 +71,21 @@ fn installed(installer: &InstallerClient) -> Result<Vec<PackageInfo>, String> {
 }
 
 /// Whether the user answers `question` with `y`.
+/// The commands of the installed package `id`, for every user or for
+/// this one, as its manifest names them.
+fn installed_commands(id: &str) -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    [
+        format!("/apps/{id}/manifest.yaml"),
+        format!("{home}/apps/{id}/package/manifest.yaml"),
+    ]
+    .iter()
+    .filter_map(|path| std::fs::read(path).ok())
+    .filter_map(|bytes| Manifest::parse(&bytes).ok())
+    .flat_map(|m| m.bins.into_iter().map(|b| b.name))
+    .collect()
+}
+
 fn agrees(question: &str) -> bool {
     print!("{question}");
     let _ = std::io::stdout().flush();
@@ -136,7 +153,20 @@ fn install(
             Place::Local => false,
             Place::Preferred => manifest.global,
         };
-        let commands = Vec::new();
+        // A command that another installed package has stays with it
+        // unless it goes to this one (MIKSPEC-0101.R44).
+        let own = installed_commands(&manifest.id);
+        let mut commands = Vec::new();
+        for bin in &manifest.bins {
+            let taken = Path::new(COMMANDS).join(&bin.name).exists();
+            if !taken || own.contains(&bin.name) {
+                continue;
+            }
+            println!("another installed package has the command {}", bin.name);
+            if agrees(&format!("give {} to {}? [y/N] ", bin.name, manifest.id)) {
+                commands.push(bin.name.clone());
+            }
+        }
         status(
             &manifest.id,
             installer
