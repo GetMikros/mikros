@@ -50,7 +50,7 @@ pub fn stream() -> Result<(OwnedHandle, OwnedHandle), String> {
     Ok(unsafe { (OwnedHandle::from_raw(theirs), OwnedHandle::from_raw(ours)) })
 }
 
-/// Starts `service` with app ID `system.<name>`, the service manager's
+/// Starts `service` with its manifest's app ID, the service manager's
 /// own user, a new `Provider` channel, a stream each as its standard
 /// output and error, the boot handles its manifest lists and the
 /// `PRIORITY` resource its priority needs, from `boot`, and the startup
@@ -85,7 +85,7 @@ pub async fn launch(
         path: service.binary.clone(),
         arguments: arguments(&[&service.binary]).map_err(|s| format!("arguments: {s}"))?,
         handles,
-        app_id: Some(format!("system.{}", service.name)),
+        app_id: Some(service.app_id.clone()),
         user: CALLER_USER,
         login_session: false,
         new_session: false,

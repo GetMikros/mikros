@@ -10,7 +10,6 @@ use crate::sources::{SOURCES, Sources};
 use crate::status::State;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
-use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -150,7 +149,7 @@ impl Supervisor {
                     let (pid, streams) = (started.pid, started.streams.take());
                     this.watch(i, started);
                     if let Some((output, error)) = streams {
-                        let app_id = format!("system.{name}");
+                        let app_id = this.service(i).app_id;
                         this.sources.add(pid, app_id, output, error);
                     }
                     true
@@ -210,8 +209,7 @@ impl Supervisor {
     /// Registers the permissions of service `i`'s manifest.
     async fn grant(&self, broker: &BrokerAsyncClient, i: usize) -> Result<(), String> {
         let service = self.service(i);
-        let app_id = format!("system.{}", service.name);
-        broker::grant(broker, &app_id, service.permissions.clone()).await
+        broker::grant(broker, &service.app_id, service.permissions.clone()).await
     }
 
     /// Forwards connections to service `i`, which `started` runs, and

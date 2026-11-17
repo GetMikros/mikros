@@ -80,6 +80,7 @@ pub fn install(
     if kind == Kind::Driver {
         super::drivers::check(&package, &given, &manifest)?;
     }
+    super::services::check(&package, &given, &manifest)?;
     if !manifest.installable {
         return Err(Status::InvalidArgs);
     }
@@ -132,6 +133,10 @@ pub fn install(
     // An old version of a library that a program still needs is kept
     // (MIKSPEC-0101.R51).
     let old = installed(&root, kind, &manifest.id, &scope);
+    let old_manifest = old.as_ref().and_then(|_| {
+        let at = place::subvolume(kind, &manifest.id, &scope)?;
+        Manifest::parse(&root.read(&format!("{at}/{}", format::MANIFEST)).ok()?).ok()
+    });
     let keep = match (kind, &scope, old) {
         (Kind::Library, Scope::Global, Some(old)) => {
             let new = super::kept::package_files(&package, q.dev);
@@ -164,6 +169,17 @@ pub fn install(
     // A driver marked for boot changes the boot list (MIKSPEC-0101.R20).
     if kind == Kind::Driver {
         super::drivers::boot_modules_changed(shared, &root)?;
+    }
+    // The services of global packages run from their own folders, and
+    // the service manager learns of them (MIKSPEC-0101.R55).
+    let old_services = old_manifest
+        .as_ref()
+        .is_some_and(|m| !m.services.is_empty());
+    if scope == Scope::Global && (!manifest.services.is_empty() || old_services) {
+        if !manifest.services.is_empty() {
+            super::services::make_folders(&root, &manifest.id)?;
+        }
+        super::services::changed(shared);
     }
     super::kept::clean(shared, &root)
 }

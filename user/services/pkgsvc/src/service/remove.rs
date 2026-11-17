@@ -158,6 +158,14 @@ fn delete(
     if kind == Kind::Driver {
         super::drivers::boot_modules_changed(shared, root)?;
     }
+    // The service manager stops the services of a removed global package
+    // (MIKSPEC-0101.R55).
+    let had_services = everything
+        .iter()
+        .any(|p| p.manifest.id == id && p.owner == owner && !p.manifest.services.is_empty());
+    if *scope == Scope::Global && had_services {
+        super::services::changed(shared);
+    }
     let _ = subvolumes.delete(&format!("public/{id}"));
     if kind == Kind::App && !keep_data {
         let homes: Vec<String> = match scope {

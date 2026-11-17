@@ -28,6 +28,7 @@ fn minimal_manifest_takes_defaults() {
         m.service,
         Service {
             name: "log".to_string(),
+            app_id: "system.log".to_string(),
             binary: "/system/bin/log".to_string(),
             provides: vec![],
             after: vec![],
@@ -539,4 +540,31 @@ fn reads_installed_drivers_with_their_package_ids() {
     assert_eq!(kind_of("Org.Drv", bad), ErrorKind::BadName);
     let system_id = b"name: system.drv\nbinary: /system/drivers/system.drv/drv\n";
     assert_eq!(kind_of("system.drv", system_id), ErrorKind::BadName);
+}
+
+#[test]
+fn reads_services_of_packages() {
+    let text = b"name: index\nbinary: /apps/org.example.editor/bin/index\nstart: on-demand\n\
+                 permissions: [user.documents.access]\n";
+    let m = parse_package_service("org.example.editor", "index", text).unwrap();
+    assert_eq!(m.service.name, "org.example.editor.index");
+    assert_eq!(m.service.app_id, "org.example.editor");
+    let system = parse(
+        "system.logsvc",
+        b"name: logsvc\nbinary: /system/logsvc\nstart: boot\n",
+    )
+    .unwrap();
+    assert_eq!(system.service.app_id, "system.logsvc");
+    let kind_of = |key: &str, text: &[u8]| {
+        parse_package_service("org.example.editor", key, text)
+            .unwrap_err()
+            .kind
+    };
+    assert_eq!(kind_of("other", text), ErrorKind::FileName);
+    let outside = b"name: index\nbinary: /system/bin/index\nstart: boot\n";
+    assert_eq!(kind_of("index", outside), ErrorKind::BadBinary);
+    let admin = b"name: index\nbinary: /apps/org.example.editor/i\nstart: boot\npermissions: [admin.logs.read]\n";
+    assert_eq!(kind_of("index", admin), ErrorKind::ReservedPermission);
+    let handles = b"name: index\nbinary: /apps/org.example.editor/i\nstart: boot\nboot_handles: [root_budget]\n";
+    assert_eq!(kind_of("index", handles), ErrorKind::BadBootHandle);
 }

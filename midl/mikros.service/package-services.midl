@@ -1,0 +1,8 @@
+// MIKSPEC-0036.R40
+
+library mikros.service;
+using mikros.base;
+
+protocol PackageServices {
+    @1 ServicesChanged() -> () error base.Status;
+};

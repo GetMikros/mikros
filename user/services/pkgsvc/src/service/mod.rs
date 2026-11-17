@@ -12,6 +12,7 @@ mod list;
 mod package;
 mod public;
 mod remove;
+mod services;
 
 use files::{Root, Subvolumes};
 use mikros_mika::format::{self, Package};
@@ -23,7 +24,8 @@ use mikros_rt::interfaces::mikros::packages::{
     Installer, InstallerCommandOwnerResponse, InstallerCommandsResponse,
     InstallerCreatePublicResponse, InstallerInspectResponse, InstallerInstallResponse,
     InstallerListResponse, InstallerOpenPublicResponse, InstallerOpenResponse,
-    InstallerRemoveResponse, InstallerRequest, InstallerServer,
+    InstallerRemoveResponse, InstallerRequest, InstallerServer, InstallerServiceManifestResponse,
+    InstallerServicesResponse,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
@@ -237,6 +239,16 @@ fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity)
                     .map(|id| InstallerCommandOwnerResponse { id }),
             ),
             R::Open(q, r) => r.reply(s, open_package(&caller, q.package, q.server)),
+            R::Services(q, r) => r.reply(
+                s,
+                services::list(&shared, &caller, &q.after)
+                    .map(|services| InstallerServicesResponse { services }),
+            ),
+            R::ServiceManifest(q, r) => r.reply(
+                s,
+                services::manifest(&shared, &caller, &q.name)
+                    .map(|manifest| InstallerServiceManifestResponse { manifest }),
+            ),
             R::Commands(q, r) => r.reply(
                 s,
                 commands::commands(&shared, &caller, q.server)

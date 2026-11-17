@@ -1,4 +1,4 @@
-// MIKSPEC-0101.R48
+// MIKSPEC-0101.R54
 
 library mikros.packages;
 using mikros.base;
@@ -11,6 +11,11 @@ type PackageInfo = struct {
     name string<128>;
     global bool;
     owner string<128>;
+};
+
+type PackageService = struct {
+    name string<255>;
+    app_id string<128>;
 };
 
 protocol Installer {
@@ -33,4 +38,8 @@ protocol Installer {
         -> (manifest vector<u8, 32768>) error base.Status;
     @9 OpenPublic(id string<128>, server server_end<mikros.fs.Node>)
         -> () error base.Status;
+    @10 Services(after string<255>)
+        -> (services vector<PackageService, 64>) error base.Status;
+    @11 ServiceManifest(name string<255>)
+        -> (manifest vector<u8, 16384>) error base.Status;
 };

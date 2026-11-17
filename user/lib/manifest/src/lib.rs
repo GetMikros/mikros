@@ -62,6 +62,9 @@ pub const SERVICE_FILE: &str = "service.yaml";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Service {
     pub name: String,
+    /// The app ID it runs with: `system.<name>` for a service of the
+    /// system, and its package's ID for one of a package.
+    pub app_id: String,
     pub binary: String,
     pub provides: Vec<Provide>,
     pub after: Vec<String>,
@@ -192,10 +195,9 @@ fn error(node: &Node, kind: ErrorKind) -> Error {
 pub fn parse(folder: &str, bytes: &[u8]) -> Result<Manifest, Error> {
     let root = mikros_yaml::parse(bytes)?;
     let map = root.map()?;
-    let mut unknown = unknown_keys(map, KEYS);
-    let required = |key| map.get(key).ok_or(error(&root, ErrorKind::Missing(key)));
-
-    let name_node = required("name")?;
+    let name_node = map
+        .get("name")
+        .ok_or(error(&root, ErrorKind::Missing("name")))?;
     let name = name_node.string()?;
     if !is_kebab_case(name) {
         return Err(error(name_node, ErrorKind::BadName));
@@ -203,9 +205,68 @@ pub fn parse(folder: &str, bytes: &[u8]) -> Result<Manifest, Error> {
     if folder.strip_prefix(SERVICE_PREFIX) != Some(name) {
         return Err(error(name_node, ErrorKind::FileName));
     }
+    parse_service(
+        &root,
+        String::from(name),
+        String::from(folder),
+        is_under_system,
+    )
+}
+
+/// The service manifest `bytes` of the service `key` of the package `id`
+/// (MIKSPEC-0101.R55): its `name` is `key`, it runs as `<id>.<key>` with
+/// the app ID `id` and a binary in `/apps/<id>/`, and it has no boot
+/// handles and no `system` or `admin` permission.
+pub fn parse_package_service(id: &str, key: &str, bytes: &[u8]) -> Result<Manifest, Error> {
+    let root = mikros_yaml::parse(bytes)?;
+    let map = root.map()?;
+    let name_node = map
+        .get("name")
+        .ok_or(error(&root, ErrorKind::Missing("name")))?;
+    let name = name_node.string()?;
+    if !is_kebab_case(name) {
+        return Err(error(name_node, ErrorKind::BadName));
+    }
+    if name != key {
+        return Err(error(name_node, ErrorKind::FileName));
+    }
+    let package = alloc::format!("/apps/{id}/");
+    let in_package = |binary: &str| {
+        binary
+            .strip_prefix(package.as_str())
+            .is_some_and(|b| !b.is_empty())
+    };
+    let manifest = parse_service(
+        &root,
+        alloc::format!("{id}.{key}"),
+        String::from(id),
+        in_package,
+    )?;
+    if let Some(node) = map.get("boot_handles") {
+        return Err(error(node, ErrorKind::BadBootHandle));
+    }
+    let reserved = |p: &String| p.starts_with("system.") || p.starts_with("admin.");
+    if manifest.service.permissions.iter().any(reserved) {
+        let node = map.get("permissions").unwrap_or(&root);
+        return Err(error(node, ErrorKind::ReservedPermission));
+    }
+    Ok(manifest)
+}
+
+/// The service manifest of `root` for the service `name` with the app ID
+/// `app_id`, whose binary `binary_ok` accepts.
+fn parse_service(
+    root: &Node,
+    name: String,
+    app_id: String,
+    binary_ok: impl Fn(&str) -> bool,
+) -> Result<Manifest, Error> {
+    let map = root.map()?;
+    let mut unknown = unknown_keys(map, KEYS);
+    let required = |key| map.get(key).ok_or(error(root, ErrorKind::Missing(key)));
     let binary_node = required("binary")?;
     let binary = binary_node.string()?;
-    if !is_under_system(binary) {
+    if !binary_ok(binary) {
         return Err(error(binary_node, ErrorKind::BadBinary));
     }
     let start_node = required("start")?;
@@ -260,7 +321,8 @@ pub fn parse(folder: &str, bytes: &[u8]) -> Result<Manifest, Error> {
         Some(node) => node.integer(1, i64::MAX)? as u64,
     };
     let service = Service {
-        name: name.into(),
+        name,
+        app_id,
         binary: binary.into(),
         provides,
         after: strings(map, "after")?,
