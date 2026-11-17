@@ -8,6 +8,10 @@
 //! it has the same variables and the folder it was given. Either exits
 //! with 0 when every check passed, and with the number of the first
 //! check that failed otherwise.
+//!
+//! Started as the package's command `hello-probe` with the arguments
+//! `command <folder>`, it checks that it runs as the app, with the app's
+//! home, in `<folder>`, the shell's, which it can write to.
 
 use std::env;
 use std::fs;
@@ -23,8 +27,12 @@ const ME: &str = "/apps/org.example.hello/bin/probe";
 const NOTE: &str = "/apps/org.example.hello/note";
 
 fn main() -> ExitCode {
-    let child = env::args().nth(1).as_deref() == Some("child");
-    let result = if child { child_checks() } else { checks() };
+    let args: Vec<String> = env::args().collect();
+    let result = match args.get(1).map(String::as_str) {
+        Some("child") => child_checks(),
+        Some("command") => command_checks(args.get(2).map(String::as_str).unwrap_or("")),
+        _ => checks(),
+    };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => ExitCode::from(code),
@@ -72,5 +80,14 @@ fn child_checks() -> Result<(), u8> {
     let cwd = env::current_dir().map_err(|_| 52)?;
     check(cwd == Path::new("/tmp"), 52)?;
     check(fs::read(NOTE).is_ok_and(|n| n == b"from the app"), 53)?;
+    Ok(())
+}
+
+fn command_checks(folder: &str) -> Result<(), u8> {
+    check(var_is("MIKA_MODE", "local"), 81)?;
+    check(var_is("HOME", FOLDER), 82)?;
+    let cwd = env::current_dir().map_err(|_| 83)?;
+    check(!folder.is_empty() && cwd == Path::new(folder), 83)?;
+    check(fs::write("from-command", b"from the command").is_ok(), 84)?;
     Ok(())
 }

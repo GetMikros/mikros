@@ -221,6 +221,7 @@ async fn packages(shell: &Shell<'_>, reactor: &mikros_rt::exec::Reactor) -> Resu
         )?;
     }
     run_app(shell, ID, reactor).await?;
+    run_command(shell, &installer, ID, reactor).await?;
     run_libraries(shell, &installer, reactor).await?;
     let removed = installer.remove(ID.into(), false, false).await;
     check(matches!(removed, Ok(Ok(_))), 28)?;
@@ -241,6 +242,8 @@ struct Shell<'a> {
     home: &'a NodeAsyncClient,
     /// The entry `/users/<name>/apps`.
     apps: &'a NodeAsyncClient,
+    /// The entry `/system/commands`.
+    commands: &'a NodeAsyncClient,
     system: &'a NodeAsyncClient,
     directory: &'a DirectoryAsyncClient,
     launcher: &'a LauncherAsyncClient,
@@ -343,6 +346,79 @@ async fn run_app(
     Ok(())
 }
 
+/// Checks that `/system/commands` lists the command `hello-probe` of the
+/// installed package `id`, that run from there in the home folder it
+/// starts as that app, in the home folder, which it gets in its
+/// namespace with the shell's rights there, and that a package with a
+/// command of the system's is refused (MIKSPEC-0101.R44).
+async fn run_command(
+    shell: &Shell<'_>,
+    installer: &mikros_rt::interfaces::mikros::packages::InstallerAsyncClient,
+    id: &str,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    use mikros_rt::interfaces::mikros::base::Status;
+    use mikros_rt::interfaces::mikros::process::{SpawnRequest, StatusKind, WaitOptions};
+    const COMMAND: &str = "hello-probe";
+    let listed = shell.commands.read_directory(0, false).await;
+    let entries = listed.ok().and_then(|r| r.ok()).ok_or(70)?.entries;
+    check(entries.iter().any(|e| e.name == COMMAND), 70)?;
+    let path = format!("/system/commands/{COMMAND}");
+    let home = format!("/users/{}", shell.name);
+    let request = SpawnRequest {
+        path: path.clone(),
+        arguments: arguments(&[&path, "command", &home]).ok_or(71)?,
+        handles: Vec::new(),
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+        new_session: false,
+        working_directory: Some(home.clone()),
+        umask: u32::MAX,
+    };
+    let spawned = shell.launcher.spawn(request).await;
+    let pid = spawned.ok().and_then(|r| r.ok()).ok_or(71)?.pid;
+    let info = shell.launcher.get_info(pid).await;
+    let info = info.ok().and_then(|r| r.ok()).ok_or(72)?.info;
+    check(info.app_id == id, 72)?;
+    let waited = shell
+        .launcher
+        .wait(pid as i32, WaitOptions(0), now() + 60 * SECOND)
+        .await;
+    let status = waited.ok().and_then(|r| r.ok()).ok_or(73)?.status;
+    check(status.kind == StatusKind::Exited, 73)?;
+    // The probe's own number for the check that failed.
+    if status.exit_code != 0 {
+        return Err(status.exit_code);
+    }
+    let note = read_all(shell.home, "from-command", reactor).await;
+    check(note.as_deref() == Ok(b"from the command".as_slice()), 74)?;
+    let unlinked = shell.home.unlink("from-command".into(), false).await;
+    check(matches!(unlinked, Ok(Ok(_))), 74)?;
+    // The system has msh.
+    let manifest = "id: org.example.shell\nkind: app\nversion: 1.0.0\nname: Shell\n\
+                    description: Is msh.\nexecutable: bin/msh\ninstall: local\n\
+                    bins:\n  - name: msh\n    path: bin/msh\n";
+    let file = pack(
+        shell,
+        "shell.mika",
+        manifest,
+        &[("bin/msh", b"#!/system/bin/msh\n".to_vec())],
+        75,
+        reactor,
+    )
+    .await?;
+    let (client, server) = endpoints::<Node>().map_err(|_| 75)?;
+    let cloned = file.clone(server, Rights::READ).await;
+    check(matches!(cloned, Ok(Ok(_))), 75)?;
+    let installed = installer
+        .install(client, false, vec![], false, false, vec![])
+        .await;
+    check(matches!(installed, Ok(Err(Status::AlreadyExists))), 75)?;
+    let unlinked = shell.home.unlink("shell.mika".into(), false).await;
+    check(matches!(unlinked, Ok(Ok(_))), 75)
+}
+
 /// Where the console image keeps the program and the libraries that
 /// `run_libraries` packs, below `/system`.
 const PACKAGE_C: &str = "share/package-c";
@@ -434,6 +510,29 @@ async fn install(
     code: i64,
     reactor: &mikros_rt::exec::Reactor,
 ) -> Result<(), i64> {
+    let file = pack(shell, name, manifest, files, code, reactor).await?;
+    let (client, server) = endpoints::<Node>().map_err(|_| code)?;
+    let cloned = file.clone(server, Rights::READ).await;
+    check(matches!(cloned, Ok(Ok(_))), code)?;
+    let installed = installer
+        .install(client, false, vec![], false, false, vec![])
+        .await;
+    check(matches!(installed, Ok(Ok(_))), code)?;
+    let unlinked = shell.home.unlink(name.into(), false).await;
+    check(matches!(unlinked, Ok(Ok(_))), code)
+}
+
+/// Packs `files`, each executable, with the manifest `manifest` and its
+/// checksum into the file `name` of the user's home, and returns it;
+/// fails with `code`.
+async fn pack(
+    shell: &Shell<'_>,
+    name: &str,
+    manifest: &str,
+    files: &[(&str, Vec<u8>)],
+    code: i64,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<NodeAsyncClient, i64> {
     use mikros_mika::format::{Builder, MANIFEST, checksum_text};
     let mut builder = Builder::default();
     for (path, bytes) in files {
@@ -456,15 +555,7 @@ async fn install(
         let written = file.write((at * 32768) as u64, chunk.to_vec()).await;
         check(matches!(written, Ok(Ok(_))), code)?;
     }
-    let (client, server) = endpoints::<Node>().map_err(|_| code)?;
-    let cloned = file.clone(server, Rights::READ).await;
-    check(matches!(cloned, Ok(Ok(_))), code)?;
-    let installed = installer
-        .install(client, false, vec![], false, false, vec![])
-        .await;
-    check(matches!(installed, Ok(Ok(_))), code)?;
-    let unlinked = shell.home.unlink(name.into(), false).await;
-    check(matches!(unlinked, Ok(Ok(_))), code)
+    Ok(file)
 }
 
 /// A memory object of `args` with no environment, as `Spawn` takes them.
@@ -508,9 +599,14 @@ async fn write_package(
         builder.file("bin/probe", probe.to_vec(), true);
     }
     let checksum = checksum_text(&builder.checksum(None));
+    // The probe is also the package's command.
+    let bins = match probe {
+        Some(_) => "bins:\n  - name: hello-probe\n    path: bin/probe\n",
+        None => "",
+    };
     let manifest = format!(
         "id: {id}\nkind: app\nversion: {version}\nname: Hello\ndescription: Says hello.\n\
-         executable: bin/hello\ninstall: local\nchecksum: {checksum}\n"
+         executable: bin/hello\ninstall: local\nchecksum: {checksum}\n{bins}"
     );
     builder.file(MANIFEST, manifest.into_bytes(), false);
     let bytes = builder.finish();
@@ -551,10 +647,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let mut libraries = None;
     let mut system = None;
     let mut apps = None;
+    let mut commands = None;
     for entry in managed.namespace {
         match entry.path.as_str() {
             "/libraries" => libraries = Some(entry.directory),
             "/system" => system = Some(entry.directory),
+            "/system/commands" => commands = Some(entry.directory),
             path if path.starts_with("/users/") && path.ends_with("/apps") => {
                 apps = Some(entry.directory);
             }
@@ -600,9 +698,11 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         acls(&home, user, &reactor).await?;
         let system = NodeAsyncClient::new(system.ok_or(33)?, reactor.clone());
         let apps = NodeAsyncClient::new(apps.ok_or(33)?, reactor.clone());
+        let commands = NodeAsyncClient::new(commands.ok_or(70)?, reactor.clone());
         let shell = Shell {
             home: &home,
             apps: &apps,
+            commands: &commands,
             system: &system,
             directory: &directory,
             launcher: &launcher,
