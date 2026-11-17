@@ -79,7 +79,7 @@ pub struct UsbDevice {
 /// The USB core of one controller.
 pub struct Usb {
     pub controller: Rc<Controller>,
-    pub manager: DeviceManagerAsyncClient,
+    pub manager: Rc<DeviceManagerAsyncClient>,
     protocols: Vec<Protocol>,
     /// The device on each root hub port.
     attached: RefCell<BTreeMap<u8, Rc<UsbDevice>>>,
@@ -90,7 +90,7 @@ pub struct Usb {
 }
 
 impl Usb {
-    pub fn new(controller: Rc<Controller>, manager: DeviceManagerAsyncClient) -> Rc<Usb> {
+    pub fn new(controller: Rc<Controller>, manager: Rc<DeviceManagerAsyncClient>) -> Rc<Usb> {
         let protocols = controller.regs.protocols();
         Rc::new(Usb {
             controller,

@@ -280,7 +280,22 @@ impl Endpoint {
     /// goes back once the controller has passed them.
     async fn cancel(self: &Rc<Self>, id: u64) {
         let stop = [0, 0, 0, self.command(TRB_STOP_ENDPOINT)];
-        let _ = self.controller.command(stop).await;
+        // A completion, with an error too, means the endpoint no longer
+        // runs; without one within the command's limit, the controller is
+        // reset, which as for any PCI function counts whatever its result,
+        // before the TD fails (MIKSPEC-0041.R12, MIKSPEC-0080.R12).
+        if let Err(status) = self.controller.command(stop).await {
+            mikros_rt::log!(
+                Error,
+                "xhci: endpoint {} of slot {} did not stop ({status:?}); asking for the controller's reset",
+                self.id,
+                self.slot
+            );
+            let manager = self.controller.manager.borrow().clone();
+            if let Some(manager) = manager {
+                let _ = manager.request_reset().await;
+            }
+        }
         let (sender, skip) = {
             let mut state = self.state.borrow_mut();
             let pending = &mut state.pending;

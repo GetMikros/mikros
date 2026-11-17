@@ -153,7 +153,7 @@ async fn start(
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<(Rc<Controller>, DeviceManagerAsyncClient), Status> {
+) -> Result<(Rc<Controller>, Rc<DeviceManagerAsyncClient>), Status> {
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let dma = request
         .resources
@@ -162,7 +162,11 @@ async fn start(
         .ok_or(Status::InvalidArgs)?;
     let pci = PciBus::new(bus, reactor);
     let controller = Controller::start(pci, process, dma, reactor, spawner).await?;
-    let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
+    let manager = Rc::new(DeviceManagerAsyncClient::new(
+        request.manager,
+        reactor.clone(),
+    ));
+    *controller.manager.borrow_mut() = Some(manager.clone());
     Ok((controller, manager))
 }
 
