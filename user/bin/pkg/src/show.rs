@@ -76,8 +76,8 @@ pub fn kind_name(kind: Option<Kind>) -> &'static str {
 }
 
 /// A package's name, ID, version, description and kind, and what it
-/// installs: its program, commands, services, which ask for
-/// `admin.services.install`, components and driver.
+/// installs: its program, commands, services, which run only when it is
+/// installed for every user, components and driver.
 pub fn describe(m: &Manifest) -> String {
     let mut text = String::new();
     let name = m.name.as_deref().unwrap_or(&m.id);
@@ -99,7 +99,7 @@ pub fn describe(m: &Manifest) -> String {
     }
     for (name, _) in &m.services {
         text.push_str(&format!(
-            "  service: {}.{name}, which asks for admin.services.install\n",
+            "  service: {}.{name}, which runs when installed for every user\n",
             m.id
         ));
     }
@@ -107,9 +107,7 @@ pub fn describe(m: &Manifest) -> String {
         text.push_str(&format!("  component: {component}\n"));
     }
     if let Some(driver) = &m.driver {
-        text.push_str(&format!(
-            "  driver: {driver}, which asks for admin.drivers.install\n"
-        ));
+        text.push_str(&format!("  driver: {driver}\n"));
     }
     for (needed, _) in &m.needs {
         text.push_str(&format!("  needs: {needed}\n"));
@@ -205,11 +203,9 @@ mod tests {
         .unwrap();
         let text = describe(&m);
         assert!(text.starts_with("Editor (org.example.editor) 1.0.0\n  Edits.\n  kind: app\n"));
-        assert!(
-            text.contains(
-                "service: org.example.editor.index, which asks for admin.services.install"
-            )
-        );
+        assert!(text.contains(
+            "service: org.example.editor.index, which runs when installed for every user"
+        ));
         let same = update_warnings("org.x.y", "1.0.0", "1.0.0");
         assert_eq!(same.lines().count(), 1);
         assert!(same.starts_with(

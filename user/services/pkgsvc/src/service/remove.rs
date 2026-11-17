@@ -6,7 +6,7 @@
 
 use super::Shared;
 use super::files::{Root, users};
-use super::install::{installed, permission, scope};
+use super::install::{PERMISSION, installed, scope};
 use crate::place::{self, Scope};
 use crate::records::Owner;
 use mikros_mika::format::MANIFEST;
@@ -88,7 +88,7 @@ pub fn remove(
             .find(|p| p.manifest.id == id && p.scope == Scope::Global)
             .map(|p| p.manifest.clone())
             .ok_or(Status::NotFound)?;
-        if !super::allowed(shared, caller, permission(kind), &manifest, "remove")? {
+        if !super::allowed(shared, caller, PERMISSION, &manifest, "remove")? {
             return Err(Status::AccessDenied);
         }
     }

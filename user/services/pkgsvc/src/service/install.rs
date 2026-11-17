@@ -23,15 +23,9 @@ const INCLUDE: &str = "include";
 /// The folder of the system's programs, from the root.
 const SYSTEM_BIN: &str = "system/bin";
 
-/// The permission that installing a package of `kind` for every user
-/// needs.
-pub fn permission(kind: Kind) -> &'static str {
-    match kind {
-        Kind::App => "admin.apps.install",
-        Kind::Library => "admin.libraries.install",
-        Kind::Driver => "admin.drivers.install",
-    }
-}
+/// The permission that installing, updating or removing a package of
+/// any kind for every user needs (MIKSPEC-0037.R37).
+pub const PERMISSION: &str = "admin.packages.install";
 
 /// The scope, and its owner in the records, that `global` names for
 /// `caller`.
@@ -128,8 +122,7 @@ pub fn install(
             return Err(Status::NotFound);
         }
     }
-    if scope == Scope::Global
-        && !super::allowed(shared, caller, permission(kind), &manifest, "install")?
+    if scope == Scope::Global && !super::allowed(shared, caller, PERMISSION, &manifest, "install")?
     {
         return Err(Status::AccessDenied);
     }
