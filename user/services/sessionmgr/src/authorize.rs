@@ -1,10 +1,13 @@
-//! Administrator authorization: `mikros.session.Authorization`, which the
-//! session manager serves to the permission broker alone, for the
-//! clients that ask the broker for `admin` permissions. It asks
+//! Administrator authorization and user questions:
+//! `mikros.session.Authorization`, which the session manager serves to
+//! the permission broker alone, for the clients that ask the broker for
+//! `admin` permissions, and `mikros.permissions.Prompter`, with which the
+//! broker asks it for `user` permissions (MIKSPEC-0057.R30). It asks
 //! through the authorization screen of the text console that the
-//! client's login session runs on, with `OnAuthorize`, one request per
-//! console at a time, and ends the request on `Answer` or `Cancel`, after
-//! 60 seconds, or when the client terminates.
+//! client's login session runs on, with `OnAuthorize` or `OnAsk`, one
+//! request per console at a time, and ends the request on `Answer`,
+//! `AnswerAsk` or `Cancel`, after 60 seconds, or when the client
+//! terminates (MIKSPEC-0057.R32).
 
 use crate::wait::{Either, Slot, Waiters, select};
 use crate::{SECOND, now};
@@ -13,10 +16,15 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::ServerEnd;
+use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::permissions::{
+    Broker, BrokerAsyncClient, Decision, Prompter, PrompterAskResponse, PrompterAsyncServer,
+    PrompterRequest,
+};
 use mikros_rt::interfaces::mikros::process::{ElevationsAsyncClient, LauncherAsyncClient};
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
+use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{
     AccountsAsyncClient, Authorization, AuthorizationAsyncServer, AuthorizationAuthorizeResponse,
     AuthorizationRequest, TextLoginAsyncServer, User, UserKind,
@@ -24,6 +32,7 @@ use mikros_rt::interfaces::mikros::session::{
 
 /// How long a request waits for an answer, and how often its task looks
 /// whether the client still runs, which it has no handle to wait on.
+const BROKER: &str = "mikros.permissions.Broker";
 const TIMEOUT: i64 = 60 * SECOND;
 const CLIENT_POLL: i64 = SECOND;
 
@@ -32,6 +41,8 @@ enum Outcome {
     /// `Answer` checked the credentials: the administrator's user ID, or
     /// none when they were wrong or not an administrator's.
     Answered(Option<u32>),
+    /// `AnswerAsk`: whether the user allowed it.
+    Asked(bool),
     Cancelled,
 }
 
@@ -40,6 +51,9 @@ enum Outcome {
 struct Open {
     console: u8,
     outcome: Rc<Slot<Outcome>>,
+    /// Whether it is an `OnAsk`, which `AnswerAsk` answers, rather than
+    /// an `OnAuthorize`, which `Answer` does.
+    ask: bool,
 }
 
 /// The requests and what they need.
@@ -83,7 +97,7 @@ impl Requests {
     /// fails with `NOT_FOUND` for a request that is not open, and with
     /// `ACCESS_DENIED` unless they are an administrator's.
     pub async fn answer(&self, request: u32, name: String, password: String) -> Result<(), Status> {
-        if !self.open.borrow().contains_key(&request) {
+        if !self.open.borrow().get(&request).is_some_and(|o| !o.ask) {
             return Err(Status::NotFound);
         }
         let admin = match self.accounts.authenticate(name, password).await {
@@ -96,6 +110,15 @@ impl Requests {
         // The request may have ended while the password was checked.
         self.give(request, Outcome::Answered(admin))?;
         admin.map(drop).ok_or(Status::AccessDenied)
+    }
+
+    /// Answers open `OnAsk` request `request` with `allowed`, once: fails
+    /// with `NOT_FOUND` for one that is not open or not an `OnAsk`.
+    pub fn answer_ask(&self, request: u32, allowed: bool) -> Result<(), Status> {
+        if !self.open.borrow().get(&request).is_some_and(|o| o.ask) {
+            return Err(Status::NotFound);
+        }
+        self.give(request, Outcome::Asked(allowed))
     }
 
     /// Ends open request `request` without an answer.
@@ -166,42 +189,46 @@ impl Requests {
         self.ask(client, action, reason).await
     }
 
-    /// Asks on the client's console for `action`, as `authorize` does for
-    /// a process that is not elevated.
-    async fn ask(
+    /// The text console of the client's login session, and the
+    /// `TextLogin` server to ask there, or none when it runs in no text
+    /// console's session or is no longer the process it was
+    /// (MIKSPEC-0057.R32).
+    async fn console_of(
         &self,
         client: &ClientIdentity,
-        action: String,
-        reason: String,
-    ) -> Option<(bool, u32)> {
-        let denied = Some((false, 0));
-        let info = match self.launcher.get_info(client.pid).await {
-            Ok(Ok(info)) => info,
+        what: &str,
+    ) -> Option<(u8, Rc<TextLoginAsyncServer>)> {
+        let pid = client.pid;
+        let info = match self.launcher.get_info(pid).await {
+            Ok(Ok(info)) => info.info,
             other => {
-                let pid = client.pid;
-                mikros_rt::log!(Error, "sessionmgr: Authorize: describing {pid}: {other:?}");
-                return denied;
+                mikros_rt::log!(Error, "sessionmgr: {what}: describing {pid}: {other:?}");
+                return None;
             }
         };
-        let session = info.info.login_session;
-        let console = self
-            .sessions
-            .borrow()
-            .iter()
-            .find(|&(_, &s)| s != 0 && s == session)
-            .map(|(&c, _)| c);
+        let console = (info.koid == client.koid)
+            .then(|| {
+                self.sessions
+                    .borrow()
+                    .iter()
+                    .find(|&(_, &s)| s != 0 && s == info.login_session)
+                    .map(|(&c, _)| c)
+            })
+            .flatten();
         let (Some(console), Some(server)) = (console, self.text_login.borrow().clone()) else {
-            let pid = client.pid;
             mikros_rt::log!(
                 Info,
-                "sessionmgr: Authorize: process {pid} runs on no text console; refused"
+                "sessionmgr: {what}: process {pid} runs on no text console; refused"
             );
-            return denied;
+            return None;
         };
-        let name = match user(&self.accounts, client.user).await {
-            Some(u) if u.kind == UserKind::Admin => u.name,
-            _ => String::new(),
-        };
+        Some((console, server))
+    }
+
+    /// Opens a request on `console` of the kind `ask`, once the console
+    /// has no other open request, and its number and the slot of its
+    /// outcome.
+    async fn open(&self, console: u8, ask: bool) -> (u32, Rc<Slot<Outcome>>) {
         // One request per console: the next starts once it is free.
         self.freed.until(|| !self.busy(console)).await;
         let request = self.next.get();
@@ -210,15 +237,27 @@ impl Requests {
         let open = Open {
             console,
             outcome: slot.clone(),
+            ask,
         };
         self.open.borrow_mut().insert(request, open);
-        let app_id = client.app_id.clone();
-        let sent = server
-            .server()
-            .send_on_authorize(request, console, app_id, action, reason, name);
+        (request, slot)
+    }
+
+    /// The outcome of open request `request` once it was sent with
+    /// `sent`: none after 60 seconds, and `Err` when the client
+    /// terminated first. The request is closed, and the console told
+    /// that it ended unless it ended there.
+    async fn wait(
+        &self,
+        client: &ClientIdentity,
+        request: u32,
+        slot: &Slot<Outcome>,
+        server: &TextLoginAsyncServer,
+        sent: bool,
+    ) -> Result<Option<Outcome>, ()> {
         let deadline = now() + TIMEOUT;
         let outcome = loop {
-            if sent.is_err() {
+            if !sent {
                 break None;
             }
             // The outcome, or the next look at the client, or the end.
@@ -230,19 +269,74 @@ impl Requests {
                     if !matches!(self.launcher.get_info(client.pid).await, Ok(Ok(_))) {
                         self.close(request);
                         let _ = server.server().send_on_authorize_ended(request);
-                        return None;
+                        return Err(());
                     }
                 }
             }
         };
         self.close(request);
-        match outcome {
-            Some(Outcome::Answered(Some(admin))) => Some((true, admin)),
-            Some(_) => denied,
-            None => {
-                let _ = server.server().send_on_authorize_ended(request);
-                denied
-            }
+        if outcome.is_none() {
+            let _ = server.server().send_on_authorize_ended(request);
+        }
+        Ok(outcome)
+    }
+
+    /// Asks on the client's console for `action`, as `authorize` does for
+    /// a process that is not elevated.
+    async fn ask(
+        &self,
+        client: &ClientIdentity,
+        action: String,
+        reason: String,
+    ) -> Option<(bool, u32)> {
+        let denied = Some((false, 0));
+        let Some((console, server)) = self.console_of(client, "Authorize").await else {
+            return denied;
+        };
+        let name = match user(&self.accounts, client.user).await {
+            Some(u) if u.kind == UserKind::Admin => u.name,
+            _ => String::new(),
+        };
+        let (request, slot) = self.open(console, false).await;
+        let app_id = client.app_id.clone();
+        let sent = server
+            .server()
+            .send_on_authorize(request, console, app_id, action, reason, name);
+        match self
+            .wait(client, request, &slot, &server, sent.is_ok())
+            .await
+        {
+            Err(()) => None,
+            Ok(Some(Outcome::Answered(Some(admin)))) => Some((true, admin)),
+            Ok(_) => denied,
+        }
+    }
+
+    /// `Ask` of the broker for the `user` permission `permission` of
+    /// `client`: asked as a `[y/N]` line on the client's text console, and
+    /// `UNDETERMINED` when nobody answers there or it runs in no text
+    /// console's session (MIKSPEC-0057.R32).
+    pub async fn ask_permission(
+        &self,
+        client: &ClientIdentity,
+        permission: String,
+        reason: String,
+    ) -> Decision {
+        let Some((console, server)) = self.console_of(client, "Ask").await else {
+            return Decision::Undetermined;
+        };
+        let (request, slot) = self.open(console, true).await;
+        let app_id = client.app_id.clone();
+        let sent = server
+            .server()
+            .send_on_ask(request, console, app_id, permission, reason);
+        match self
+            .wait(client, request, &slot, &server, sent.is_ok())
+            .await
+        {
+            Ok(Some(Outcome::Asked(true))) => Decision::Allowed,
+            Ok(Some(Outcome::Asked(false))) => Decision::Denied,
+            _ => Decision::Undetermined,
         }
     }
 }
@@ -273,5 +367,46 @@ pub async fn serve(requests: Rc<Requests>, end: ServerEnd<Authorization>, spawne
                 let _ = r.reply(server.server(), Ok(reply));
             }
         });
+    }
+}
+
+/// Serves `Prompter` to the broker on `end`, each `Ask` in a task of its
+/// own (MIKSPEC-0057.R30).
+pub async fn serve_prompter(requests: Rc<Requests>, end: ServerEnd<Prompter>, spawner: Spawner) {
+    let server = Rc::new(PrompterAsyncServer::new(end, requests.reactor.clone()));
+    while let Ok(PrompterRequest::Ask(q, r)) = server.next().await {
+        let (requests, server) = (requests.clone(), server.clone());
+        spawner.spawn(async move {
+            let decision = requests
+                .ask_permission(&q.client, q.permission, q.reason)
+                .await;
+            let _ = r.reply(server.server(), PrompterAskResponse { decision });
+        });
+    }
+}
+
+/// Registers as the broker's prompter, connected through `directory`, and
+/// serves its `Ask`s.
+pub async fn register_prompter(
+    directory: &DirectoryAsyncClient,
+    requests: Rc<Requests>,
+    spawner: Spawner,
+) {
+    let (Ok((broker, server)), Ok((prompter, prompts))) =
+        (endpoints::<Broker>(), endpoints::<Prompter>())
+    else {
+        return;
+    };
+    let connected = directory
+        .connect(BROKER.into(), None, server.into_handle())
+        .await;
+    if !matches!(connected, Ok(Ok(_))) {
+        mikros_rt::log!(Error, "sessionmgr: no broker: {connected:?}");
+        return;
+    }
+    let broker = BrokerAsyncClient::new(broker, requests.reactor.clone());
+    match broker.register_prompter(prompter).await {
+        Ok(Ok(_)) => serve_prompter(requests, prompts, spawner).await,
+        other => mikros_rt::log!(Error, "sessionmgr: RegisterPrompter: {other:?}"),
     }
 }

@@ -19,6 +19,8 @@ permissions:
   # To find the console of an Authorize client's login session, and
   # whether the client still runs.
   - system.processes.read
+  # To be the broker's prompter, which asks users for permissions.
+  - system.prompts.use
   # To mark the boot good once the console has started.
   - system.boot_state.set
 provides:

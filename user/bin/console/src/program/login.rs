@@ -127,6 +127,16 @@ pub async fn events(console: Rc<Console>, text_login: Rc<TextLoginAsyncClient>) 
                 action: e.action,
                 reason: e.reason,
                 name: e.name,
+                ask: false,
+            })),
+            TextLoginEvent::OnAsk(e) => console.apply(Event::Asked(Request {
+                request: e.request,
+                console: e.console,
+                app_id: e.app_id,
+                action: e.permission,
+                reason: e.reason,
+                name: String::new(),
+                ask: true,
             })),
             TextLoginEvent::OnAuthorizeEnded(e) => console.apply(Event::Ended(e.request)),
         }

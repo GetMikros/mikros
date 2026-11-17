@@ -25,8 +25,7 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{
-    Broker, BrokerAsyncClient, BrokerEvent, Decision, Grant, Prompter, PrompterAskResponse,
-    PrompterAsyncServer, PrompterRequest,
+    Broker, BrokerAsyncClient, BrokerEvent, Decision, Grant, Prompter,
 };
 use mikros_rt::interfaces::mikros::process::{
     HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
@@ -96,7 +95,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
     executor.block_on(async move {
-        match probe(&launcher, &reactor, &spawner, &asked).await {
+        match probe(&launcher, &reactor, &asked).await {
             Ok(()) => 0,
             Err(step) => step,
         }
@@ -320,14 +319,6 @@ async fn grant_system(b: &BrokerAsyncClient, app: &str, p: &[&str]) -> Result<()
     }
 }
 
-/// Serves `end`, answering every `Ask` with `allowed`.
-async fn prompter(end: ServerEnd<Prompter>, reactor: Reactor, allowed: bool) {
-    let server = PrompterAsyncServer::new(end, reactor);
-    while let Ok(PrompterRequest::Ask(_, r)) = server.next().await {
-        let _ = r.reply(server.server(), PrompterAskResponse { allowed });
-    }
-}
-
 const MANAGER: &str = "system.servicemgr";
 const ADMIN: &str = "test.admin";
 const APP: &str = "test.app";
@@ -336,12 +327,7 @@ const MANAGER_APP: &str = "test.manager";
 
 /// Runs every check in turn, and returns the number of the first that
 /// failed.
-async fn probe(
-    l: &LauncherAsyncClient,
-    reactor: &Reactor,
-    spawner: &Spawner,
-    asked: &Cell<u32>,
-) -> Result<(), i64> {
+async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, asked: &Cell<u32>) -> Result<(), i64> {
     let mut step = 0;
     let mut check_ = |what: &str, passed: bool| {
         step += 1;
@@ -484,20 +470,20 @@ async fn probe(
             if e.user == 1 && e.app_id == APP && e.permission == "user.camera.use"),
     )?;
 
-    let (client, server) = endpoints::<Prompter>().map_err(|_| 100)?;
-    spawner.spawn(prompter(server, reactor.clone(), true));
+    // Only the session manager asks users (MIKSPEC-0037.R42).
+    let (client, _server) = endpoints::<Prompter>().map_err(|_| 100)?;
     let registered = admin.register_prompter(client).await;
     c(
-        "registering a prompter",
-        registered.is_ok_and(|r| r.is_ok()),
+        "refusing a prompter other than the session manager",
+        matches!(registered, Ok(Err(Status::AccessDenied))),
     )?;
     c(
-        "asking the prompter",
-        request(&admin, APP, "user.microphone.use").await == Ok(Decision::Allowed),
+        "denying what nobody answers",
+        request(&admin, APP, "user.microphone.use").await == Ok(Decision::Denied),
     )?;
     c(
-        "recording its answer",
-        check(&admin, 1, APP, "user.microphone.use").await == Ok(Decision::Allowed),
+        "recording nothing for it",
+        check(&admin, 1, APP, "user.microphone.use").await == Ok(Decision::Undetermined),
     )?;
     c(
         "not asking for a decided permission",

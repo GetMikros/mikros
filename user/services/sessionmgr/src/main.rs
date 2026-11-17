@@ -127,6 +127,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 other => mikros_rt::log!(Error, "sessionmgr: no Elevations: {other:?}"),
             }
         }
+        // The broker asks users through us alone (MIKSPEC-0057.R30).
+        {
+            let (directory, requests, s) = (directory.clone(), requests.clone(), spawner.clone());
+            spawner
+                .spawn(async move { authorize::register_prompter(&directory, requests, s).await });
+        }
         if let Some(provider) = provider {
             let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
             let (requests, spawner) = (requests.clone(), spawner.clone());

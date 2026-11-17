@@ -22,6 +22,8 @@ permissions:
   # To find the console of an Authorize client's login session, and
   # whether the client still runs.
   - system.processes.read
+  # To be the broker's prompter, which asks users for permissions.
+  - system.prompts.use
 provides:
   # For the permission broker alone, which the session manager checks.
   - protocol: mikros.session.Authorization

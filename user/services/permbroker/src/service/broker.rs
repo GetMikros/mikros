@@ -28,6 +28,8 @@ use mikros_rt::interfaces::mikros::session::{Authorization, AuthorizationAsyncCl
 
 /// The session manager's protocol that asks an administrator.
 const AUTHORIZATION: &str = "mikros.session.Authorization";
+/// The only prompter of the broker.
+const SESSION_MANAGER: &str = "system.sessionmgr";
 /// The longest reason that `Authorize` takes, in bytes.
 const REASON_MAX: usize = 256;
 
@@ -334,11 +336,18 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
                 r.reply(s, result)
             }
             R::RegisterPrompter(q, r) => {
-                let result = inner.authorize(&caller, Call::RegisterPrompter).map(|()| {
-                    let prompter = PrompterAsyncClient::new(q.prompter, inner.reactor.clone());
-                    *inner.prompter.borrow_mut() = Some(Rc::new(prompter));
-                    BrokerRegisterPrompterResponse {}
-                });
+                // Only the session manager asks users (MIKSPEC-0037.R42).
+                let only = match caller.app_id == SESSION_MANAGER {
+                    true => Ok(()),
+                    false => Err(Status::AccessDenied),
+                };
+                let result = only
+                    .and_then(|()| inner.authorize(&caller, Call::RegisterPrompter))
+                    .map(|()| {
+                        let prompter = PrompterAsyncClient::new(q.prompter, inner.reactor.clone());
+                        *inner.prompter.borrow_mut() = Some(Rc::new(prompter));
+                        BrokerRegisterPrompterResponse {}
+                    });
                 r.reply(s, result)
             }
         };
@@ -440,16 +449,17 @@ async fn decide_request(
             match prompter {
                 None => Decision::Denied,
                 Some(prompter) => {
-                    let asked = prompter.ask(
-                        client.user,
-                        q.client.app_id.clone(),
-                        q.permission.clone(),
-                        q.reason,
-                    );
+                    let asked = prompter.ask(copy(&q.client), q.permission.clone(), q.reason);
                     match asked.await {
+                        // Nobody answered: denied, and nothing recorded
+                        // (MIKSPEC-0037.R41).
+                        Ok(answer) if answer.decision == midl::Decision::Undetermined => {
+                            Decision::Denied
+                        }
                         Ok(answer) => {
+                            let allowed = answer.decision == midl::Decision::Allowed;
                             let mut store = inner.store.borrow_mut();
-                            let decision = store.record(client, &q.permission, answer.allowed);
+                            let decision = store.record(client, &q.permission, allowed);
                             inner.files.changed();
                             decision
                         }

@@ -1,5 +1,5 @@
 //! The authorization screen on the display, as one state machine: the
-//! requests of `OnAuthorize` wait their turn and show one at a time over
+//! requests of `OnAuthorize` and `OnAsk` wait their turn and show one at a time over
 //! the terminal of the console they name, and every event about them,
 //! keys, answers, ends and timers, goes through `apply`, which acts on
 //! it only while its request is the one shown. Showing a request gives it
@@ -29,13 +29,14 @@ pub struct Authorizing {
 
 /// What happens to the requests.
 pub enum Event {
-    /// `OnAuthorize`.
+    /// `OnAuthorize` or `OnAsk`.
     Asked(Request),
     /// `OnAuthorizeEnded`.
     Ended(u32),
     /// A key that the input router gave the request.
     Key(u32, SecureKey),
-    /// The reply to `Answer`: whether the credentials were refused.
+    /// The reply to `Answer`: whether the credentials were refused; the
+    /// reply to `AnswerAsk` is never a refusal.
     Answered(u32, bool),
     /// The failure has been shown long enough.
     FailureShown(u32),
@@ -95,6 +96,7 @@ impl Console {
                         }
                     }
                     Step::Answer(name, password) => self.answer(request, name, password),
+                    Step::AnswerAsk(allowed) => self.answer_ask(request, allowed),
                 }
             }
             Event::Answered(request, refused) if shown == Some(request) => {
@@ -129,6 +131,19 @@ impl Console {
             let answered = text_login.answer(request, name, password).await;
             let refused = matches!(answered, Ok(Err(Status::AccessDenied)));
             console.apply(Event::Answered(request, refused));
+        });
+    }
+
+    /// Calls `AnswerAsk` for request `request`, and ends the prompt once
+    /// it replies.
+    fn answer_ask(self: &Rc<Self>, request: u32, allowed: bool) {
+        let Some(text_login) = self.auth.text_login.borrow().clone() else {
+            return;
+        };
+        let console = self.clone();
+        self.spawner.spawn(async move {
+            let _ = text_login.answer_ask(request, allowed).await;
+            console.apply(Event::Answered(request, false));
         });
     }
 

@@ -4,7 +4,8 @@
 //! that an administrator types the name and the password into, the
 //! password shown as one `*` per character; what each key does; and the
 //! lines that the terminal keeps afterwards. The name and the password
-//! are overwritten with zeros when the prompt is dropped.
+//! are overwritten with zeros when the prompt is dropped. A request of
+//! `OnAsk` shows there as one `[y/N]` line instead (MIKSPEC-0067.R21).
 
 use crate::emulator::cell::{Cell, DIM};
 use crate::emulator::screen::Screen;
@@ -19,18 +20,22 @@ const PREFIX: &str = "[authorize] ";
 const ADMIN_RUN: &str = "admin.run";
 const SUDO_PREFIX: &str = "[sudo] ";
 const FAILED: &str = "authorization failed";
+const ASK: &str = "[y/N]";
 
-/// What `OnAuthorize` asks.
+/// What `OnAuthorize` or `OnAsk` asks.
 pub struct Request {
     pub request: u32,
     /// The text console of the client's session.
     pub console: u8,
     pub app_id: String,
+    /// The action, or the permission of an `OnAsk`.
     pub action: String,
     pub reason: String,
     /// The administrator's name when the session manager gave it, and
     /// otherwise empty, for a field.
     pub name: String,
+    /// Whether it is an `OnAsk`, which `AnswerAsk` answers.
+    pub ask: bool,
 }
 
 /// What a key leads to.
@@ -39,6 +44,8 @@ pub enum Step {
     Nothing,
     /// `Answer` with the name and the password.
     Answer(String, String),
+    /// `AnswerAsk` with whether the user allowed it.
+    AnswerAsk(bool),
     Cancel,
 }
 
@@ -162,6 +169,9 @@ impl Prompt {
         if bytes.first() == Some(&0x1b) {
             return Step::Nothing;
         }
+        if self.request.ask {
+            return self.ask_bytes(bytes);
+        }
         // Each key's bytes are whole UTF-8 sequences.
         for c in String::from_utf8_lossy(bytes).chars() {
             let (text, max) = match self.field {
@@ -190,6 +200,24 @@ impl Prompt {
         Step::Nothing
     }
 
+    /// Takes in the keys of an `OnAsk`: `y` allows, `n` or `Enter`
+    /// denies, and other keys do nothing.
+    fn ask_bytes(&mut self, bytes: &[u8]) -> Step {
+        for c in String::from_utf8_lossy(bytes).chars() {
+            let allowed = match c {
+                'y' | 'Y' => true,
+                'n' | 'N' | '\r' | '\n' => false,
+                _ => continue,
+            };
+            if c.is_alphabetic() {
+                self.typed.push(c);
+            }
+            self.waiting = true;
+            return Step::AnswerAsk(allowed);
+        }
+        Step::Nothing
+    }
+
     /// Notes that `Answer` failed: a line says so, which the terminal
     /// keeps.
     pub fn failed(&mut self) {
@@ -210,6 +238,18 @@ impl Prompt {
         let sudo = r.action == ADMIN_RUN;
         let prefix = if sudo { SUDO_PREFIX } else { PREFIX };
         let mut lines = Vec::new();
+        if r.ask {
+            let answer = match self.typed.is_empty() {
+                true => String::new(),
+                false => format!(" {}", self.typed),
+            };
+            let line = format!(
+                "{PREFIX}{} wants {}: {} {ASK}{answer}",
+                r.app_id, r.action, r.reason
+            );
+            let cursor = (!self.waiting).then_some(0);
+            return (vec![line], cursor);
+        }
         if !sudo {
             lines.push(format!(
                 "{prefix}{} wants {}: {}",
@@ -320,6 +360,7 @@ mod tests {
             action: "admin.power.control".into(),
             reason: "power off".into(),
             name: name.into(),
+            ask: false,
         }
     }
 
@@ -464,6 +505,35 @@ mod tests {
             p.take_transcript().unwrap(),
             "\r[sudo] name: ada\r\n[sudo] password for ada: *\r\n[sudo] authorization failed\r\n"
         );
+    }
+
+    #[test]
+    fn asks_with_one_line_and_keeps_the_answer() {
+        let ask = || {
+            let mut request = request("");
+            request.ask = true;
+            request.action = "user.camera.use".into();
+            request.reason = "take a photo".into();
+            Prompt::new(request, 80, 6, (1, 0), |_, _| Cell::default())
+        };
+        let line = "[authorize] system.power wants user.camera.use: take a photo [y/N]";
+        let mut p = ask();
+        assert_eq!(p.type_bytes(b"x\x1b[A"), Step::Nothing);
+        let screen = p.screen();
+        assert_eq!(rows(&screen)[1], line);
+        assert_eq!(rows(&screen)[2], "");
+        assert_eq!(screen.cursor(), Some((1, line.len())));
+        assert_eq!(p.type_bytes(b"y"), Step::AnswerAsk(true));
+        assert_eq!(p.type_bytes(b"n"), Step::Nothing);
+        assert_eq!(p.take_transcript().unwrap(), format!("\r{line} y\r\n"));
+        let mut p = ask();
+        assert_eq!(p.type_bytes(b"N"), Step::AnswerAsk(false));
+        assert_eq!(rows(&p.screen())[1], format!("{line} N"));
+        let mut p = ask();
+        assert_eq!(p.type_bytes(b"\r"), Step::AnswerAsk(false));
+        assert_eq!(rows(&p.screen())[1], line);
+        let mut p = ask();
+        assert_eq!(p.type_bytes(b"\x1b"), Step::Cancel);
     }
 
     #[test]

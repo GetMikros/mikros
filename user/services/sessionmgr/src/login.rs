@@ -21,9 +21,9 @@ use mikros_rt::interfaces::mikros::process::{
     LauncherAsyncClient, SpawnRequest, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::session::{
-    AccountsAsyncClient, TextLogin, TextLoginAnswerResponse, TextLoginAsyncServer,
-    TextLoginCancelResponse, TextLoginLoginResponse, TextLoginNeedsSetupResponse, TextLoginRequest,
-    TextLoginRunSetupResponse,
+    AccountsAsyncClient, TextLogin, TextLoginAnswerAskResponse, TextLoginAnswerResponse,
+    TextLoginAsyncServer, TextLoginCancelResponse, TextLoginLoginResponse,
+    TextLoginNeedsSetupResponse, TextLoginRequest, TextLoginRunSetupResponse,
 };
 
 const SETUP: &str = "/system/bin/setup";
@@ -276,6 +276,10 @@ pub async fn serve(
                     let reply = answered.map(|()| TextLoginAnswerResponse {});
                     let _ = r.reply(server.server(), reply);
                 });
+            }
+            TextLoginRequest::AnswerAsk(q, r) => {
+                let answered = requests.answer_ask(q.request, q.allowed);
+                let _ = r.reply(s, answered.map(|()| TextLoginAnswerAskResponse {}));
             }
             TextLoginRequest::Cancel(q, r) => {
                 let cancelled = requests.cancel(q.request);
