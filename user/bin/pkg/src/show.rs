@@ -117,6 +117,32 @@ pub fn describe(m: &Manifest) -> String {
     text
 }
 
+/// What a driver package's driver matches and needs, shown before it is
+/// installed (MIKSPEC-0101.R19).
+pub fn describe_driver(driver: &mikros_manifest::Driver) -> String {
+    use mikros_manifest::Need;
+    let mut text = String::new();
+    let matches = match driver.matches.is_empty() {
+        true => String::from("no device"),
+        false => driver.matches.join(", "),
+    };
+    text.push_str(&format!("  matches: {matches}\n"));
+    let needs: Vec<&str> = driver
+        .needs
+        .iter()
+        .map(|n| match n {
+            Need::Dma => "DMA",
+            Need::Ioports => "I/O ports",
+            Need::Bus => "the bus",
+        })
+        .collect();
+    match needs.is_empty() {
+        true => text.push_str("  needs: nothing beyond its devices\n"),
+        false => text.push_str(&format!("  needs: {}\n", needs.join(", "))),
+    }
+    text
+}
+
 /// The warnings that installing `version` over the installed `installed`
 /// of `id` gives (MIKSPEC-0101.R23).
 pub fn update_warnings(id: &str, installed: &str, version: &str) -> String {
@@ -191,5 +217,18 @@ mod tests {
         ));
         let older = update_warnings("org.x.y", "2.0.0", "1.9.0");
         assert!(older.ends_with("warning: 1.9.0 is older than the installed 2.0.0\n"));
+    }
+
+    #[test]
+    fn shows_what_a_driver_matches_and_needs() {
+        let text = b"name: org.example.drv\nbinary: /system/drivers/org.example.drv/drv\n\
+                     match: [pci:8086:100e]\nneeds: [dma, bus]\n";
+        let driver = mikros_manifest::parse_driver("org.example.drv", text)
+            .unwrap()
+            .driver;
+        assert_eq!(
+            describe_driver(&driver),
+            "  matches: pci:8086:100e\n  needs: DMA, the bus\n"
+        );
     }
 }

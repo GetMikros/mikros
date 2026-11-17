@@ -443,6 +443,8 @@ fn checks_hardware_ids() {
 fn driver(name: &str, kind: DriverKind, matches: &[&str]) -> Driver {
     Driver {
         name: name.into(),
+        app_id: format!("system.driver.{name}"),
+        boot: false,
         binary: format!("/system/drivers/system.driver.{name}/{name}"),
         permissions: vec![],
         namespace: vec![],
@@ -518,4 +520,23 @@ fn refuses_services_and_programs_that_list_logs_add_source() {
         &format!("{MINIMAL}permissions: [admin.logs.read]\n"),
     );
     assert_eq!(read.service.permissions, ["admin.logs.read"]);
+}
+
+#[test]
+fn reads_installed_drivers_with_their_package_ids() {
+    let text = b"name: org.example.drv\nbinary: /system/drivers/org.example.drv/drv\nboot: true\n";
+    let m = parse_driver("org.example.drv", text).unwrap();
+    assert_eq!(m.driver.app_id, "org.example.drv");
+    assert!(m.driver.boot);
+    let system = parse_driver("system.driver.a", b"name: a\nbinary: /system/a\n").unwrap();
+    assert_eq!(system.driver.app_id, "system.driver.a");
+    assert!(!system.driver.boot);
+    // Its folder is its name, which is a package ID that is not the
+    // system's.
+    let kind_of = |dir: &str, text: &[u8]| parse_driver(dir, text).unwrap_err().kind;
+    assert_eq!(kind_of("org.example.other", text), ErrorKind::FileName);
+    let bad = b"name: Org.Drv\nbinary: /system/drivers/Org.Drv/drv\n";
+    assert_eq!(kind_of("Org.Drv", bad), ErrorKind::BadName);
+    let system_id = b"name: system.drv\nbinary: /system/drivers/system.drv/drv\n";
+    assert_eq!(kind_of("system.drv", system_id), ErrorKind::BadName);
 }

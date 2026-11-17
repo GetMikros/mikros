@@ -632,6 +632,16 @@ impl Namespaces {
             .map(<[u8]>::to_vec)
     }
 
+    /// The manifest of the installed driver `app_id`, in the root's
+    /// subvolume `drivers` (MIKSPEC-0101.R19), when there is one.
+    pub async fn installed_driver(&self, shared: &Shared, app_id: &str) -> Option<Vec<u8>> {
+        let ready = self.ready.borrow().clone()?;
+        let at = format!("{DRIVERS_SUBVOLUME}/{app_id}/driver.yaml");
+        files::read(ready.roots.root(), &shared.reactor, &at, SYSTEM_FILE_MAX)
+            .await
+            .ok()
+    }
+
     /// The names of the files that end in `suffix` in the folder at
     /// `path` below `/system`: the root file system's once namespaces
     /// come from it, or else the boot file system's. None when there is
@@ -850,7 +860,9 @@ impl Namespaces {
                 &mut origins,
                 none(tmp(&tmpfs, &format!("cli/{user}"), "/tmp", budget, reactor).await?),
             );
-        } else if !app_id.starts_with("system.") {
+        } else if !app_id.starts_with("system.")
+            && !(user == 0 && self.installed_driver(shared, app_id).await.is_some())
+        {
             // A native app, which runs for a user.
             if user == 0 {
                 return Err(Status::AccessDenied);
@@ -1797,7 +1809,15 @@ async fn manifest_entries(
         };
     }
     if !app_id.starts_with("system.") {
-        return (Manifest::None, Vec::new());
+        // An installed driver.
+        return match namespaces
+            .installed_driver(shared, app_id)
+            .await
+            .map(|b| mikros_manifest::parse_driver(app_id, &b))
+        {
+            Some(Ok(m)) => (Manifest::Driver, pairs(m.driver.namespace)),
+            _ => (Manifest::None, Vec::new()),
+        };
     }
     let service = format!("services/{app_id}/{}", mikros_manifest::SERVICE_FILE);
     if let Some(bytes) = namespaces.system_file(shared, &service).await {

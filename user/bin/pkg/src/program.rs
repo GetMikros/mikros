@@ -86,6 +86,19 @@ fn installed_commands(id: &str) -> Vec<String> {
     .collect()
 }
 
+/// The driver of the driver package in the file `file`, which `manifest`
+/// describes, read from the package.
+fn driver_of(file: &str, manifest: &Manifest) -> Option<mikros_manifest::Driver> {
+    let path = manifest.driver.as_deref()?;
+    let bytes = std::fs::read(file).ok()?;
+    let package = mikros_mika::format::Package::open(bytes.as_slice()).ok()?;
+    let entry = package.find(path)?;
+    let text = package.read(bytes.as_slice(), entry).ok()?;
+    mikros_manifest::parse_driver(&manifest.id, &text)
+        .ok()
+        .map(|m| m.driver)
+}
+
 fn agrees(question: &str) -> bool {
     print!("{question}");
     let _ = std::io::stdout().flush();
@@ -137,6 +150,9 @@ fn install(
             );
         }
         print!("{}", show::describe(manifest));
+        if let Some(driver) = driver_of(file, manifest) {
+            print!("{}", show::describe_driver(&driver));
+        }
         if !agrees("install? [y/N] ") {
             println!("{} is not installed", manifest.id);
             continue;

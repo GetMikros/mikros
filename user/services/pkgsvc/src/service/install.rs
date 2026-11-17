@@ -83,6 +83,9 @@ pub fn install(
     let given = Given(NodeClient::new(q.package));
     let (package, manifest, _) = open(&given)?;
     let kind = manifest.kind.ok_or(Status::InvalidArgs)?;
+    if kind == Kind::Driver {
+        super::drivers::check(&package, &given, &manifest)?;
+    }
     if !manifest.installable {
         return Err(Status::InvalidArgs);
     }
@@ -153,7 +156,12 @@ pub fn install(
     );
     root.write_records(&records)?;
     let names: Vec<String> = manifest.bins.iter().map(|b| b.name.clone()).collect();
-    super::commands::installed(&root, owner, &manifest.id, &names, &q.commands, &others)
+    super::commands::installed(&root, owner, &manifest.id, &names, &q.commands, &others)?;
+    // A driver marked for boot changes the boot list (MIKSPEC-0101.R20).
+    if kind == Kind::Driver {
+        super::drivers::boot_modules_changed(shared, &root)?;
+    }
+    Ok(())
 }
 
 /// The scope of the caller's own user.

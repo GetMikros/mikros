@@ -138,7 +138,8 @@ impl Starter {
     }
 
     /// Spawns `driver` for the device with `hardware_ids`, with app ID
-    /// `system.driver.<name>`, after registering its permissions with
+    /// its manifest's, `system.driver.<name>` or an installed driver's package
+    /// ID, after registering its permissions with
     /// the broker. Before the first driver of a display device, the
     /// kernel console is released; the driver of the device that has the
     /// boot framebuffer gets the framebuffer's memory object.
@@ -146,7 +147,7 @@ impl Starter {
         if hardware_ids.iter().any(|id| is_display(id)) {
             self.release_console();
         }
-        let app_id = format!("system.driver.{}", driver.name);
+        let app_id = driver.app_id.clone();
         let broker = self
             .broker
             .as_ref()

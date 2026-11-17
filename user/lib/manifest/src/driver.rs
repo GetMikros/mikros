@@ -1,5 +1,8 @@
 //! Reading driver manifests: the `driver.yaml` in each driver's own
-//! directory under `/system/drivers/`.
+//! directory under `/system/drivers/`. A driver of the system's is in
+//! `system.driver.<name>/` and has the app ID of that name; an installed
+//! driver is in `<id>/`, named and with the app ID `<id>`, its package's
+//! ID (MIKSPEC-0101.R19).
 
 use crate::program::namespace;
 use crate::{
@@ -19,6 +22,7 @@ const KEYS: &[&str] = &[
     "match",
     "kind",
     "needs",
+    "boot",
 ];
 /// The keys of service manifests that a driver manifest must not have.
 const SERVICE_KEYS: [&str; 5] = ["provides", "after", "start", "restart", "boot_handles"];
@@ -28,6 +32,11 @@ const DRIVER_RESERVED_PERMISSIONS: [&str; 1] = ["system.log_sources.create"];
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Driver {
     pub name: String,
+    /// The app ID it runs with.
+    pub app_id: String,
+    /// Whether the bootloader loads it as a boot module, for an installed
+    /// driver (MIKSPEC-0101.R20).
+    pub boot: bool,
     pub binary: String,
     pub permissions: Vec<String>,
     pub namespace: Vec<NamespaceEntry>,
@@ -58,6 +67,21 @@ pub enum Need {
 pub struct DriverManifest {
     pub driver: Driver,
     pub unknown: Vec<Unknown>,
+}
+
+/// Whether `id` is a package ID: two or more parts separated by `.`, each
+/// a lowercase ASCII letter followed by lowercase ASCII letters, digits
+/// and `_`, at most 128 bytes in all, and not one of the system's.
+pub fn is_package_id(id: &str) -> bool {
+    let part = |p: &str| {
+        let mut chars = p.chars();
+        chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    };
+    id.len() <= 128
+        && id.split('.').count() >= 2
+        && id.split('.').all(part)
+        && !id.starts_with("system.")
 }
 
 /// Whether `id` is a hardware ID: lowercase ASCII letters, digits, `:`,
@@ -121,12 +145,17 @@ pub fn parse_driver(directory: &str, bytes: &[u8]) -> Result<DriverManifest, Err
     let required = |key| map.get(key).ok_or(error(&root, ErrorKind::Missing(key)));
     let name_node = required("name")?;
     let name = name_node.string()?;
-    if !is_kebab_case(name) {
-        return Err(error(name_node, ErrorKind::BadName));
-    }
-    if directory.strip_prefix(DRIVER_PREFIX) != Some(name) {
-        return Err(error(name_node, ErrorKind::FileName));
-    }
+    let app_id = match directory.strip_prefix(DRIVER_PREFIX) {
+        Some(own) if is_kebab_case(name) && own == name => String::from(directory),
+        Some(_) if !is_kebab_case(name) => return Err(error(name_node, ErrorKind::BadName)),
+        Some(_) => return Err(error(name_node, ErrorKind::FileName)),
+        // A system driver's name outside its folder.
+        None if is_kebab_case(name) => return Err(error(name_node, ErrorKind::FileName)),
+        // An installed driver, named as its package.
+        None if !is_package_id(name) => return Err(error(name_node, ErrorKind::BadName)),
+        None if directory != name => return Err(error(name_node, ErrorKind::FileName)),
+        None => String::from(name),
+    };
     let binary_node = required("binary")?;
     let binary = binary_node.string()?;
     if !is_under_system(binary) {
@@ -166,8 +195,14 @@ pub fn parse_driver(directory: &str, bytes: &[u8]) -> Result<DriverManifest, Err
             return Err(error(item, ErrorKind::ReservedPermission));
         }
     }
+    let boot = match map.get("boot") {
+        None => false,
+        Some(node) => node.boolean()?,
+    };
     let driver = Driver {
         name: name.into(),
+        app_id,
+        boot,
         binary: binary.into(),
         permissions: strings(map, "permissions")?,
         namespace: namespace(map, &mut unknown)?,

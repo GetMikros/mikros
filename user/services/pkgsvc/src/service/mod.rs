@@ -4,6 +4,7 @@
 //! (MIKSPEC-0101.R37).
 
 mod commands;
+mod drivers;
 mod files;
 mod install;
 mod list;

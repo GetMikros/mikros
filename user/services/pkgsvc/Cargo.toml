@@ -9,6 +9,7 @@ publish = false
 mikros-mika = { path = "../../lib/mika" }
 
 [target.'cfg(target_os = "mikros")'.dependencies]
+mikros-manifest = { path = "../../lib/manifest" }
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 
 # The install service, which installs, updates and removes packages.

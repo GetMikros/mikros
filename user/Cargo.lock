@@ -827,6 +827,7 @@ version = "0.0.0"
 dependencies = [
  "mikros-cli",
  "mikros-command",
+ "mikros-manifest",
  "mikros-mika",
  "mikros-rt",
 ]
@@ -835,6 +836,7 @@ dependencies = [
 name = "pkgsvc"
 version = "0.0.0"
 dependencies = [
+ "mikros-manifest",
  "mikros-mika",
  "mikros-rt",
 ]
