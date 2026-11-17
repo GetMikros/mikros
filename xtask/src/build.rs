@@ -303,6 +303,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", hello.display());
             let coreutils_check = crate::rust_std::build("coreutils-check", kind)?;
+            let global_check = crate::rust_std::build("global-check", kind)?;
             let files_c = c_build(
                 "files-c",
                 &["user/tests/files-c/files.c"],
@@ -1822,8 +1823,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // manager's manifest with the kernel log handle,
             // spawn-std, which runs as the job that the runner stops in
             // msh, files-c, which ada's msh runs in her home, and the idle
-            // service, which ada's msh stops and starts. The dynamic
-            // linker is in both lists, and goes in once.
+            // service, which ada's msh stops and starts, global-check,
+            // which installs packages for every user, and the program and
+            // libraries of package-c that it packs. The dynamic linker is
+            // in both lists, and goes in once.
             let sessions_manifest = "system/services/system.sessionmgr/service.yaml";
             let console_fonts =
                 ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"].map(|f| fonts.ttf.join(f));
@@ -1843,6 +1846,17 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("system/bin/spawn-std", spawn_std.as_path()),
                     ("system/bin/files-c", files_c.as_path()),
                     ("system/bin/coreutils-check", coreutils_check.as_path()),
+                    ("system/bin/global-check", global_check.as_path()),
+                    (
+                        "system/share/package-c/package-user",
+                        package_user.as_path(),
+                    ),
+                    (
+                        "system/share/package-c/librunpath.dlib",
+                        runpath_library.as_path(),
+                    ),
+                    ("system/share/package-c/libown.dlib", own_library.as_path()),
+                    ("system/share/package-c/greet.dlib", greet_library.as_path()),
                     (
                         "system/services/system.idle-service/idle-service",
                         idle_service.as_path(),

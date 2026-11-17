@@ -383,6 +383,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "global-check"
+version = "0.0.0"
+dependencies = [
+ "mikros-command",
+ "mikros-mika",
+ "mikros-rt",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

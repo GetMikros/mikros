@@ -9,7 +9,9 @@
 //! show the log above them; once the user is logged in, it must show the
 //! session's text and no log, and while the runner holds Ctrl, Alt and
 //! F12, the log on the whole screen. In the console run it then types a line that the session shell
-//! reads; in the setup run, whose shell is msh, it starts a job, stops
+//! reads; in the setup run, whose shell is msh, it first runs
+//! global-check, which installs packages for every user once ada allowed
+//! it with her password, then starts a job, stops
 //! it with Ctrl-Z, and has msh count its jobs, continue and kill the
 //! job, check the host name that setup wrote and that it started in
 //! ada's home, and exit with 7 when all of that worked. The test init stops
@@ -26,12 +28,27 @@ use std::time::{Duration, Instant};
 
 const SEAT: &str = "sessionmgr: gave the console the display";
 const SETUP_DONE: &str = "sessionmgr: setup exited";
+/// What ada's msh runs first: global-check, which installs packages for
+/// every user and exits with the number of the check that failed.
+const GLOBAL_CHECK: &str = "g l o b a l minus c h e c k ret";
+/// Then `if $status != 0 { exit (100 + $status) }`, which ends the
+/// session with 100 more than that number.
+const GLOBAL_STATUS: &str = "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
+     shift-bracket_left spc e x i t spc shift-9 1 0 0 spc shift-equal spc shift-4 s t a t u s \
+     shift-0 spc shift-bracket_right ret";
+/// How long global-check has to make its first package and ask for
+/// authorization.
+const GLOBAL_ASKS: Duration = Duration::from_secs(10);
+/// What the service manager logs once global-check removed the package
+/// with a service, its last check but one.
+const GLOBAL_DONE: &str = "the service org.example.daemon.idle of a package was removed";
 /// How many times the run's timeout the setup run may take. Its msh
-/// session also pages with more and less, asks for authorization ten
-/// times, and runs files-c and coreutils-check: in a debug build under
-/// KVM the run takes over 400 s from boot to power-off, which the test
-/// init allows 600 s, and a fuzz build is about 3.3 times slower.
-const SETUP_TIMES: u32 = 3;
+/// session also pages with more and less, asks for authorization eleven
+/// times, and runs global-check, files-c and coreutils-check: in a debug
+/// build under KVM the run takes about 600 s from boot to power-off,
+/// which the test init allows 780 s, and a fuzz build is about 3.3 times
+/// slower.
+const SETUP_TIMES: u32 = 4;
 const SETUP_TIMES_FUZZ: u32 = 6;
 
 /// How many times longer than the pauses of the steps the runner waits in
@@ -464,10 +481,25 @@ pub fn run_setup(
         Step::Keys("a d a ret"),
         Step::Keys("a d a minus p w ret"),
     ]);
-    let after: Vec<Step> = MSH_KEYS
-        .iter()
-        .flat_map(|&(keys, wait)| [Step::Keys(keys), Step::Sleep(wait)])
-        .collect();
+    // global-check first, while msh waits for a line: ada's password once,
+    // on the authorization screen of its first install for every user,
+    // whose check takes up to ANSWER.
+    let mut after = vec![
+        Step::Keys(GLOBAL_CHECK),
+        Step::Sleep(GLOBAL_ASKS),
+        Step::Keys("a d a minus p w ret"),
+        // msh reads the status line once global-check exits, so that a
+        // failed check ends the session at once.
+        Step::Sleep(ANSWER),
+        Step::Keys(GLOBAL_STATUS),
+        Step::Wait(GLOBAL_DONE),
+        Step::Sleep(JOB_START),
+    ];
+    after.extend(
+        MSH_KEYS
+            .iter()
+            .flat_map(|&(keys, wait)| [Step::Keys(keys), Step::Sleep(wait)]),
+    );
     // The root partition holds the services that need it, which start
     // once it is available.
     let system = built
