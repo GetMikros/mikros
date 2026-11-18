@@ -4,8 +4,8 @@
 //! table through the `Block` channel that `Start` gives it as `bus`, or,
 //! without a valid one, its master boot record and extended boot
 //! records, or, without that either, treats a disk whose start holds a
-//! file system as one partition. For each partition it adds a child
-//! device `part-<n>`, where `n` is the GPT entry's 1-based index, the
+//! file system as one partition. For each partition it adds, before it
+//! replies to `Start`, a child device `part-<n>`, where `n` is the GPT entry's 1-based index, the
 //! MBR partition's number or 0 for the whole disk, matched by its table's
 //! type, the file system its first bytes show and `storage:partition`,
 //! and publishes the partition's raw access service, of class `storage`. On the bus channel that
@@ -209,12 +209,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             let writers = Rc::new(Writers::new(disk.link.clone()));
                             *children.disk.borrow_mut() =
                                 Some((disk.link.clone(), writers.clone()));
+                            // Every partition is added before the reply
+                            // (MIKSPEC-0045.R22).
+                            add_partitions(&disk, &manager, &children).await;
                             let replied = responder.reply(s, Ok(DriverStartResponse {}));
-                            let (children, reactor, tasks) =
-                                (children.clone(), reactor.clone(), spawner.clone());
-                            let added =
-                                add_partitions(disk, writers, manager, children, reactor, tasks);
-                            spawner.spawn(added);
+                            let (reactor, tasks) = (reactor.clone(), spawner.clone());
+                            spawner.spawn(serve_partitions(disk, writers, manager, reactor, tasks));
                             replied
                         }
                         Err(status) => responder.reply(s, Err(status)),
@@ -394,18 +394,9 @@ async fn start(
     Ok((Disk { link, partitions }, manager))
 }
 
-/// Adds a device for each partition of `disk` and publishes its raw
-/// access service, which it then serves with the partitions' `writers`.
-/// Keeps the device manager's channel open for as long as the driver
-/// runs.
-async fn add_partitions(
-    disk: Disk,
-    writers: Rc<Writers>,
-    manager: DeviceManagerAsyncClient,
-    children: Rc<Children>,
-    reactor: Reactor,
-    spawner: Spawner,
-) {
+/// Adds a device for each partition of `disk` through `manager`, into
+/// `children`.
+async fn add_partitions(disk: &Disk, manager: &DeviceManagerAsyncClient, children: &Children) {
     for (slot, partition) in &disk.partitions {
         let name = format!("part-{}", slot.number);
         let added = manager
@@ -419,6 +410,18 @@ async fn add_partitions(
         }
     }
     children.finish();
+}
+
+/// Publishes the raw access service of each partition of `disk`, which
+/// it then serves with the partitions' `writers`. Keeps the device
+/// manager's channel open for as long as the driver runs.
+async fn serve_partitions(
+    disk: Disk,
+    writers: Rc<Writers>,
+    manager: DeviceManagerAsyncClient,
+    reactor: Reactor,
+    spawner: Spawner,
+) {
     for (_, partition) in &disk.partitions {
         let Ok((client, server)) = endpoints::<Provider>() else {
             continue;
