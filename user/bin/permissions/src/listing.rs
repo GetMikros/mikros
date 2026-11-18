@@ -2,17 +2,41 @@
 //! line per grant in aligned columns, a JSON array, or why a call
 //! failed.
 
-use mikros_cli::{Arguments, Command, json_string};
+use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
 
-pub const COMMAND: Command = Command {
-    name: "permissions",
-    operands: "[user] | allow|deny <app-id> <permission> [user]",
-    most: 4,
-    about: "Lists the decisions on permissions of your user, or of user, or\n\
-            allows or denies a permission to an app. Listing or denying for\n\
-            another user, and allowing, need an administrator's authorization.",
-    options: &[("--json", "write the grants as a JSON array of objects")],
-    values: &[],
+/// The operands of a decision.
+const DECIDE: &[Operand] = &[
+    Operand::one("app-id", Kind::App, "the app"),
+    Operand::one("permission", Kind::Permission, "the permission"),
+    Operand::optional("user", Kind::User, "the user, yours when none is named"),
+];
+
+pub static COMMAND: Spec = Spec {
+    operands: &[Operand::optional(
+        "user",
+        Kind::User,
+        "the user whose decisions to list, yours when none is named",
+    )],
+    options: &[Opt::long(
+        "json",
+        "write the grants as a JSON array of objects",
+    )],
+    subcommands: &[
+        Spec {
+            operands: DECIDE,
+            ..Spec::new("allow", "Allows a permission to an app.")
+        },
+        Spec {
+            operands: DECIDE,
+            ..Spec::new("deny", "Denies a permission to an app.")
+        },
+    ],
+    ..Spec::new(
+        "permissions",
+        "Lists the decisions on permissions of your user, or of user, or\n\
+         allows or denies a permission to an app. Listing or denying for\n\
+         another user, and allowing, need an administrator's authorization.",
+    )
 };
 
 /// A decision to store.
@@ -36,38 +60,26 @@ pub enum Request {
         permission: String,
         user: Option<String>,
     },
-    Help,
-    Invalid(String),
 }
 
-pub fn read(arguments: Vec<String>) -> Request {
-    let (options, mut operands) = match COMMAND.parse(arguments) {
-        Arguments::Run {
-            options, operands, ..
-        } => (options, operands),
-        Arguments::Help => return Request::Help,
-        Arguments::Invalid(reason) => return Request::Invalid(reason),
-    };
-    let decision = match operands.first().map(String::as_str) {
-        Some("allow") => Decision::Allow,
-        Some("deny") => Decision::Deny,
-        _ if operands.len() <= 1 => {
+/// What `run` asks.
+pub fn read(run: &Run) -> Request {
+    let mut operands = run.operands.clone().into_iter();
+    let decision = match run.subcommand() {
+        None => {
             return Request::List {
-                user: operands.pop(),
-                json: options.contains(&"--json"),
+                user: operands.next(),
+                json: run.has("--json"),
             };
         }
-        _ => return Request::Invalid(format!("unknown subcommand {}", operands[0])),
+        Some("allow") => Decision::Allow,
+        Some(_) => Decision::Deny,
     };
-    if !(3..=4).contains(&operands.len()) {
-        return Request::Invalid(format!("{} needs an app ID and a permission", operands[0]));
-    }
-    let user = (operands.len() == 4).then(|| operands.remove(3));
     Request::Set {
         decision,
-        permission: operands.remove(2),
-        app_id: operands.remove(1),
-        user,
+        app_id: operands.next().unwrap_or_default(),
+        permission: operands.next().unwrap_or_default(),
+        user: operands.next(),
     }
 }
 
@@ -82,36 +94,70 @@ pub struct Grant {
 }
 
 /// The header and lines of `grants`, sorted by app ID and permission, in
-/// columns aligned to the left.
-pub fn text(grants: &[Grant]) -> String {
+/// columns aligned to the left, with allowed decisions coloured as
+/// allowed and denied ones as denied.
+pub fn text(grants: &[Grant], paint: Paint) -> String {
     let mut sorted: Vec<&Grant> = grants.iter().collect();
     sorted.sort_by(|a, b| (&a.app_id, &a.permission).cmp(&(&b.app_id, &b.permission)));
-    let header = ["APP ID", "PERMISSION", "DECISION"];
-    let mut rows = vec![header.map(String::from)];
-    rows.extend(
-        sorted
-            .iter()
-            .map(|g| [g.app_id.clone(), g.permission.clone(), g.decision.into()]),
-    );
-    let width = |column: usize| {
-        rows.iter()
-            .map(|r| r[column].chars().count())
-            .max()
-            .unwrap_or(0)
-    };
-    let widths = [width(0), width(1)];
-    rows.iter()
-        .map(|r| {
-            format!(
-                "{:<w0$}  {:<w1$}  {}\n",
-                r[0],
-                r[1],
-                r[2],
-                w0 = widths[0],
-                w1 = widths[1],
-            )
+    let rows: Vec<Vec<Cell>> = sorted
+        .iter()
+        .map(|g| {
+            let role = match g.decision {
+                "allowed" => Role::Ok,
+                _ => Role::Error,
+            };
+            vec![
+                (g.app_id.clone(), None),
+                (g.permission.clone(), None),
+                (g.decision.into(), Some(role)),
+            ]
         })
-        .collect()
+        .collect();
+    let header = ["APP ID", "PERMISSION", "DECISION"];
+    columns(&header, &rows, &[false; 3], paint)
+}
+
+/// A cell of a table: its text, and the role it is coloured in.
+type Cell = (String, Option<Role>);
+
+/// The header and `rows` in columns two spaces apart, the header in the
+/// secondary colour, each column as wide as its widest text without
+/// colours, aligned to the right where `right` says, the last one not
+/// padded.
+fn columns(header: &[&str], rows: &[Vec<Cell>], right: &[bool], paint: Paint) -> String {
+    let header: Vec<Cell> = header
+        .iter()
+        .map(|h| (h.to_string(), Some(Role::Secondary)))
+        .collect();
+    let all: Vec<&Vec<Cell>> = std::iter::once(&header).chain(rows).collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|c| {
+            all.iter()
+                .map(|r| r[c].0.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut text = String::new();
+    for row in all {
+        for (c, (cell, role)) in row.iter().enumerate() {
+            let pad = " ".repeat(widths[c] - cell.chars().count());
+            let shown = match role {
+                Some(role) => paint.paint(*role, cell),
+                None => cell.clone(),
+            };
+            if c > 0 {
+                text.push_str("  ");
+            }
+            match (right[c], c + 1 == row.len()) {
+                (true, _) => text.push_str(&(pad + &shown)),
+                (false, true) => text.push_str(&shown),
+                (false, false) => text.push_str(&(shown + &pad)),
+            }
+        }
+        text.push('\n');
+    }
+    text
 }
 
 /// `grants`, sorted as `text` sorts them, as a JSON array of objects with
@@ -163,9 +209,14 @@ pub fn lowercase(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mikros_cli::Parsed;
 
-    fn read_args(arguments: &[&str]) -> Request {
-        read(arguments.iter().map(|a| a.to_string()).collect())
+    fn read_args(arguments: &[&str]) -> Result<Request, String> {
+        match COMMAND.parse(arguments.iter().map(|a| a.to_string())) {
+            Parsed::Run(run) => Ok(read(&run)),
+            Parsed::Invalid(reason) => Err(reason),
+            Parsed::Help(path) => Err(format!("help for {path:?}")),
+        }
     }
 
     fn grant(app_id: &str, permission: &str, decision: &'static str) -> Grant {
@@ -181,49 +232,46 @@ mod tests {
     fn reads_lists_and_decisions() {
         assert_eq!(
             read_args(&[]),
-            Request::List {
+            Ok(Request::List {
                 user: None,
                 json: false
-            }
+            })
         );
         assert_eq!(
             read_args(&["bob", "--json"]),
-            Request::List {
+            Ok(Request::List {
                 user: Some("bob".into()),
                 json: true
-            }
+            })
         );
         assert_eq!(
             read_args(&["allow", "app.a", "user.camera.use"]),
-            Request::Set {
+            Ok(Request::Set {
                 decision: Decision::Allow,
                 app_id: "app.a".into(),
                 permission: "user.camera.use".into(),
                 user: None,
-            }
+            })
         );
         assert_eq!(
             read_args(&["deny", "app.a", "user.camera.use", "bob"]),
-            Request::Set {
+            Ok(Request::Set {
                 decision: Decision::Deny,
                 app_id: "app.a".into(),
                 permission: "user.camera.use".into(),
                 user: Some("bob".into()),
-            }
+            })
         );
     }
 
     #[test]
     fn refuses_bad_operands() {
-        let invalid = |reason: &str| Request::Invalid(reason.into());
-        assert_eq!(read_args(&["bob", "x"]), invalid("unknown subcommand bob"));
-        assert_eq!(
-            read_args(&["deny"]),
-            invalid("deny needs an app ID and a permission")
-        );
+        let invalid = |reason: &str| Err(reason.into());
+        assert_eq!(read_args(&["bob", "x"]), invalid("unexpected argument x"));
+        assert_eq!(read_args(&["deny"]), invalid("missing operand <app-id>"));
         assert_eq!(
             read_args(&["allow", "app.a"]),
-            invalid("allow needs an app ID and a permission")
+            invalid("missing operand <permission>")
         );
         assert_eq!(
             read_args(&["deny", "a", "b", "c", "d"]),
@@ -239,13 +287,22 @@ mod tests {
             grant("app.a", "user.camera.use", "allowed"),
         ];
         assert_eq!(
-            text(&grants),
+            text(&grants, Paint::never()),
             "APP ID   PERMISSION           DECISION\n\
              app.a    user.camera.use      allowed\n\
              app.a    user.microphone.use  allowed\n\
              app.zed  user.camera.use      denied\n"
         );
-        assert_eq!(text(&[]), "APP ID  PERMISSION  DECISION\n");
+        assert_eq!(text(&[], Paint::never()), "APP ID  PERMISSION  DECISION\n");
+        let on = Paint::new(Some("always"), false, None);
+        assert_eq!(
+            text(&grants[..2], on).lines().nth(1),
+            Some("app.a    user.microphone.use  \x1b[38;2;17;209;22mallowed\x1b[0m")
+        );
+        assert_eq!(
+            text(&grants[..1], on).lines().nth(1),
+            Some("app.zed  user.camera.use  \x1b[38;2;231;76;60mdenied\x1b[0m")
+        );
         assert_eq!(
             json(&grants[..1]),
             "[{\"user\":1000,\"app_id\":\"app.zed\",\"permission\":\"user.camera.use\",\
@@ -271,5 +328,11 @@ mod tests {
             "not authorized"
         );
         assert_eq!(failure(None, "peer_closed"), "peer_closed");
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/permissions.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
     }
 }

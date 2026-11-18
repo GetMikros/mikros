@@ -1,7 +1,18 @@
-# What `permissions` takes, for msh's completion and colours.
+# What `permissions` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
 extern permissions(
-    call?: string "allow or deny, or the user whose decisions to list",
-    ...rest: string "the app ID, the permission and the user",
-    --json: bool "write the grants as JSON",
-    --help: bool "show how to use permissions"
-)
+    user?: user "the user whose decisions to list, yours when none is named",
+    --json: bool "write the grants as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
+extern permissions allow(
+    app-id: app "the app",
+    permission: permission "the permission",
+    user?: user "the user, yours when none is named"
+) complete
+extern permissions deny(
+    app-id: app "the app",
+    permission: permission "the permission",
+    user?: user "the user, yours when none is named"
+) complete

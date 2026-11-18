@@ -3,7 +3,7 @@
 //! asks an administrator when the call needs one.
 
 use crate::listing::{self, COMMAND, Decision, Grant, Request};
-use mikros_cli::{FAILURE, INVALID, SUCCESS};
+use mikros_cli::{FAILURE, Paint, Run, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_rt::interfaces::mikros::permissions::{
     BrokerClient, Decision as WireDecision, Grant as WireGrant,
@@ -21,32 +21,28 @@ unsafe extern "C" {
 }
 
 pub fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let request = match listing::read(arguments) {
-        Request::Help => return write(&COMMAND.help()),
-        Request::Invalid(reason) => return fail(INVALID, &reason),
-        request => request,
-    };
+    let run = start(&COMMAND, &mikros_command::list);
+    let fail = |message: &str| fail(&run, message);
+    let request = listing::read(&run);
     // SAFETY: the call takes no pointers.
     let caller = unsafe { getuid() };
     let named = match &request {
         Request::List { user, .. } | Request::Set { user, .. } => user.as_deref(),
-        Request::Help | Request::Invalid(_) => None,
     };
     let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
-        return fail(FAILURE, "cannot reach the service directory");
+        return fail("cannot reach the service directory");
     };
     let user = match named {
         None => caller,
         Some(name) => match uid(&directory, name) {
             Ok(Some(uid)) => uid,
-            Ok(None) => return fail(FAILURE, &format!("{name}: no such user")),
-            Err(why) => return fail(FAILURE, &why),
+            Ok(None) => return fail(&format!("{name}: no such user")),
+            Err(why) => return fail(&why),
         },
     };
     let broker = match directory.connect(BROKER) {
         Ok(client) => BrokerClient::new(client),
-        Err(why) => return fail(FAILURE, &why),
+        Err(why) => return fail(&why),
     };
     match request {
         Request::List { json, .. } => match broker.list_grants(user, FOREVER) {
@@ -70,11 +66,11 @@ pub fn main() -> ExitCode {
                     .collect();
                 match json {
                     true => write(&listing::json(&grants)),
-                    false => write(&listing::text(&grants)),
+                    false => write(&listing::text(&grants, Paint::stdout(&run))),
                 }
             }
-            Ok(Err(status)) => fail(FAILURE, &failure(None, &format!("{status:?}"))),
-            Err(error) => fail(FAILURE, &format!("ListGrants failed: {error:?}")),
+            Ok(Err(status)) => fail(&failure(None, &format!("{status:?}"))),
+            Err(error) => fail(&format!("ListGrants failed: {error:?}")),
         },
         Request::Set {
             decision,
@@ -93,13 +89,10 @@ pub fn main() -> ExitCode {
             };
             match broker.set_grant(grant, FOREVER) {
                 Ok(Ok(_)) => ExitCode::from(SUCCESS),
-                Ok(Err(status)) => {
-                    fail(FAILURE, &failure(Some(&permission), &format!("{status:?}")))
-                }
-                Err(error) => fail(FAILURE, &format!("SetGrant failed: {error:?}")),
+                Ok(Err(status)) => fail(&failure(Some(&permission), &format!("{status:?}"))),
+                Err(error) => fail(&format!("SetGrant failed: {error:?}")),
             }
         }
-        Request::Help | Request::Invalid(_) => unreachable!("answered above"),
     }
 }
 
@@ -135,8 +128,9 @@ fn write(text: &str) -> ExitCode {
     }
 }
 
-/// Writes the error `message` to standard error and gives `status`.
-fn fail(status: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
-    ExitCode::from(status)
+/// Writes the error `message` to standard error and gives the status of
+/// a failure.
+fn fail(run: &Run, message: &str) -> ExitCode {
+    complain(&COMMAND, run, message);
+    ExitCode::from(FAILURE)
 }
