@@ -243,7 +243,7 @@ fn places_buses_devices_and_functions_in_the_ecam_range() {
 }
 
 #[test]
-fn walks_capabilities_and_finds_the_msi_registers() {
+fn walks_capabilities() {
     let mut fake = Fake::default();
     let f = at(0, 2, 0);
     let function = fake.add(f, &VIRTIO_BLOCK, 0);
@@ -262,7 +262,6 @@ fn walks_capabilities_and_finds_the_msi_registers() {
         capabilities(&fake, f),
         [(0x01, 0x40), (CAP_MSI, 0x50), (CAP_MSIX, 0x70)]
     );
-    assert_eq!(msi_registers(&fake, f), [0x50..0x68, 0x70..0x7C]);
     // Without the status bit there is no list.
     let plain = at(0, 3, 0);
     fake.add(plain, &VIRTIO_BLOCK, 0);

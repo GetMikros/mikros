@@ -32,7 +32,8 @@
 //!   `mikros.pci.Device` for that function: `GetInfo` reports it, a
 //!   `ReadConfig` of the vendor ID reads 0x8086 and a misaligned one
 //!   fails with `INVALID_ARGS`, a `WriteConfig` of the command register
-//!   fails with `ACCESS_DENIED`, and, as its manifest does not need
+//!   and one of the device-specific space at 0x40 fail with
+//!   `ACCESS_DENIED`, and, as its manifest does not need
 //!   `dma`, `GetBti` and `SetBusMaster(true)` fail with `ACCESS_DENIED`
 //!   while `SetBusMaster(false)` succeeds, and `GetInterrupt` fails with
 //!   `NOT_SUPPORTED`, as the function has no INTx pin. It fails with
@@ -458,6 +459,8 @@ async fn pci_device_works(bus: OwnedHandle, reactor: &Reactor) -> bool {
     let vendor = device.read_config(0, 2).await;
     let misaligned = device.read_config(1, 2).await;
     let command = device.write_config(0x04, 2, 0).await;
+    // The bus driver keeps every register (MIKSPEC-0026.R30).
+    let specific = device.write_config(0x40, 4, 0).await;
     let bti = device.get_bti().await;
     let master = device.set_bus_master(true).await;
     let no_master = device.set_bus_master(false).await;
@@ -466,6 +469,7 @@ async fn pci_device_works(bus: OwnedHandle, reactor: &Reactor) -> bool {
         && matches!(vendor, Ok(Ok(r)) if r.value == 0x8086)
         && matches!(misaligned, Ok(Err(Status::InvalidArgs)))
         && matches!(command, Ok(Err(Status::AccessDenied)))
+        && matches!(specific, Ok(Err(Status::AccessDenied)))
         && matches!(bti, Ok(Err(Status::AccessDenied)))
         && matches!(master, Ok(Err(Status::AccessDenied)))
         && matches!(no_master, Ok(Ok(_)))

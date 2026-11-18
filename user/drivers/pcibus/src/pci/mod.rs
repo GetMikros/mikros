@@ -53,10 +53,6 @@ const PCIE_FLR: u32 = 1 << 28;
 const AF_FLR: u32 = 1 << 1;
 /// The `No_Soft_Reset` bit of the power management control register.
 const PM_NO_SOFT_RESET: u32 = 1 << 3;
-/// The bits of the MSI message control register that make the
-/// capability longer: 64-bit addresses and per-vector masking.
-const MSI_64: u16 = 1 << 7;
-const MSI_MASKING: u16 = 1 << 8;
 /// The most capabilities a function's list is followed for.
 const CAPABILITIES_MAX: usize = 48;
 /// The vendor ID that no function has.
@@ -517,25 +513,6 @@ pub fn enable_acs(config: &mut impl Config, at: Address) -> Option<u16> {
     let control = config.read(at, acs + ACS_CONTROL, 2) as u16;
     config.write(at, acs + ACS_CONTROL, 2, u32::from(control | enabled));
     Some(enabled)
-}
-
-/// The registers of the MSI and MSI-X capabilities of the function at
-/// `at`, which only the bus driver writes.
-pub fn msi_registers(config: &impl Config, at: Address) -> Vec<Range<u16>> {
-    let mut ranges = Vec::new();
-    for (id, offset) in capabilities(config, at) {
-        let len = match id {
-            CAP_MSI => {
-                let control = config.read(at, offset + 2, 2) as u16;
-                let address = if control & MSI_64 != 0 { 14 } else { 10 };
-                address + if control & MSI_MASKING != 0 { 10 } else { 0 }
-            }
-            CAP_MSIX => 12,
-            _ => continue,
-        };
-        ranges.push(offset..offset + len);
-    }
-    ranges
 }
 
 /// A way to reset a function, with the offset of the capability it

@@ -3,9 +3,7 @@
 
 use crate::driver::bus::{Bus, Function};
 use crate::driver::interrupts::{self, Msi};
-use crate::pci::{
-    BarKind, COMMAND, COMMAND_BUS_MASTER, COMMAND_IO, COMMAND_MEMORY, Config, msi_registers,
-};
+use crate::pci::{BarKind, COMMAND, COMMAND_BUS_MASTER, COMMAND_IO, COMMAND_MEMORY, Config};
 use alloc::rc::Rc;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -18,10 +16,8 @@ use mikros_rt::interfaces::mikros::pci::{
 use mikros_rt::sys;
 
 const SAME_RIGHTS: u32 = 1 << 31;
-/// The size of a function's configuration space, and the start of what
-/// its driver may write.
+/// The size of a function's configuration space.
 const CONFIG_SIZE: u32 = 4096;
-const WRITABLE_FROM: u16 = 0x40;
 
 /// Serves `Device` for `function` of `bus` on the bus channel `end` of
 /// its driver, whose manifest needs `dma` when `dma` is true, until the
@@ -66,7 +62,7 @@ pub async fn serve(
                 r.reply(s, value.map(|value| DeviceReadConfigResponse { value }))
             }
             R::WriteConfig(q, r) => {
-                let written = write_config(&bus, at, q.offset, q.width, q.value);
+                let written = write_config(q.offset, q.width);
                 r.reply(s, written.map(|()| DeviceWriteConfigResponse {}))
             }
             R::GetBar(q, r) => r.reply(
@@ -176,27 +172,14 @@ fn checked(offset: u16, width: u8) -> Result<(), Status> {
     }
 }
 
-/// Writes `value` to the configuration space of `at`, except in the
-/// header's first 64 bytes and the MSI and MSI-X capabilities, which
-/// fail with `ACCESS_DENIED`.
-fn write_config(
-    bus: &Bus,
-    at: crate::pci::Address,
-    offset: u16,
-    width: u8,
-    value: u32,
-) -> Result<(), Status> {
+/// A driver's write of `width` bytes at `offset` in the configuration
+/// space of its function: `INVALID_ARGS` for a width or offset that
+/// `checked` refuses, and otherwise `ACCESS_DENIED`, since no register
+/// is listed as writable for drivers yet and the bus driver keeps every
+/// one for itself (MIKSPEC-0026.R30). Nothing is written.
+fn write_config(offset: u16, width: u8) -> Result<(), Status> {
     checked(offset, width)?;
-    let end = offset + u16::from(width);
-    let mut config = &bus.ecam;
-    let in_msi = msi_registers(&config, at)
-        .iter()
-        .any(|r| offset < r.end && r.start < end);
-    if offset < WRITABLE_FROM || in_msi {
-        return Err(Status::AccessDenied);
-    }
-    config.write(at, offset, width, value);
-    Ok(())
+    Err(Status::AccessDenied)
 }
 
 /// BAR `index` of `function`, with a copy of its resource.
