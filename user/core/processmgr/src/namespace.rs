@@ -22,7 +22,7 @@
 //! system partition that the system booted from, the instance `esp` of
 //! `device.filesystem`, once it is published, and from then on gives it
 //! as `/system/boot/efi` to the processes whose manifests list it
-//! (MIKSPEC-0064.R9, MIKSPEC-0064.R15). Processes whose profiles apply and
+//! (MIKSPEC-0064.R22, MIKSPEC-0064.R15). Processes whose profiles apply and
 //! that hold `user.volumes.access` get `/volumes`, read and write, and so
 //! do the command-line tools of `system.cli`, whose home folder may also
 //! hold programs. An elevated process also gets its user's home folder,

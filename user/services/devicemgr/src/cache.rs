@@ -2,7 +2,9 @@
 //! servers follow: from the storage profiles in the root file system
 //! when there is a matching one, and from defaults otherwise. And the
 //! root partition, which gets the properties `system` and `live` from
-//! the command line.
+//! the command line. The root partition and the EFI system partition of
+//! the boot are taken only from the boot disk: the disk at the location
+//! that `boot_disk=` names, when the command line has it.
 
 use crate::devices::{Device, Devices};
 use alloc::rc::Rc;
@@ -27,6 +29,11 @@ pub const CACHE: &str = "cache";
 const REMOVABLE: &str = "removable";
 const SERIAL: &str = "serial";
 const PARTITION_GUID: &str = "partition_guid";
+/// The property that each device below a PCI function on the way to a
+/// disk has for the disk's location, and the hardware ID of the root
+/// devices of PCI host bridges, whose children are PCI functions.
+const LOCATION: &str = "location";
+const HOST_BRIDGE: &str = "platform:pci-host-ecam";
 /// The root partition's properties: the booted system version and
 /// whether the system is live.
 const SYSTEM: &str = "system";
@@ -49,15 +56,22 @@ enum Root {
 /// The root partition's device, once the first one that matches `root`
 /// is added or publishes a file system, and its file system once
 /// connected, from which the profiles are read; the GUID of the EFI
-/// system partition that `esp=PARTUUID=` gives; and the version that
-/// `system=` names and whether `live` is a word of the command line.
+/// system partition that `esp=PARTUUID=` gives; the boot disk's location
+/// that `boot_disk=` gives; and the version that `system=` names and
+/// whether `live` is a word of the command line.
 pub struct Profiles {
     root: Root,
     root_device: Cell<Option<u64>>,
     fs: RefCell<Option<Rc<NodeAsyncClient>>>,
     esp: Option<String>,
+    boot_location: Option<String>,
     system: Option<String>,
     live: bool,
+}
+
+/// Whether `device` has the partition GUID `guid`, in either case.
+fn has_guid(device: &Device, guid: &str) -> bool {
+    property(&device.properties, PARTITION_GUID).is_some_and(|ours| ours.eq_ignore_ascii_case(guid))
 }
 
 fn property<'a>(properties: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -65,11 +79,40 @@ fn property<'a>(properties: &'a [(String, String)], key: &str) -> Option<&'a str
     Some(value)
 }
 
+/// Whether `device`, among `devices`, is a PCI function: a child of a
+/// host bridge's root device, which the device manager added itself.
+fn is_pci_function(device: &Device, devices: &Devices) -> bool {
+    let parent = device.parent.and_then(|p| devices.get(p));
+    parent.is_some_and(|p| p.parent.is_none() && p.hardware_ids.iter().any(|id| id == HOST_BRIDGE))
+}
+
+/// The location of `device`, among `devices` (MIKSPEC-0025.R70): the name
+/// of the PCI function that it is or is below, then the `location`
+/// property of each device below that function on the way to it, each
+/// after a `/`. None for a device below no PCI function.
+fn location(device: &Device, devices: &Devices) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut at = device;
+    while !is_pci_function(at, devices) {
+        if let Some(part) = property(&at.properties, LOCATION) {
+            parts.push(part);
+        }
+        at = devices.get(at.parent?)?;
+    }
+    let mut location = at.name.clone();
+    for part in parts.iter().rev() {
+        location.push('/');
+        location.push_str(part);
+    }
+    Some(location)
+}
+
 impl Profiles {
     /// The profiles of a system started with `command_line`.
     pub fn new(command_line: &str) -> Profiles {
         let mut root = Root::OfRootType;
         let mut esp = None;
+        let mut boot_location = None;
         let mut system = None;
         let mut live = false;
         for word in command_line.split_ascii_whitespace() {
@@ -77,6 +120,8 @@ impl Profiles {
                 root = Root::Guid(guid.into());
             } else if let Some(guid) = word.strip_prefix("esp=PARTUUID=") {
                 esp = Some(guid.into());
+            } else if let Some(at) = word.strip_prefix("boot_disk=") {
+                boot_location = Some(at.into());
             } else if let Some(version) = word.strip_prefix("system=") {
                 system = Some(version.into());
             }
@@ -87,41 +132,63 @@ impl Profiles {
             root_device: Cell::new(None),
             fs: RefCell::new(None),
             esp,
+            boot_location,
             system,
             live,
         }
     }
 
-    /// Whether `device`, among `devices`, matches the command line's root
-    /// partition: without `root=`, a partition of the Mikros root type on
-    /// the boot disk.
-    fn matches_root(&self, device: &Device, devices: &Devices) -> bool {
+    /// Whether `device` is the partition the command line names as root,
+    /// on whatever disk: the one with the GUID of `root=PARTUUID=`, or
+    /// without it one of the Mikros root type.
+    fn root_candidate(&self, device: &Device) -> bool {
         match &self.root {
-            Root::Guid(guid) => property(&device.properties, PARTITION_GUID)
-                .is_some_and(|ours| ours.eq_ignore_ascii_case(guid)),
-            Root::OfRootType => {
-                device.hardware_ids.iter().any(|id| id == ROOT_TYPE)
-                    && device
-                        .parent
-                        .is_some_and(|disk| self.boot_disk(disk, devices))
-            }
+            Root::Guid(guid) => has_guid(device, guid),
+            Root::OfRootType => device.hardware_ids.iter().any(|id| id == ROOT_TYPE),
         }
     }
 
+    /// Whether `device`, among `devices`, matches the command line's root
+    /// partition (MIKSPEC-0045.R21): a candidate on the boot disk.
+    fn matches_root(&self, device: &Device, devices: &Devices) -> bool {
+        self.root_candidate(device) && self.on_boot_disk(device, devices)
+    }
+
+    /// Whether the partition `device`, among `devices`, lies on the boot
+    /// disk.
+    fn on_boot_disk(&self, device: &Device, devices: &Devices) -> bool {
+        device
+            .parent
+            .is_some_and(|disk| self.boot_disk(disk, devices))
+    }
+
     /// Whether device `disk`, among `devices`, is the boot disk: the disk
-    /// holding the partition whose GUID `esp=PARTUUID=` gives, or, without
-    /// that option, any disk whose `removable` property is `false`.
+    /// at the location that `boot_disk=` gives; without that option, a
+    /// disk holding the partition whose GUID `esp=PARTUUID=` gives, but
+    /// not a removable one while a disk that is not removable holds it;
+    /// without either option, any disk whose `removable` property is
+    /// `false`.
     fn boot_disk(&self, disk: u64, devices: &Devices) -> bool {
-        match &self.esp {
-            Some(guid) => devices.iter().any(|d| {
-                d.parent == Some(disk)
-                    && property(&d.properties, PARTITION_GUID)
-                        .is_some_and(|ours| ours.eq_ignore_ascii_case(guid))
-            }),
-            None => devices
-                .get(disk)
-                .is_some_and(|d| property(&d.properties, REMOVABLE) == Some("false")),
+        let Some(device) = devices.get(disk) else {
+            return false;
+        };
+        let removable = |d: &Device| property(&d.properties, REMOVABLE) != Some("false");
+        if let Some(at) = &self.boot_location {
+            return location(device, devices).as_deref() == Some(at.as_str());
         }
+        let Some(guid) = &self.esp else {
+            return !removable(device);
+        };
+        let holds_esp = |disk: u64| {
+            devices
+                .iter()
+                .any(|d| d.parent == Some(disk) && has_guid(d, guid))
+        };
+        let fixed_holds_esp = devices
+            .iter()
+            .filter(|d| d.hardware_ids.iter().any(|id| id == DISK) && !removable(d))
+            .any(|d| holds_esp(d.id));
+        holds_esp(disk) && !(removable(device) && fixed_holds_esp)
     }
 
     /// Whether `device`, among `devices`, whose driver published a
@@ -145,6 +212,9 @@ impl Profiles {
     /// command line has that option, and `live`, `true` or `false`, in
     /// place of any it had.
     pub fn give_root_properties(&self, id: u64, devices: &mut Devices) {
+        if let Some(device) = devices.get(id) {
+            self.log_elsewhere(device, devices);
+        }
         if self.root_device.get().is_some() {
             return;
         }
@@ -165,15 +235,42 @@ impl Profiles {
         properties.push((LIVE.into(), live.into()));
     }
 
+    /// Logs `device`, among `devices`, when it would be the root or the
+    /// EFI system partition but lies on a disk other than the one at the
+    /// location of `boot_disk=`, which it is ignored for, such as a copy of
+    /// the boot disk. Without that option the boot disk may not be known
+    /// yet, and nothing is logged.
+    fn log_elsewhere(&self, device: &Device, devices: &Devices) {
+        if self.boot_location.is_none() || self.on_boot_disk(device, devices) {
+            return;
+        }
+        let esp = self
+            .esp
+            .as_deref()
+            .is_some_and(|guid| has_guid(device, guid));
+        for (matches, what) in [(self.root_candidate(device), "root"), (esp, "EFI system")] {
+            if matches {
+                mikros_rt::log!(
+                    Warning,
+                    "device-manager: ignoring device {}, {}, which matches the {what} partition \
+                     but is not on the boot disk",
+                    device.id,
+                    device.name
+                );
+            }
+        }
+    }
+
     /// Whether `device`, among `devices`, is the EFI system partition of
-    /// the boot: the one whose GUID `esp=PARTUUID=` gives, or else the
+    /// the boot (MIKSPEC-0025.R71): the one whose GUID `esp=PARTUUID=`
+    /// gives, on the boot disk when `boot_disk=` names it, or else the
     /// first EFI system partition on the disk that holds the root
     /// partition, the one already chosen or else one that matches the
     /// command line.
     pub fn is_esp(&self, device: &Device, devices: &Devices) -> bool {
         if let Some(guid) = &self.esp {
-            return property(&device.properties, PARTITION_GUID)
-                .is_some_and(|ours| ours.eq_ignore_ascii_case(guid));
+            let on_boot_disk = self.boot_location.is_none() || self.on_boot_disk(device, devices);
+            return has_guid(device, guid) && on_boot_disk;
         }
         if !device.hardware_ids.iter().any(|id| id == ESP_TYPE) {
             return false;
