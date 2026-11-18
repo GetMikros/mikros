@@ -1,0 +1,5 @@
+# Access policy of the methods of union.midl (MIKSPEC-0023.R47).
+
+Union.Create: permission:system.unions.create
+Union.CreateRevocable: permission:system.unions.create
+Union.Revoke: permission:system.unions.create

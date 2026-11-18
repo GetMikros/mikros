@@ -1,0 +1,4 @@
+# Access policy of the methods of filesystem.midl (MIKSPEC-0023.R47).
+
+Filesystem.GetRoot: permission:system.filesystems.mount
+Filesystem.QueryFilesystem: permission:system.filesystems.mount

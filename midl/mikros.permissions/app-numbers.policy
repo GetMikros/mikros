@@ -1,0 +1,4 @@
+# Access policy of the methods of app-numbers.midl (MIKSPEC-0023.R47).
+
+AppNumbers.Number: permission:system.permissions.read
+AppNumbers.AppId: public

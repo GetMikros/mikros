@@ -1,0 +1,10 @@
+# Access policy of the methods of display.midl (MIKSPEC-0023.R47).
+# Served only on the channel that Device.OpenDisplay gives its one owner.
+
+Display.GetResources: public
+Display.CreateDumbBuffer: public
+Display.ImportBuffer: public
+Display.DestroyBuffer: public
+Display.ImportSync: public
+Display.DestroySync: public
+Display.Commit: public

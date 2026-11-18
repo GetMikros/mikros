@@ -1,0 +1,7 @@
+# Access policy of the methods of child-bootstrap.midl (MIKSPEC-0023.R47).
+# Bootstrap, ChildBootstrap, InitBootstrap and ManagerBootstrap are served only on the
+# channels that init, the process manager and the service manager give each
+# other at start; Elevations only to the session manager, through
+# Launcher.OpenElevations.
+
+ChildBootstrap.Install: public

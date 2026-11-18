@@ -1,0 +1,4 @@
+# Access policy of the methods of memory-revocation.midl (MIKSPEC-0023.R47).
+# Served only to the server that handed out the memory objects.
+
+MemoryRevocation.Revoke: public

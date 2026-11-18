@@ -1,0 +1,8 @@
+# Access policy of the methods of services.midl (MIKSPEC-0023.R47).
+
+Services.List: public
+ServiceControl.Start: permission:admin.services.control
+ServiceControl.Stop: permission:admin.services.control
+ServiceControl.Restart: permission:admin.services.control
+ServiceControl.Enable: permission:admin.services.control
+ServiceControl.Disable: permission:admin.services.control

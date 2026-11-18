@@ -30,6 +30,7 @@ mod machine_state;
 mod meson;
 mod musl;
 mod own_root;
+mod policy;
 mod port;
 mod port_tests;
 mod ports;

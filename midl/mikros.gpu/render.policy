@@ -1,0 +1,12 @@
+# Access policy of the methods of render.midl (MIKSPEC-0023.R47).
+# Served only on the channel that Device.OpenRender gives.
+
+Render.CreateBuffer: public
+Render.DestroyBuffer: public
+Render.ExportBuffer: public
+Render.ImportBuffer: public
+Render.ImportSync: public
+Render.DestroySync: public
+Render.DriverCommand: public
+Render.SetPriority: public
+Render.GetMemoryInfo: public

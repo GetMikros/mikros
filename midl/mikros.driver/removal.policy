@@ -1,0 +1,4 @@
+# Access policy of the methods of removal.midl (MIKSPEC-0023.R47).
+
+Removal.List: permission:user.volumes.access
+Removal.Eject: permission:user.volumes.access

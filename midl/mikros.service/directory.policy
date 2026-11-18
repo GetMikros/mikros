@@ -1,0 +1,7 @@
+# Access policy of the methods of directory.midl (MIKSPEC-0023.R47).
+# Provider is served by each service only to the service manager.
+
+Directory.Connect: data-dependent:servicemgr::directory::Dir::connect
+Directory.List: data-dependent:servicemgr::directory::Dir::list
+Directory.Watch: public
+Provider.Connect: public

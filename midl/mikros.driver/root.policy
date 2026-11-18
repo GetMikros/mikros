@@ -1,0 +1,4 @@
+# Access policy of the methods of root.midl (MIKSPEC-0023.R47).
+# Only the service manager may connect.
+
+RootDrivers.RootAvailable: data-dependent:devicemgr::removal::serve

@@ -1,0 +1,18 @@
+# Access policy of the methods of terminal.midl (MIKSPEC-0023.R47).
+
+Factory.Open: public
+Master.SetWindowSize: public
+Terminal.GetAttributes: public
+Terminal.SetAttributes: data-dependent:termsvc::service::jobs::check_write
+Terminal.GetWindowSize: public
+Terminal.SetWindowSize: data-dependent:termsvc::service::jobs::check_write
+Terminal.GetForeground: public
+Terminal.SetForeground: data-dependent:termsvc::service::jobs::set_foreground
+Terminal.MakeControlling: data-dependent:termsvc::service::jobs::make_controlling
+Terminal.Drain: data-dependent:termsvc::service::jobs::check_write
+Terminal.Flush: data-dependent:termsvc::service::jobs::check_write
+Terminal.SendBreak: data-dependent:termsvc::service::jobs::check_write
+Terminal.Read: data-dependent:termsvc::service::jobs::check_read
+Terminal.Write: data-dependent:termsvc::service::jobs::check_write
+Terminal.GetReadiness: public
+Terminal.GetNumber: public

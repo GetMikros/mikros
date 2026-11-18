@@ -1,0 +1,5 @@
+# Access policy of the methods of acpi.midl (MIKSPEC-0023.R47).
+
+Acpi.GetPciRoute: public
+Acpi.PowerOff: permission:admin.power.control
+Acpi.Restart: permission:admin.power.control

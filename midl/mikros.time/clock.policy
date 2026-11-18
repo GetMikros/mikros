@@ -1,0 +1,8 @@
+# Access policy of the methods of clock.midl (MIKSPEC-0023.R47).
+
+Clock.GetUtc: public
+Clock.GetTimePage: public
+Clock.SetUtc: permission:admin.time.set
+Clock.GetTimezone: public
+Clock.SetTimezone: permission:admin.time.set
+Clock.Watch: public

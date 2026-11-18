@@ -1,0 +1,19 @@
+# Access policy of the methods of launcher.midl (MIKSPEC-0023.R47).
+# Bootstrap, ChildBootstrap, InitBootstrap and ManagerBootstrap are served only on the
+# channels that init, the process manager and the service manager give each
+# other at start; Elevations only to the session manager, through
+# Launcher.OpenElevations.
+
+Launcher.Spawn: data-dependent:processmgr::launcher::spawn
+Launcher.Exec: data-dependent:processmgr::launcher::exec
+Launcher.Kill: data-dependent:processmgr::launcher::kill
+Launcher.Wait: data-dependent:processmgr::launcher::wait
+Launcher.GetInfo: data-dependent:processmgr::launcher::get_info
+Launcher.List: data-dependent:processmgr::launcher::list
+Launcher.CreateSession: public
+Launcher.SetProcessGroup: data-dependent:processmgr::launcher::set_process_group
+Launcher.KillGroup: data-dependent:processmgr::launcher::kill_group
+Launcher.Fork: public
+Launcher.KillLoginSession: data-dependent:processmgr::launcher::kill_login_session
+Launcher.OpenElevations: data-dependent:processmgr::launcher::serve
+Launcher.KillChecked: data-dependent:processmgr::launcher::kill

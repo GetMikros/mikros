@@ -1,0 +1,8 @@
+# Access policy of the methods of input.midl (MIKSPEC-0023.R47).
+# Served by input drivers to their one owner, which Input.Open admits.
+
+Input.Open: data-dependent:mikros_inputdev::serve_input
+Device.GetInfo: public
+Device.GetState: public
+Device.SetLeds: public
+Device.Rumble: public

@@ -1,0 +1,13 @@
+# Access policy of the methods of device.midl (MIKSPEC-0023.R47).
+# Served by the PCI bus driver only to the driver of the device.
+
+Device.GetInfo: public
+Device.ReadConfig: public
+Device.WriteConfig: public
+Device.GetBar: public
+Device.SetBusMaster: public
+Device.GetInterrupt: public
+Device.AckInterrupt: public
+Device.EnableMsi: public
+Device.DisableMsi: public
+Device.GetBti: public

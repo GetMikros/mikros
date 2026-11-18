@@ -1,0 +1,14 @@
+# Access policy of the methods of broker.midl (MIKSPEC-0023.R47).
+# Prompter is served by the session manager only on the channel it registers
+# with the broker.
+
+Broker.Check: permission:system.permissions.read
+Broker.Request: permission:system.permissions.request
+Broker.Watch: permission:system.permissions.read
+Broker.SetGrant: data-dependent:permbroker::service::broker::set_grant
+Broker.ListGrants: data-dependent:permbroker::service::broker::list_grants
+Broker.GrantSystem: permission:system.permissions.set
+Broker.RegisterPrompter: data-dependent:permbroker::service::broker::serve
+Broker.WatchConfirmed: permission:system.permissions.read
+Broker.RevocationDone: public
+Prompter.Ask: public

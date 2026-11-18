@@ -400,6 +400,10 @@ pub fn run(args: &Args) -> Result<()> {
         problems.push("`cargo clippy` of the programs with std reported warnings".to_owned());
     }
 
+    // Every method of every protocol has an access policy
+    // (MIKSPEC-0023.R47).
+    problems.extend(crate::policy::problems()?);
+
     problems.extend(check_commits(&args.base, args.ci)?);
 
     if problems.is_empty() {

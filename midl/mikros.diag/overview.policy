@@ -1,0 +1,3 @@
+# Access policy of the methods of overview.midl (MIKSPEC-0023.R47).
+
+Overview.Snapshot: permission:system.diagnostics.read

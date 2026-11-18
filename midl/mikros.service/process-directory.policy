@@ -1,0 +1,6 @@
+# Access policy of the methods of process-directory.midl (MIKSPEC-0023.R47).
+# Served by the service manager only on the control channel of the process
+# manager.
+
+ProcessDirectory.Bind: public
+ProcessDirectory.RootAvailable: public

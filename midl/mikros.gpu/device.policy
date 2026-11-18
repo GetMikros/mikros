@@ -1,0 +1,5 @@
+# Access policy of the methods of device.midl (MIKSPEC-0023.R47).
+
+Device.GetInfo: public
+Device.OpenDisplay: permission:system.display.control
+Device.OpenRender: public

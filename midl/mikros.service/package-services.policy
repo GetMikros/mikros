@@ -1,0 +1,3 @@
+# Access policy of the methods of package-services.midl (MIKSPEC-0023.R47).
+
+PackageServices.ServicesChanged: data-dependent:servicemgr::directory::Dir::connect

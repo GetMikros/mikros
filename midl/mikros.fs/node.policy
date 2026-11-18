@@ -1,0 +1,41 @@
+# Access policy of the methods of node.midl (MIKSPEC-0023.R47).
+# Every node server checks the rights of the connection first and then the
+# node's access list with mikros_acl::permits; a connection without a subject
+# or of user 0 has its rights alone.
+
+Watcher.OnEvents: public
+SocketListener.Accept: public
+Node.GetAttributes: public
+Node.SetAttributes: data-dependent:mikros_acl::permits
+Node.Clone: data-dependent:mikros_acl::permits
+Node.Sync: public
+Node.QueryFilesystem: public
+Node.Read: data-dependent:mikros_acl::permits
+Node.Write: data-dependent:mikros_acl::permits
+Node.Append: data-dependent:mikros_acl::permits
+Node.Truncate: data-dependent:mikros_acl::permits
+Node.GetMemoryObject: data-dependent:mikros_acl::permits
+Node.CloneRange: data-dependent:mikros_acl::permits
+Node.Lock: data-dependent:mikros_acl::permits
+Node.Unlock: data-dependent:mikros_acl::permits
+Node.ReadLink: data-dependent:mikros_acl::permits
+Node.Seek: public
+Node.ReadNext: data-dependent:mikros_acl::permits
+Node.WriteNext: data-dependent:mikros_acl::permits
+Node.Open: data-dependent:mikros_acl::permits
+Node.ReadDirectory: data-dependent:mikros_acl::permits
+Node.Unlink: data-dependent:mikros_acl::permits
+Node.GetToken: public
+Node.Rename: data-dependent:mikros_acl::permits
+Node.Link: data-dependent:mikros_acl::permits
+Node.CreateSymlink: data-dependent:mikros_acl::permits
+Node.Watch: data-dependent:mikros_acl::permits
+Node.Unwatch: public
+Node.BindSocket: data-dependent:mikros_acl::permits
+Node.ConnectSocket: data-dependent:mikros_acl::permits
+Node.GetRevocableMemoryObject: data-dependent:mikros_acl::permits
+Node.SetOwner: data-dependent:mikros_acl::permits
+Node.GetAcl: public
+Node.SetAcl: data-dependent:mikros_acl::midl::may_manage
+Node.Restrict: public
+Node.Exchange: data-dependent:mikros_acl::permits

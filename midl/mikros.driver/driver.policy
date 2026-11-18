@@ -1,0 +1,16 @@
+# Access policy of the methods of driver.midl (MIKSPEC-0023.R47).
+# Served only on the channels between the device manager and the drivers it
+# starts.
+
+Driver.Start: public
+Driver.Stop: public
+Driver.ResetChild: public
+Driver.ConnectChild: public
+Driver.Reconnect: public
+Driver.PrepareShutdown: public
+DeviceManager.AddDevice: public
+DeviceManager.RemoveDevice: public
+DeviceManager.PublishService: public
+DeviceManager.RequestResource: public
+DeviceManager.GetKeptChild: public
+DeviceManager.RequestReset: public

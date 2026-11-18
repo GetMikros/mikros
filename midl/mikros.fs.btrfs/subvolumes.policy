@@ -1,0 +1,7 @@
+# Access policy of the methods of subvolumes.midl (MIKSPEC-0023.R47).
+
+Subvolumes.Create: permission:system.subvolumes.manage
+Subvolumes.Snapshot: permission:system.subvolumes.manage
+Subvolumes.Delete: permission:system.subvolumes.manage
+Subvolumes.SetReadOnly: permission:system.subvolumes.manage
+Subvolumes.List: permission:system.subvolumes.manage

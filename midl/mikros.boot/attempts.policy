@@ -1,0 +1,5 @@
+# Access policy of the methods of attempts.midl (MIKSPEC-0023.R47).
+
+Attempts.GetState: permission:system.boot_state.set
+Attempts.MarkGood: permission:system.boot_state.set
+Attempts.StartTrying: permission:system.boot_state.set

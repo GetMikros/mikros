@@ -1,0 +1,4 @@
+# Access policy of the methods of registrar.midl (MIKSPEC-0023.R47).
+
+Registrar.Register: data-dependent:servicemgr::registrar::serve
+Registrar.Unregister: data-dependent:servicemgr::registrar::serve

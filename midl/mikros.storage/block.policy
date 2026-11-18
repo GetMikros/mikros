@@ -1,0 +1,13 @@
+# Access policy of the methods of block.midl (MIKSPEC-0023.R47).
+# Served by a disk driver only to the drivers and servers that the device
+# manager connects to it.
+
+Block.GetInfo: public
+Block.CreateBuffer: public
+Block.DestroyBuffer: public
+Block.Read: public
+Block.Write: public
+Block.Flush: public
+Block.Discard: public
+Block.LockWritable: public
+Block.UnlockWritable: public

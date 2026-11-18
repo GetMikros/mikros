@@ -1,0 +1,7 @@
+# Access policy of the methods of log.midl (MIKSPEC-0023.R47).
+
+Writer.Write: public
+Reader.Read: permission:admin.logs.read
+Reader.Follow: permission:admin.logs.read
+OwnReader.Read: data-dependent:logsvc::service::own::serve
+Sources.Add: permission:system.log_sources.create

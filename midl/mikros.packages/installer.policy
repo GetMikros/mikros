@@ -1,0 +1,15 @@
+# Access policy of the methods of installer.midl (MIKSPEC-0023.R47).
+
+Installer.Inspect: public
+Installer.Install: data-dependent:pkgsvc::service::install::install
+Installer.Remove: data-dependent:pkgsvc::service::remove::remove
+Installer.List: public
+Installer.CreatePublic: data-dependent:pkgsvc::service::public::create
+Installer.CommandOwner: data-dependent:pkgsvc::service::commands::command_owner
+Installer.Commands: data-dependent:pkgsvc::service::commands::commands
+Installer.Open: data-dependent:pkgsvc::service::open_package
+Installer.OpenPublic: data-dependent:pkgsvc::service::public::open
+Installer.Services: data-dependent:pkgsvc::service::services::list
+Installer.ServiceManifest: data-dependent:pkgsvc::service::services::manifest
+Installer.AddComponent: data-dependent:pkgsvc::service::components::add
+Installer.InstallComponent: data-dependent:pkgsvc::service::components::install_given

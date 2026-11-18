@@ -1,0 +1,9 @@
+# Access policy of the methods of text-login.midl (MIKSPEC-0023.R47).
+# Served by the session manager only on the channel of the text console.
+
+TextLogin.NeedsSetup: public
+TextLogin.RunSetup: public
+TextLogin.Login: public
+TextLogin.Answer: public
+TextLogin.Cancel: public
+TextLogin.AnswerAsk: public

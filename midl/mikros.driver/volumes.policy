@@ -1,0 +1,5 @@
+# Access policy of the methods of volumes.midl (MIKSPEC-0023.R47).
+
+Volumes.List: public
+Volumes.Eject: permission:user.volumes.access
+Volumes.Mount: permission:admin.volumes.mount

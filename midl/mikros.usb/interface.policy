@@ -1,0 +1,10 @@
+# Access policy of the methods of interface.midl (MIKSPEC-0023.R47).
+# Served by the USB host driver only to the driver of the interface.
+
+Interface.GetInfo: public
+Interface.GetConfigurationDescriptor: public
+Interface.ControlTransfer: public
+Interface.InterruptTransfer: public
+Interface.BulkTransfer: public
+Interface.SetAlternateSetting: public
+Interface.ClearHalt: public

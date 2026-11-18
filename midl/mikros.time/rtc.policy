@@ -1,0 +1,5 @@
+# Access policy of the methods of rtc.midl (MIKSPEC-0023.R47).
+# Served by the RTC driver only to the time service.
+
+Rtc.Get: public
+Rtc.Set: public

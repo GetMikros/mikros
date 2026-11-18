@@ -1,0 +1,3 @@
+# Access policy of the methods of shutdown.midl (MIKSPEC-0023.R47).
+
+Shutdown.SetKind: permission:admin.power.control

@@ -1,0 +1,9 @@
+# Access policy of the methods of accounts.midl (MIKSPEC-0023.R47).
+
+Accounts.ListUsers: public
+Accounts.Authenticate: permission:system.users.authenticate
+Accounts.CreateUser: data-dependent:accountsvc::service::Service::create_user
+Accounts.DeleteUser: permission:admin.accounts.manage
+Accounts.SetPassword: data-dependent:accountsvc::service::Service::set_password
+Accounts.SetKind: permission:admin.accounts.manage
+Accounts.SetFullName: data-dependent:accountsvc::service::Service::set_full_name

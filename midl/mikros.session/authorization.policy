@@ -1,0 +1,3 @@
+# Access policy of the methods of authorization.midl (MIKSPEC-0023.R47).
+
+Authorization.Authorize: data-dependent:sessionmgr::main

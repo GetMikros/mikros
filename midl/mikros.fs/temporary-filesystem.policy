@@ -1,0 +1,3 @@
+# Access policy of the methods of temporary-filesystem.midl (MIKSPEC-0023.R47).
+
+TemporaryFilesystem.SetBudget: permission:system.filesystems.mount

@@ -1,0 +1,6 @@
+# Access policy of the methods of seat.midl (MIKSPEC-0023.R47).
+# Served by the text console to the session manager alone.
+
+Seat.AddDisplay: public
+Seat.AddInput: public
+Seat.SetScreen: public
