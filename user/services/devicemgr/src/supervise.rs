@@ -141,11 +141,12 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
         };
         let driver = &driver;
         let name = &driver.name;
-        let (prepared, parent, hardware_ids) = match m.devices.borrow().get(id) {
+        let (prepared, parent, hardware_ids, framebuffer) = match m.devices.borrow().get(id) {
             Some(device) => (
                 m.starter.prepare(device, driver),
                 device.parent,
                 device.hardware_ids.clone(),
+                crate::boot_display::has_framebuffer(device, m.boot_display.as_ref()),
             ),
             None => return,
         };
@@ -181,7 +182,7 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
         if m.boot_display.as_ref().is_some_and(|boot| boot.host == id) {
             m.starter.release_console();
         }
-        let spawned = match m.starter.spawn(driver, &hardware_ids).await {
+        let spawned = match m.starter.spawn(driver, &hardware_ids, framebuffer).await {
             Ok(spawned) => spawned,
             Err(why) => return did_not_start(&why),
         };

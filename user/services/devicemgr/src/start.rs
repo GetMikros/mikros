@@ -3,7 +3,7 @@
 //! manager with its `Driver` channel as the `PROVIDER` startup handle,
 //! and calling `Start` on that channel.
 
-use crate::boot_display::{DISPLAY_BOOT_FRAMEBUFFER, PLATFORM_BOOT_FRAMEBUFFER};
+use crate::boot_display::PLATFORM_BOOT_FRAMEBUFFER;
 use crate::devices::Device;
 use alloc::format;
 use alloc::rc::Rc;
@@ -48,11 +48,6 @@ const FRAMEBUFFER_ID: u32 = 1;
 /// Whether `hardware_id` is that of a display device.
 fn is_display(hardware_id: &str) -> bool {
     hardware_id == PLATFORM_BOOT_FRAMEBUFFER || hardware_id.starts_with(PCI_DISPLAY)
-}
-
-/// Whether `hardware_id` marks the device that has the boot framebuffer.
-fn has_framebuffer(hardware_id: &str) -> bool {
-    hardware_id == PLATFORM_BOOT_FRAMEBUFFER || hardware_id == DISPLAY_BOOT_FRAMEBUFFER
 }
 
 /// What starting drivers takes: the process manager's `Launcher`, the
@@ -145,11 +140,17 @@ impl Starter {
     /// its manifest's, `system.driver.<name>` or an installed driver's package
     /// ID, after registering its permissions with
     /// the broker. Before the first driver of a display device, the
-    /// kernel console is released; the driver of the device that has the
-    /// boot framebuffer gets the framebuffer's memory object. An
-    /// installed driver that needs `dma` is not started while DMA is not
-    /// isolated (MIKSPEC-0025.R69).
-    pub async fn spawn(&self, driver: &Driver, hardware_ids: &[String]) -> Result<Spawned, String> {
+    /// kernel console is released; the driver gets the framebuffer's
+    /// memory object when `framebuffer`, which only the device that has
+    /// the boot framebuffer is (MIKSPEC-0025.R57). An installed driver
+    /// that needs `dma` is not started while DMA is not isolated
+    /// (MIKSPEC-0025.R69).
+    pub async fn spawn(
+        &self,
+        driver: &Driver,
+        hardware_ids: &[String],
+        framebuffer: bool,
+    ) -> Result<Spawned, String> {
         if driver.is_installed() && driver.needs.contains(&Need::Dma) && !self.dma_isolated {
             return Err(String::from(
                 "it is installed and needs DMA, which no IOMMU isolates",
@@ -178,7 +179,7 @@ impl Starter {
             handle: server.into_handle(),
         }];
         handles.extend(self.priority(driver.priority)?);
-        if hardware_ids.iter().any(|id| has_framebuffer(id)) {
+        if framebuffer {
             let framebuffer = self
                 .framebuffer
                 .as_ref()

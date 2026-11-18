@@ -2,6 +2,7 @@
 //! startup message names, once its bus driver adds it, or else a root
 //! device of its own.
 
+use crate::devices::Device;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -41,6 +42,25 @@ impl BootDisplay {
     pub fn is(&self, caller: u64, name: &str) -> bool {
         self.given.get() != Given::Platform && self.host == caller && self.name == name
     }
+}
+
+/// Whether `device` is the device that has the boot framebuffer, as
+/// `boot` says (MIKSPEC-0025.R56): the root device of the framebuffer that
+/// the device manager added itself, or the PCI function that it gave the
+/// framebuffer to. Hardware IDs alone do not tell, since a driver may give
+/// any device it adds `display:` and `platform:` IDs.
+pub fn has_framebuffer(device: &Device, boot: Option<&BootDisplay>) -> bool {
+    let platform = device.parent.is_none()
+        && device
+            .hardware_ids
+            .iter()
+            .any(|id| id == PLATFORM_BOOT_FRAMEBUFFER);
+    let function = boot.is_some_and(|boot| {
+        boot.given.get() == Given::Function
+            && device.parent == Some(boot.host)
+            && device.name == boot.name
+    });
+    platform || function
 }
 
 /// The device name of the PCI function at `pci`, which is its segment
