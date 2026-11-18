@@ -1,0 +1,27 @@
+# What `find` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern find(
+    ...path: path "the folders to walk, or the current one",
+    -L: bool "follow links, before the paths",
+    --json: bool "write the entries as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never",
+    -name: string "the name matches the pattern of *, ? and [...]",
+    -iname: string "the name matches the pattern, in any case",
+    -path: string "the path matches the pattern",
+    -type: [f d l s] "the entry is a file, folder, link or socket: f, d, l or s",
+    -size: string "the size in the unit, rounded up, is more than, less than or n; bytes without one",
+    -mtime: string "it was modified more than, less than or n whole days ago",
+    -mmin: string "it was modified more than, less than or n whole minutes ago",
+    -newer: file "it was modified after the file",
+    -empty: bool "the entry is an empty file or folder",
+    -maxdepth: int "go at most this many levels below the paths",
+    -mindepth: int "test no entry fewer levels below the paths",
+    -print: bool "write the path and a newline; true",
+    -print0: bool "write the path and NUL; true",
+    -delete: bool "remove the entry, a folder after its entries; true when removed",
+    -exec: command "run the command up to ; with {} as the path, true when it succeeds, or up to {} + with many paths",
+    -not: bool "true when what follows is false; also !",
+    -a: bool "true when both sides are; also when nothing is between them",
+    -o: bool "true when either side is"
+) complete
