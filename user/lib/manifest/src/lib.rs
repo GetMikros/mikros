@@ -22,8 +22,8 @@ mod program;
 mod tests;
 
 pub use driver::{
-    Choice, DRIVER_PREFIX, Driver, DriverKind, DriverManifest, Need, choose, is_hardware_id,
-    parse_driver,
+    Choice, DRIVER_PREFIX, Driver, DriverKind, DriverManifest, Need, choose, installed_may_match,
+    is_hardware_id, parse_driver,
 };
 pub use order::{Blocked, Order, order};
 pub use program::{NamespaceEntry, Program, ProgramManifest, parse_program};
@@ -172,6 +172,11 @@ pub enum ErrorKind {
     BadNeed,
     /// `match` holds a string that is not a hardware ID.
     BadHardwareId,
+    /// An installed driver's `needs` holds `bus` or `ioports`.
+    InstalledNeed,
+    /// An installed driver's `match` holds an ID other than the vendor
+    /// and device IDs of a PCI function or a USB interface.
+    InstalledMatch,
     /// `permissions` lists a permission that no manifest of its kind may
     /// list.
     ReservedPermission,

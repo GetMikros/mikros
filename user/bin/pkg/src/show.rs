@@ -234,13 +234,13 @@ mod tests {
     #[test]
     fn shows_what_a_driver_matches_and_needs() {
         let text = b"name: org.example.drv\nbinary: /system/drivers/org.example.drv/drv\n\
-                     match: [pci:8086:100e]\nneeds: [dma, bus]\n";
+                     match: [pci:v8086d100e]\nneeds: [dma]\n";
         let driver = mikros_manifest::parse_driver("org.example.drv", text)
             .unwrap()
             .driver;
         assert_eq!(
             describe_driver(&driver),
-            "  matches: pci:8086:100e\n  needs: DMA, the bus\n"
+            "  matches: pci:v8086d100e\n  needs: DMA\n"
         );
     }
 }

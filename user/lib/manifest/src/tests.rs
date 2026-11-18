@@ -547,6 +547,99 @@ fn reads_installed_drivers_with_their_package_ids() {
 }
 
 #[test]
+fn limits_what_installed_drivers_need_and_match() {
+    for allowed in [
+        "pci:v8086d100e",
+        "pci:v8086d100esv1af4sd1100",
+        "pci:v8086d100esv1af4sd1100r03",
+        "usb:v046dpc52bi01",
+    ] {
+        assert!(installed_may_match(allowed), "{allowed}");
+    }
+    for refused in [
+        "pci:c0300",
+        "pci:c030000",
+        "usb:c03s01p01",
+        "usb:v046dpc52b",
+        "usb:v046dpc52bi1",
+        "usb:v046DpC52Bi01",
+        "pci:v8086d100er03",
+        "pci:v8086d100ex",
+        "platform:acpi",
+        "display:boot-framebuffer",
+        "acpi:pnp0303",
+        "fs:btrfs",
+        "gpt:fa730af6-8ba3-42d9-b155-466909d08135",
+        "storage:disk",
+    ] {
+        assert!(!installed_may_match(refused), "{refused}");
+    }
+    let head = "name: org.example.drv\nbinary: /system/drivers/org.example.drv/drv\n";
+    let installed =
+        |rest: &str| parse_driver("org.example.drv", format!("{head}{rest}").as_bytes());
+    let kind_of = |rest: &str| installed(rest).unwrap_err().kind;
+    assert_eq!(kind_of("needs: [dma, bus]\n"), ErrorKind::InstalledNeed);
+    assert_eq!(kind_of("needs: [ioports]\n"), ErrorKind::InstalledNeed);
+    assert_eq!(kind_of("match: [usb:c03]\n"), ErrorKind::InstalledMatch);
+    assert_eq!(
+        kind_of("match: [pci:v8086d100e, platform:acpi]\n"),
+        ErrorKind::InstalledMatch
+    );
+    let ok = installed("needs: [dma]\nmatch: [pci:v8086d100e, usb:v046dpc52bi01]\n").unwrap();
+    assert_eq!(ok.driver.needs, [Need::Dma]);
+    assert!(ok.driver.is_installed());
+    // The drivers of the system keep every need and match.
+    let system =
+        b"name: a\nbinary: /system/a\nneeds: [bus, ioports]\nmatch: [usb:c03, platform:acpi]\n";
+    let system = parse_driver("system.driver.a", system).unwrap();
+    assert!(!system.driver.is_installed());
+    assert_eq!(system.driver.needs, [Need::Bus, Need::Ioports]);
+}
+
+#[test]
+fn prefers_system_drivers_and_keeps_installed_ones_off_protected_classes() {
+    use DriverKind::Normal;
+    let drivers = [
+        driver(
+            "org.example.cam",
+            Normal,
+            &["usb:v046dp0825i00", "pci:v8086d100e"],
+        ),
+        driver("org.example.kbd", Normal, &["usb:v046dpc31ci00"]),
+        driver("nic", Normal, &["pci:v8086d100e"]),
+        driver("usbhid", Normal, &["usb:c03"]),
+        driver("uvc", Normal, &["usb:c0e"]),
+    ];
+    let ids = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let chosen = |list: &[&str]| choose(&drivers, &ids(list)).map(|c| c.driver.name.clone());
+    // On the same ID, the system's driver wins whatever the names.
+    let function = ids(&["pci:v8086d100e", "pci:c0200"]);
+    let nic = choose(&drivers, &function).unwrap();
+    assert_eq!(
+        (nic.driver.name.as_str(), nic.passed_over),
+        ("nic", vec!["org.example.cam"])
+    );
+    // A more specific ID still goes to the installed driver,
+    let camera = [
+        "usb:v046dp0825i00",
+        "usb:v046dp0825",
+        "usb:c0es01",
+        "usb:c0e",
+    ];
+    assert_eq!(chosen(&camera).as_deref(), Some("org.example.cam"));
+    // but never on a HID, mass storage or hub interface.
+    let keyboard = [
+        "usb:v046dpc31ci00",
+        "usb:v046dpc31c",
+        "usb:c03s01p01",
+        "usb:c03",
+    ];
+    assert_eq!(chosen(&keyboard).as_deref(), Some("usbhid"));
+    let only_installed = [driver("org.example.kbd", Normal, &["usb:v046dpc31ci00"])];
+    assert_eq!(choose(&only_installed, &ids(&keyboard)), None);
+}
+
+#[test]
 fn reads_services_of_packages() {
     let text = b"name: index\nbinary: /apps/org.example.editor/bin/index\nstart: on-demand\n\
                  permissions: [user.documents.access]\n";

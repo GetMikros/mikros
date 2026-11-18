@@ -2,7 +2,10 @@
 //! directory under `/system/drivers/`. A driver of the system's is in
 //! `system.driver.<name>/` and has the app ID of that name; an installed
 //! driver is in `<id>/`, named and with the app ID `<id>`, its package's
-//! ID (MIKSPEC-0101.R19).
+//! ID (MIKSPEC-0025.R72, MIKSPEC-0101.R76). An installed driver may not
+//! need `bus` or `ioports`, may match only the IDs that
+//! `installed_may_match` accepts, and is never chosen for a device with
+//! a protected interface class (MIKSPEC-0025.R69).
 
 use crate::program::namespace;
 use crate::{
@@ -103,12 +106,61 @@ pub struct Choice<'a> {
     pub passed_over: Vec<&'a str>,
 }
 
+/// The starts of the hardware IDs of USB interfaces of the classes HID,
+/// mass storage and hub, which installed drivers never drive.
+const PROTECTED: [&str; 3] = ["usb:c03", "usb:c08", "usb:c09"];
+
+/// The forms of the IDs that an installed driver may match, each a list
+/// of literal parts with the number of lowercase hexadecimal digits that
+/// follow each: a PCI function's vendor and device, alone, with its
+/// subsystem's, and with those and its revision; and a USB interface's
+/// vendor, product and interface number.
+const INSTALLED_FORMS: [&[(&str, usize)]; 4] = [
+    &[("pci:v", 4), ("d", 4)],
+    &[("pci:v", 4), ("d", 4), ("sv", 4), ("sd", 4)],
+    &[("pci:v", 4), ("d", 4), ("sv", 4), ("sd", 4), ("r", 2)],
+    &[("usb:v", 4), ("p", 4), ("i", 2)],
+];
+
+/// Whether an installed driver may have `id` in its `match` list: one of
+/// `INSTALLED_FORMS` exactly, never a class ID or another bus's.
+pub fn installed_may_match(id: &str) -> bool {
+    INSTALLED_FORMS.iter().any(|form| has_form(id, form))
+}
+
+fn has_form(mut id: &str, form: &[(&str, usize)]) -> bool {
+    let hex = |b: &u8| b.is_ascii_digit() || (b'a'..=b'f').contains(b);
+    for &(literal, digits) in form {
+        let Some(rest) = id.strip_prefix(literal) else {
+            return false;
+        };
+        if rest.len() < digits || !rest.as_bytes()[..digits].iter().all(hex) {
+            return false;
+        }
+        id = &rest[digits..];
+    }
+    id.is_empty()
+}
+
+impl Driver {
+    /// Whether the driver was installed from a package: its name is a
+    /// package ID rather than a one-word name.
+    pub fn is_installed(&self) -> bool {
+        is_package_id(&self.name)
+    }
+}
+
 /// The driver among `drivers` for a device with `hardware_ids`, from
 /// the most specific to the least: the `Normal` driver matching the
-/// first ID that one matches, else the `Fallback` driver chosen so,
-/// and of several that match the same ID, the one whose name sorts
-/// first. None when no driver matches.
+/// first ID that one matches, else the `Fallback` driver chosen so.
+/// Of several that match the same ID, a driver of the system's comes
+/// before an installed one, and then the one whose name sorts first.
+/// Installed drivers are passed over for a device with an ID that
+/// starts as one of `PROTECTED`. None when no driver matches.
 pub fn choose<'a>(drivers: &'a [Driver], hardware_ids: &'a [String]) -> Option<Choice<'a>> {
+    let protected = hardware_ids
+        .iter()
+        .any(|id| PROTECTED.iter().any(|p| id.starts_with(p)));
     [DriverKind::Normal, DriverKind::Fallback]
         .into_iter()
         .find_map(|kind| {
@@ -116,8 +168,10 @@ pub fn choose<'a>(drivers: &'a [Driver], hardware_ids: &'a [String]) -> Option<C
                 let mut matching: Vec<&Driver> = drivers
                     .iter()
                     .filter(|d| d.kind == kind && d.matches.contains(id))
+                    .filter(|d| !(protected && d.is_installed()))
                     .collect();
-                matching.sort_by(|a, b| a.name.cmp(&b.name));
+                matching
+                    .sort_by(|a, b| (a.is_installed(), &a.name).cmp(&(b.is_installed(), &b.name)));
                 let (driver, others) = matching.split_first()?;
                 Some(Choice {
                     driver,
@@ -162,10 +216,17 @@ pub fn parse_driver(directory: &str, bytes: &[u8]) -> Result<DriverManifest, Err
         return Err(error(binary_node, ErrorKind::BadBinary));
     }
     let mut matches = Vec::new();
+    // A folder other than `system.driver.<name>` holds an installed
+    // driver, which the name checks above made sure is named by its
+    // package ID.
+    let installed = directory.strip_prefix(DRIVER_PREFIX).is_none();
     for item in list(map, "match")? {
         let id = item.string()?;
         if !is_hardware_id(id) {
             return Err(error(item, ErrorKind::BadHardwareId));
+        }
+        if installed && !installed_may_match(id) {
+            return Err(error(item, ErrorKind::InstalledMatch));
         }
         matches.push(id.into());
     }
@@ -185,6 +246,9 @@ pub fn parse_driver(directory: &str, bytes: &[u8]) -> Result<DriverManifest, Err
             "bus" => Need::Bus,
             _ => return Err(error(item, ErrorKind::BadNeed)),
         });
+        if installed && matches!(needs.last(), Some(Need::Ioports | Need::Bus)) {
+            return Err(error(item, ErrorKind::InstalledNeed));
+        }
     }
     let priority = match map.get("priority") {
         None => PRIORITY_DEFAULT,
