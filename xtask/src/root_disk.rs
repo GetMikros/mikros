@@ -4,6 +4,9 @@
 //!   controller: the test init serves `tests/root.img` with
 //!   `test=root-disk`, until the process manager has switched to the root
 //!   and serves `/system/boot/efi`;
+//! - the fresh GUIDs run: the root disk run behind an NVMe controller with
+//!   `renew_guids` in `boot.conf`, after which the disk has new partition
+//!   GUIDs and `boot.conf` asks for none;
 //! - the root clone run: as the root disk run behind an NVMe controller,
 //!   with `test=root-clone` and a copy of the boot disk as the scratch
 //!   disk behind the AHCI controller, whose root and EFI system
@@ -152,53 +155,195 @@ fn run_all(
     dir: &Path,
     timeout: Duration,
 ) -> Result<()> {
-    let what = runs.name;
     for &(name, disk) in runs.disks {
         let dir = dir.join(name);
         fs::create_dir_all(&dir)?;
         image::create_with(kind, built, &dir.join("disk.img"), runs.scenario, &[])?;
         let mut machine = machine.clone();
         machine.disk = disk;
-        let log = dir.join("serial.log");
-        // The AHCI scratch disk's image, written with the scratch disks,
-        // becomes a copy of the boot disk. Its driver is in the boot image,
-        // unlike xhci, which the test image's root does not have.
-        let clone = |dir: &Path| -> Result<()> {
-            fs::copy(dir.join("disk.img"), dir.join("ahci.img"))?;
-            Ok(())
-        };
-        let mut qemu = match runs.clone {
-            true => scenario::start_with(&machine, &dir, false, &clone, &[], false)?,
-            false => scenario::start(&machine, &dir, false)?,
-        };
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            if let Some(status) = qemu.try_wait()? {
-                break Some(status);
-            }
-            if Instant::now() > deadline {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        let _ = qemu.kill();
-        let _ = qemu.wait();
-        let Some(status) = status else {
-            bail!(
-                "the {name} {what} run timed out; serial output in {}",
-                log.display()
-            );
-        };
-        let serial = String::from_utf8_lossy(&fs::read(&log).unwrap_or_default()).into_owned();
-        if let Err(why) = verdict(status.code(), &serial, runs.passed, runs.also) {
-            bail!(
-                "the {name} {what} run failed: {why}; serial output in {}",
-                log.display()
-            );
-        }
-        println!("{what} run {name} passed");
+        boot(runs, name, &machine, &dir, timeout)?;
+        println!("{} run {name} passed", runs.name);
     }
     Ok(())
+}
+
+/// Boots `machine` from the disk image in `dir` once for the run `name`
+/// of `runs`, and fails unless it passed in time.
+fn boot(
+    runs: &Runs,
+    name: &str,
+    machine: &MachineArgs,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    let what = runs.name;
+    let log = dir.join("serial.log");
+    // The AHCI scratch disk's image, written with the scratch disks,
+    // becomes a copy of the boot disk. Its driver is in the boot image,
+    // unlike xhci, which the test image's root does not have.
+    let clone = |dir: &Path| -> Result<()> {
+        fs::copy(dir.join("disk.img"), dir.join("ahci.img"))?;
+        Ok(())
+    };
+    let mut qemu = match runs.clone {
+        true => scenario::start_with(machine, dir, false, &clone, &[], false)?,
+        false => scenario::start(machine, dir, false)?,
+    };
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = qemu.try_wait()? {
+            break Some(status);
+        }
+        if Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let _ = qemu.kill();
+    let _ = qemu.wait();
+    let Some(status) = status else {
+        bail!(
+            "the {name} {what} run timed out; serial output in {}",
+            log.display()
+        );
+    };
+    let serial = String::from_utf8_lossy(&fs::read(&log).unwrap_or_default()).into_owned();
+    if let Err(why) = verdict(status.code(), &serial, runs.passed, runs.also) {
+        bail!(
+            "the {name} {what} run failed: {why}; serial output in {}",
+            log.display()
+        );
+    }
+    Ok(())
+}
+
+const FRESH_GUIDS: Runs = Runs {
+    name: "fresh GUIDs",
+    scenario: "test=root-disk",
+    passed: "SCENARIO root-disk PASSED",
+    also: &[],
+    disks: &[("nvme", Disk::Nvme)],
+    clone: false,
+};
+
+/// Boots the fresh GUIDs run in `dir`: the root disk run's image with
+/// `renew_guids` in its `boot.conf`, from an NVMe controller. The boot
+/// must pass with new GUIDs for the disk and each partition, the same in
+/// both tables, and leave a `boot.conf` without `renew_guids` and the old
+/// `root=PARTUUID=` and `esp=PARTUUID=` options (MIKSPEC-0004.R41). It is
+/// booted once: the test init stops QEMU while the EFI system partition
+/// is mounted, which leaves it not shut down cleanly for a second boot.
+pub fn run_fresh_guids(
+    machine: &MachineArgs,
+    kind: Kind,
+    built: &build::Built,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    let dir = dir.join("nvme");
+    fs::create_dir_all(&dir)?;
+    let disk = dir.join("disk.img");
+    let extra = format!("{} {}", FRESH_GUIDS.scenario, image::RENEW_GUIDS);
+    image::create_with(kind, built, &disk, &extra, &[])?;
+    let mut machine = machine.clone();
+    machine.disk = Disk::Nvme;
+    let before = Table::read(&disk)?;
+    boot(&FRESH_GUIDS, "nvme", &machine, &dir, timeout)?;
+    let after = Table::read(&disk)?;
+    let all_new = after.disk != before.disk
+        && after.partitions.len() == before.partitions.len()
+        && after
+            .partitions
+            .iter()
+            .all(|(_, g, _)| before.partitions.iter().all(|(_, old, _)| old != g));
+    if !all_new {
+        bail!("the boot did not renew every GUID: {before:?} became {after:?}");
+    }
+    let conf = after.boot_conf(&disk)?;
+    let left = conf.split_ascii_whitespace().find(|w| {
+        *w == image::RENEW_GUIDS
+            || w.starts_with("root=PARTUUID=")
+            || w.starts_with("esp=PARTUUID=")
+    });
+    if let Some(word) = left {
+        bail!("boot.conf still holds {word} after the boot: {conf:?}");
+    }
+    Ok(())
+}
+
+/// A used entry of a partition table: its type GUID, partition GUID,
+/// and first and last LBA, as stored.
+type Entry = ([u8; 16], [u8; 16], (u64, u64));
+
+/// A disk image's partition table: the disk GUID and the used entries.
+#[derive(Debug, PartialEq, Eq)]
+struct Table {
+    disk: [u8; 16],
+    partitions: Vec<Entry>,
+}
+
+impl Table {
+    /// The table of the disk image at `path`, the same in its primary
+    /// and its backup copy.
+    fn read(path: &Path) -> Result<Table> {
+        use std::os::unix::fs::FileExt;
+        let file = fs::File::open(path)?;
+        let sector = image::gpt::SECTOR;
+        let last = file.metadata()?.len() / sector - 1;
+        let read = |at: u64, len: usize| -> Result<Vec<u8>> {
+            let mut bytes = vec![0u8; len];
+            file.read_exact_at(&mut bytes, at)?;
+            Ok(bytes)
+        };
+        let u64_at = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().expect("8"));
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().expect("4"));
+        let guid = |b: &[u8]| -> [u8; 16] { b[..16].try_into().expect("16 bytes") };
+        let table = |lba: u64| -> Result<Table> {
+            let header = read(lba * sector, sector as usize)?;
+            let (count, size) = (u32_at(&header, 80) as usize, u32_at(&header, 84) as usize);
+            let entries = read(u64_at(&header, 72) * sector, count * size)?;
+            let partitions = entries
+                .chunks_exact(size)
+                .filter(|e| e[..16] != [0; 16])
+                .map(|e| (guid(e), guid(&e[16..]), (u64_at(e, 32), u64_at(e, 40))))
+                .collect();
+            Ok(Table {
+                disk: guid(&header[56..]),
+                partitions,
+            })
+        };
+        let (primary, backup) = (table(1)?, table(last)?);
+        if primary != backup {
+            bail!(
+                "the tables of {} differ: {primary:?}, {backup:?}",
+                path.display()
+            );
+        }
+        Ok(primary)
+    }
+
+    /// The text of `EFI/Mikros/boot.conf` on the EFI system partition of
+    /// the disk image at `path`.
+    fn boot_conf(&self, path: &Path) -> Result<String> {
+        use std::io::Read;
+        use std::os::unix::fs::FileExt;
+        let esp = image::ESP_TYPE.to_bytes_le();
+        let (_, _, (first, last)) = self
+            .partitions
+            .iter()
+            .find(|(kind, _, _)| *kind == esp)
+            .ok_or_else(|| anyhow::anyhow!("{} has no EFI system partition", path.display()))?;
+        let sector = image::gpt::SECTOR;
+        let mut bytes = vec![0u8; ((last - first + 1) * sector) as usize];
+        fs::File::open(path)?.read_exact_at(&mut bytes, first * sector)?;
+        let volume = fatfs::FileSystem::new(std::io::Cursor::new(bytes), fatfs::FsOptions::new())?;
+        let mut text = String::new();
+        volume
+            .root_dir()
+            .open_file("EFI/Mikros/boot.conf")?
+            .read_to_string(&mut text)?;
+        Ok(text)
+    }
 }
 
 #[cfg(test)]

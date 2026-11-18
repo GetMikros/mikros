@@ -13,7 +13,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const ESP_TYPE: Uuid = Uuid::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);
+pub(crate) const ESP_TYPE: Uuid = Uuid::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);
 const ROOT_TYPE: Uuid = Uuid::from_u128(0xfa730af6_8ba3_42d9_b155_466909d08135);
 /// The types of the small partitions that the test machine's disk has
 /// after the root partition, for the test drivers test-fat and
@@ -153,12 +153,22 @@ pub fn run(args: &Args) -> Result<()> {
         false => build::build(args.kind)?,
     };
     let out = path(args.kind, args.live, args.tests);
+    // An image for installing or releasing renews its partition GUIDs at
+    // its first boot, so that the disks copied from it do not share them;
+    // a test image keeps them (MIKSPEC-0023.R48).
+    let mut words = Vec::new();
+    if args.live {
+        words.push(LIVE);
+    }
+    if !args.tests {
+        words.push(RENEW_GUIDS);
+    }
     create_parts(
         args.kind,
         &built,
         &built.system_image,
         &out,
-        if args.live { LIVE } else { "" },
+        &words.join(" "),
         &[],
         Extras::default(),
         key.as_ref(),
@@ -168,6 +178,10 @@ pub fn run(args: &Args) -> Result<()> {
 /// The command line word that makes the system use the root partition
 /// read-only, as a live system.
 pub const LIVE: &str = "live";
+
+/// The word of `boot.conf` that makes the bootloader give the disk new
+/// partition GUIDs at the next boot (MIKSPEC-0004.R41).
+pub const RENEW_GUIDS: &str = "renew_guids";
 
 /// The files of the EFI system partition: the boot manager, also at the
 /// fallback path, the bootloader and `command_line`. With `key`, the EFI
