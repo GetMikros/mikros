@@ -70,7 +70,7 @@ pub struct Fs<F: Format> {
     pub paged: RefCell<BTreeMap<u64, (OwnedHandle, u64)>>,
     pub clock: Clock,
     /// Whether the partition's `cache` property is `quick-disconnect`
-    /// (MIKSPEC-0025.R33), which has every change durable when its call
+    /// (MIKSPEC-0025.R73), which has every change durable when its call
     /// returns (MIKSPEC-0049.R20).
     quick_disconnect: bool,
     pub reactor: Reactor,
@@ -120,7 +120,7 @@ impl<F: Format> Fs<F> {
     }
 
     /// Makes `call`, which may change the volume, with `quick-disconnect`
-    /// as one change (MIKSPEC-0064.R14): the volume is marked as in use on
+    /// as one change (MIKSPEC-0064.R23): the volume is marked as in use on
     /// stable storage before it, and once it returns, as the volume
     /// writes what changes through at once, the partition is flushed and
     /// the volume marked as shut down cleanly again, on stable storage. A

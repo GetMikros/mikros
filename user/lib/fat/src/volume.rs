@@ -94,6 +94,8 @@ pub struct Volume<D> {
     /// The free clusters, once counted, and where to look for one next.
     pub(crate) free: Option<u32>,
     pub(crate) hint: u32,
+    /// Whether the volume was not shut down cleanly when it was mounted.
+    pub(crate) dirty: bool,
 }
 
 impl<D: Device> Volume<D> {
@@ -102,7 +104,7 @@ impl<D: Device> Volume<D> {
     /// is mounted read-only. Mounting for writing marks the volume as
     /// in use until `unmount`.
     pub fn mount(device: D, size: u64, writable: bool) -> Result<Volume<D>, Error> {
-        Self::open(device, size, writable, false)
+        Self::open(device, size, writable, false, false)
     }
 
     /// Mounts the volume as `mount` does, but leaves it marked as shut
@@ -114,16 +116,41 @@ impl<D: Device> Volume<D> {
         size: u64,
         writable: bool,
     ) -> Result<Volume<D>, Error> {
-        Self::open(device, size, writable, true)
+        Self::open(device, size, writable, true, false)
     }
 
-    fn open(device: D, size: u64, writable: bool, quick: bool) -> Result<Volume<D>, Error> {
+    /// Mounts the volume as `mount` does, or as `mount_quick_disconnect`
+    /// does when `quick`, but for writing also when it was not shut down
+    /// cleanly, so that it is marked as shut down cleanly again once
+    /// unmounted or once a change ended. `was_dirty` then tells.
+    pub fn mount_healing(
+        device: D,
+        size: u64,
+        writable: bool,
+        quick: bool,
+    ) -> Result<Volume<D>, Error> {
+        Self::open(device, size, writable, quick, true)
+    }
+
+    /// Whether the volume was not shut down cleanly when it was mounted.
+    pub fn was_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    fn open(
+        device: D,
+        size: u64,
+        writable: bool,
+        quick: bool,
+        heal: bool,
+    ) -> Result<Volume<D>, Error> {
         let mut disk = Disk::new(device, 512);
         let mut boot = [0u8; 512];
         disk.read(0, &mut boot)?;
         let layout = Layout::parse(&boot, size)?;
         let mut disk = Disk::new(disk.device, layout.sector_size);
-        let writable = writable && table::clean(&mut disk, &layout)?;
+        let dirty = !table::clean(&mut disk, &layout)?;
+        let writable = writable && (!dirty || heal);
         let mut volume = Volume {
             disk,
             layout,
@@ -131,6 +158,7 @@ impl<D: Device> Volume<D> {
             quick,
             free: None,
             hint: 2,
+            dirty,
         };
         if writable && !quick {
             table::set_clean(&mut volume.disk, &volume.layout, false)?;

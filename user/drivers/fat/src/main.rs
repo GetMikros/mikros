@@ -17,8 +17,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     mikros_fatserver::run::<Fat>(bootstrap)
 }
 
-/// A mounted FAT volume.
-struct Fat(Volume<BlockDevice>);
+/// A mounted FAT volume, and whether it was mounted to heal a missing
+/// mark of a clean shutdown.
+struct Fat(Volume<BlockDevice>, bool);
 
 impl Format for Fat {
     type Dir = Dir;
@@ -28,12 +29,23 @@ impl Format for Fat {
     const NAME: &'static str = "fat";
     const FILE_MAX: u64 = mikros_fat::FILE_MAX;
 
-    fn mount(device: BlockDevice, size: u64, writable: bool, quick: bool) -> Result<Fat, Error> {
-        let volume = match quick {
-            true => Volume::mount_quick_disconnect(device, size, writable),
-            false => Volume::mount(device, size, writable),
+    fn mount(
+        device: BlockDevice,
+        size: u64,
+        writable: bool,
+        quick: bool,
+        heal: bool,
+    ) -> Result<Fat, Error> {
+        let volume = match (heal, quick) {
+            (true, _) => Volume::mount_healing(device, size, writable, quick),
+            (false, true) => Volume::mount_quick_disconnect(device, size, writable),
+            (false, false) => Volume::mount(device, size, writable),
         };
-        volume.map(Fat)
+        volume.map(|volume| Fat(volume, heal))
+    }
+
+    fn healed(&self) -> bool {
+        self.1 && self.0.was_dirty()
     }
 
     fn begin_change(&mut self) -> Result<(), Error> {

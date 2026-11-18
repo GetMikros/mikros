@@ -841,7 +841,7 @@ impl Namespaces {
     /// once it is published, to serve it as `/system/boot/efi`: read and
     /// write, or read only when its server refuses writing, as a FAT
     /// server does for a volume that was not shut down cleanly
-    /// (MIKSPEC-0064.R14, MIKSPEC-0064.R22).
+    /// (MIKSPEC-0064.R23, MIKSPEC-0064.R22).
     pub async fn prepare_esp(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
         let mut found = filesystem(&directory, &reactor, ESP_INSTANCE, RW)
             .await

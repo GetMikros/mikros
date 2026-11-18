@@ -29,7 +29,13 @@ impl Format for Exfat {
     const NAME: &'static str = "exfat";
     const FILE_MAX: u64 = u64::MAX;
 
-    fn mount(device: BlockDevice, size: u64, writable: bool, quick: bool) -> Result<Exfat, Error> {
+    fn mount(
+        device: BlockDevice,
+        size: u64,
+        writable: bool,
+        quick: bool,
+        _heal: bool,
+    ) -> Result<Exfat, Error> {
         let volume = match quick {
             true => Volume::mount_quick_disconnect(device, size, writable),
             false => Volume::mount(device, size, writable),

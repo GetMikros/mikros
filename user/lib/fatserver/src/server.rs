@@ -32,10 +32,12 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 const SERVICE_CLASS: &str = "filesystem";
 /// The property of the partition that says how its changes may be
-/// cached (MIKSPEC-0025.R33), and the value that has them durable at
+/// cached (MIKSPEC-0025.R73), and the value that has them durable at
 /// once; any other value, or none, lets them wait for `Sync` or `Stop`.
 const CACHE: &str = "cache";
 const QUICK_DISCONNECT: &str = "quick-disconnect";
+/// The property of the boot's EFI system partition.
+const BOOT_ESP: &str = "boot_esp";
 /// The partition's property that is the file system's ID.
 const PARTITION_GUID: &str = "partition_guid";
 const FOREVER: i64 = i64::MAX;
@@ -146,6 +148,13 @@ fn start<F: Format>(
         .properties
         .iter()
         .any(|p| p.key == CACHE && p.value == QUICK_DISCONNECT);
+    // The boot's EFI system partition is served writable also when it
+    // was not shut down cleanly, which heals it (MIKSPEC-0064.R23).
+    let boot_esp = request
+        .device
+        .properties
+        .iter()
+        .any(|p| p.key == BOOT_ESP && p.value == "true");
     let id = request
         .device
         .properties
@@ -157,10 +166,18 @@ fn start<F: Format>(
     let block = BlockClient::new(ClientEnd::new(bus));
     let device = BlockDevice::new(block, process, &driver::GATE).ok_or(Status::NoResources)?;
     let (size, writable) = (device.size(), !device.read_only());
-    let volume = F::mount(device, size, writable, quick_disconnect).map_err(|e| match e {
-        mikros_fat::Error::Invalid => Status::NotSupported,
-        _ => Status::Internal,
-    })?;
+    let volume =
+        F::mount(device, size, writable, quick_disconnect, boot_esp).map_err(|e| match e {
+            mikros_fat::Error::Invalid => Status::NotSupported,
+            _ => Status::Internal,
+        })?;
+    if volume.healed() {
+        mikros_rt::log!(
+            Warning,
+            "{}: the boot's EFI system partition was not shut down cleanly; serving it writable, which marks it clean again",
+            F::NAME
+        );
+    }
     let pager = memory::pager(F::NAME).ok_or(Status::NoResources)?;
     let clock = time::Clock::new(F::NAME, directory, process, zoneinfo.take());
     let fs = Rc::new(Fs::new(

@@ -22,8 +22,20 @@ pub trait Format: Sized + 'static {
 
     /// Mounts the volume on `device`, a partition of `size` bytes, for
     /// writing when `writable`. With `quick`, the volume is marked as in
-    /// use only while a change is in progress.
-    fn mount(device: BlockDevice, size: u64, writable: bool, quick: bool) -> Result<Self, Error>;
+    /// use only while a change is in progress. With `heal`, a format that
+    /// keeps a mark of a clean shutdown mounts a volume without that mark
+    /// for writing too, so that it gets the mark again; others ignore it.
+    fn mount(
+        device: BlockDevice,
+        size: u64,
+        writable: bool,
+        quick: bool,
+        heal: bool,
+    ) -> Result<Self, Error>;
+    /// Whether a volume mounted with `heal` was not shut down cleanly.
+    fn healed(&self) -> bool {
+        false
+    }
     fn begin_change(&mut self) -> Result<(), Error>;
     fn end_change(&mut self) -> Result<(), Error>;
     fn unmount(&mut self) -> Result<(), Error>;

@@ -268,6 +268,50 @@ fn keeps_the_clean_shutdown_bit() {
     assert_ne!(fat(&bytes) & 0x8000, 0);
 }
 
+/// A volume left in use is mounted for writing when healing is asked
+/// for, and is marked as shut down cleanly again: at unmount, or with
+/// quick disconnection once a change ended.
+#[test]
+fn heals_a_volume_left_in_use() {
+    let size = 8 << 20;
+    let fat = |b: &[u8]| {
+        let reserved = u16::from_le_bytes([b[14], b[15]]) as usize * 512;
+        u16::from_le_bytes([b[reserved + 2], b[reserved + 3]])
+    };
+    let crashed = || {
+        let bytes = image(size, fatfs::FatType::Fat16, |_| {});
+        let mut volume = Volume::mount(Mem(bytes), size as u64, true).unwrap();
+        volume_bytes_ref(&mut volume)
+    };
+    assert_eq!(fat(&crashed()) & 0x8000, 0);
+    let clean = Volume::mount_healing(
+        Mem(image(size, fatfs::FatType::Fat16, |_| {})),
+        size as u64,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(!clean.was_dirty() && !clean.read_only());
+    let mut volume = Volume::mount_healing(Mem(crashed()), size as u64, true, false).unwrap();
+    assert!(volume.was_dirty() && !volume.read_only());
+    volume.unmount().unwrap();
+    assert_ne!(fat(&volume_bytes(volume)) & 0x8000, 0);
+    let mut quick = Volume::mount_healing(Mem(crashed()), size as u64, true, true).unwrap();
+    assert!(quick.was_dirty() && !quick.read_only());
+    quick.begin_change().unwrap();
+    let root = quick.root();
+    let now = Stamp::new(2026, 11, 18, 12, 0, 0, 0);
+    quick.create(root, "boot.log", false, now).unwrap();
+    quick.end_change().unwrap();
+    assert_ne!(fat(&volume_bytes_ref(&mut quick)) & 0x8000, 0);
+    // Without healing it stays read-only, as before.
+    assert!(
+        Volume::mount(Mem(crashed()), size as u64, true)
+            .unwrap()
+            .read_only()
+    );
+}
+
 /// Mounted for quick disconnection, the volume is marked as in use only
 /// from the start of a change to its end, and a volume that was left in
 /// use is still mounted read-only.
