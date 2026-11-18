@@ -504,5 +504,18 @@ async fn probe(
         "starting an on-demand service at the first connection",
         hello(d, reactor).await,
     )?;
-    check("starting it again once it ended", hello(d, reactor).await)
+    check("starting it again once it ended", hello(d, reactor).await)?;
+    // A connection watches at most 256 protocols (MIKSPEC-0036.R53); this
+    // one watches some already.
+    let mut refused = None;
+    for watched in 0..=256 {
+        if let Err(status) = watch(d, MISSING).await {
+            refused = Some((watched, status));
+            break;
+        }
+    }
+    check(
+        "refusing a connection's watch beyond 256",
+        matches!(refused, Some((n, Status::NoResources)) if n < 256),
+    )
 }

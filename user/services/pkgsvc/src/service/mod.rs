@@ -203,7 +203,9 @@ fn inspect(package: ClientEnd<Node>) -> Result<InstallerInspectResponse, Status>
     Ok(InstallerInspectResponse { manifest })
 }
 
-/// Serves `Installer` on `end` for `caller` until it closes.
+/// Serves `Installer` on `end` for `caller` until it closes, one request
+/// after the other on the connection's own thread, so that one client
+/// never occupies more than that thread (MIKSPEC-0101.R75).
 fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity) {
     let server = InstallerServer::new(end);
     while let Ok(request) = server.next(FOREVER) {

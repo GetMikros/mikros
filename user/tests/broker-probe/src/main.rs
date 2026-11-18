@@ -483,6 +483,22 @@ async fn probe(
         "naming the service that asked for its clients",
         VIA_MANAGER.load(Ordering::Relaxed) == 2,
     )?;
+    // One connection watches at most 256 permissions (MIKSPEC-0037.R47).
+    let many = connect(&provider, ADMIN, reactor);
+    let mut watched = 0;
+    while watched < 300 && matches!(many.watch("user.camera.use".into()).await, Ok(Ok(_))) {
+        watched += 1;
+    }
+    c(
+        "watching at most 256 permissions on one connection",
+        watched == 256,
+    )?;
+    let refused = many.watch_confirmed("user.camera.use".into()).await;
+    c(
+        "counting confirmed watches with them",
+        matches!(refused, Ok(Err(Status::NoResources))),
+    )?;
+    drop(many);
     let watched = watcher.watch("user.camera.use".into()).await;
     c("watching", watched.is_ok_and(|r| r.is_ok()))?;
     c(

@@ -56,6 +56,8 @@ const USER_CONTROL_PERMISSION: &str = "user.power.control";
 /// needs.
 const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
 pub const SERVICE_CONTROL_PERMISSION: &str = "admin.services.control";
+/// The most protocols one connection watches (MIKSPEC-0036.R53).
+const WATCHES_MAX: usize = 256;
 /// The prefix of the app IDs of the system's programs and services.
 const SYSTEM_PREFIX: &str = "system.";
 /// The kind of a driver package in `PackageInfo`.
@@ -1059,8 +1061,18 @@ async fn serve(dir: Rc<Dir>, end: ServerEnd<Directory>, caller: Rc<ClientIdentit
                     )
                 }
                 R::Watch(q, r) => {
+                    let own = Rc::downgrade(&server);
+                    let watched = dir
+                        .watchers
+                        .borrow()
+                        .iter()
+                        .filter(|w| w.server.ptr_eq(&own))
+                        .count();
                     let result = if dir.provided.borrow().contains_key(&q.protocol) {
                         Err(Status::InvalidArgs)
+                    } else if watched >= WATCHES_MAX {
+                        // At most this many per connection (MIKSPEC-0036.R53).
+                        Err(Status::NoResources)
                     } else {
                         dir.watchers.borrow_mut().push(Watcher {
                             protocol: q.protocol,

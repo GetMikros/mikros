@@ -43,6 +43,8 @@ const CONFIRM_POLL: i64 = 20_000_000;
 /// critical; every other is killed.
 const CRITICAL: [&str; 2] = ["system.processmgr", "system.servicemgr"];
 const KILL: u32 = 9;
+/// The most permissions one connection watches (MIKSPEC-0037.R47).
+const WATCHES_MAX: usize = 256;
 
 /// A connection that watches a permission with confirmation
 /// (MIKSPEC-0037.R34), and the revocations it has confirmed.
@@ -364,6 +366,16 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
     let server = Rc::new(BrokerAsyncServer::new(end, inner.reactor.clone()));
     // The revocations that this connection has confirmed.
     let done = Rc::new(RefCell::new(BTreeSet::new()));
+    // The permissions it watches, with and without confirmation
+    // (MIKSPEC-0037.R47).
+    let watches = Cell::new(0usize);
+    let watch = || match watches.get() < WATCHES_MAX {
+        true => {
+            watches.set(watches.get() + 1);
+            Ok(())
+        }
+        false => Err(Status::NoResources),
+    };
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
@@ -397,6 +409,7 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
             R::Watch(q, r) => {
                 let result = inner.authorize(&caller, Call::Watch).and_then(|()| {
                     crate::permissions::scope(&q.permission).ok_or(Status::NotFound)?;
+                    watch()?;
                     let watcher = (q.permission, Rc::downgrade(&server));
                     inner.watchers.borrow_mut().push(watcher);
                     Ok(BrokerWatchResponse {})
@@ -406,6 +419,7 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
             R::WatchConfirmed(q, r) => {
                 let result = inner.authorize(&caller, Call::Watch).and_then(|()| {
                     crate::permissions::scope(&q.permission).ok_or(Status::NotFound)?;
+                    watch()?;
                     inner.confirming.borrow_mut().push(Confirming {
                         permission: q.permission,
                         server: Rc::downgrade(&server),
