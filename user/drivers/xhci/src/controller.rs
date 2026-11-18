@@ -194,8 +194,7 @@ impl Controller {
                 while reactor.signals(raw, SIGNALED).await.is_ok() {
                     // Acknowledged first, so that an event posted while
                     // the ring is read signals again.
-                    // SAFETY: the call takes no pointers.
-                    unsafe { sys::interrupt_ack(raw) };
+                    let _ = mikros_rt::hardware::interrupt_ack(raw);
                     controller.regs.clear_pending();
                     controller.process_events();
                 }

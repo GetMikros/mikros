@@ -24,6 +24,7 @@ use core::cell::{Cell, RefCell};
 use core::future::{Future, poll_fn};
 use core::task::{Poll, Waker};
 use mikros_rt::exec::{Reactor, Spawner};
+use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::__midl::{ClientEnd, Error, OwnedHandle};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockAsyncClient, BlockCreateBufferResponse};
@@ -47,15 +48,18 @@ enum State {
 /// A buffer that a client created through the link.
 struct Buffer {
     size: u64,
-    /// The memory that the client got, and where it is mapped here once
-    /// the disk's buffer is other memory.
+    /// The memory that the client got, and its mapping here once the
+    /// disk's buffer is other memory.
     memory: OwnedHandle,
-    client: Option<u64>,
-    /// The disk's buffer on the current channel, and its memory mapped
-    /// here when it is not `memory`.
+    client: Option<Rc<Mapping>>,
+    /// The disk's buffer on the current channel, and its memory and that
+    /// memory's mapping here when it is not `memory`.
     disk: u32,
-    copy: Option<(OwnedHandle, u64)>,
+    copy: Option<(OwnedHandle, Rc<Mapping>)>,
 }
+
+/// The mappings of a buffer's memory and of the disk's when they differ.
+type Views = (Rc<Mapping>, Rc<Mapping>);
 
 /// What the disk of a new channel must match to be the same disk.
 pub struct Identity {
@@ -96,13 +100,7 @@ fn flatten<T>(result: Result<Result<T, Status>, Error>) -> Result<T, Status> {
 }
 
 fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, Status> {
-    let mut out = 0;
-    // SAFETY: the out pointer is valid for the call.
-    match unsafe { sys::handle_duplicate(handle.raw(), SAME_RIGHTS, &mut out) } {
-        // SAFETY: the kernel just made the handle for us.
-        mikros_rt::OK => Ok(unsafe { OwnedHandle::from_raw(out) }),
-        _ => Err(Status::NoResources),
-    }
+    mikros_rt::objects::duplicate(handle.raw(), SAME_RIGHTS).map_err(|_| Status::NoResources)
 }
 
 impl Link {
@@ -184,9 +182,7 @@ impl Link {
         let generation = self.generation.get();
         let link = self.clone();
         self.spawner.spawn(async move {
-            let mut now = 0;
-            // SAFETY: the out pointer is valid for the call.
-            unsafe { sys::clock_get_monotonic(&mut now) };
+            let now = mikros_rt::objects::now();
             let _ = link.reactor.sleep_until(now + RECONNECT_LIMIT).await;
             if link.generation.get() == generation && link.state.get() == State::Down {
                 link.fail();
@@ -267,17 +263,15 @@ impl Link {
             // A buffer destroyed meanwhile goes on the new disk too.
             let Some(buffer) = buffers.get_mut(&id) else {
                 drop(buffers);
-                self.unmap(view, size);
+                drop(view);
                 let _ = disk.destroy_buffer(created.buffer);
                 continue;
             };
             if buffer.client.is_none() {
                 buffer.client = Some(self.map(&buffer.memory, size)?);
             }
-            if let Some((_, old)) = buffer.copy.take() {
-                self.unmap(old, size);
-            }
             buffer.disk = created.buffer;
+            // The old disk memory goes, with its mapping.
             buffer.copy = Some((created.memory, view));
         }
         if self.locked.get() {
@@ -310,30 +304,14 @@ impl Link {
         })
     }
 
-    fn map(&self, memory: &OwnedHandle, size: u64) -> Result<u64, Status> {
-        let mut at = 0;
+    /// Maps `memory`, its `size` bytes in whole pages, into the driver.
+    /// The requests that copy through the mapping hold it until they are
+    /// done.
+    fn map(&self, memory: &OwnedHandle, size: u64) -> Result<Rc<Mapping>, Status> {
         let len = size.next_multiple_of(PAGE);
-        // SAFETY: the out pointer is valid; the kernel picks a free range.
-        let mapped = unsafe {
-            sys::vm_map(
-                self.process,
-                PERM_READ_WRITE,
-                0,
-                memory.raw(),
-                0,
-                len,
-                &mut at,
-            )
-        };
-        (mapped == mikros_rt::OK)
-            .then_some(at)
-            .ok_or(Status::NoResources)
-    }
-
-    fn unmap(&self, at: u64, size: u64) {
-        // SAFETY: the call takes no pointers; the range is a mapping of
-        // the link's.
-        unsafe { sys::vm_unmap(self.process, at, size.next_multiple_of(PAGE)) };
+        Mapping::new(self.process, PERM_READ_WRITE, memory.raw(), 0, len)
+            .map(Rc::new)
+            .map_err(|_| Status::NoResources)
     }
 
     /// A buffer of `size` bytes from the disk, with a number of the
@@ -371,35 +349,27 @@ impl Link {
         let Some(buffer) = self.buffers.borrow_mut().remove(&id) else {
             return;
         };
-        if let Some(client) = buffer.client {
-            self.unmap(client, buffer.size);
-        }
-        if let Some((_, view)) = buffer.copy {
-            self.unmap(view, buffer.size);
-        }
+        let disk = buffer.disk;
+        // Its mappings go with it.
+        drop(buffer);
         if self.state.get() == State::Up {
-            let _ = self.disk.borrow().destroy_buffer(buffer.disk);
+            let _ = self.disk.borrow().destroy_buffer(disk);
         }
     }
 
     /// The disk's buffer for buffer `id`, and, when it is other memory
-    /// than the client's, where the client's and the disk's memory are
-    /// mapped, for `len` bytes at `offset`: `INVALID_ARGS` for a buffer
-    /// that does not exist or a range beyond it.
-    fn disk_buffer(
-        &self,
-        id: u32,
-        offset: u64,
-        len: u64,
-    ) -> Result<(u32, Option<(u64, u64)>), Status> {
+    /// than the client's, the mappings of the client's and the disk's
+    /// memory, which hold the `len` bytes at `offset`: `INVALID_ARGS`
+    /// for a buffer that does not exist or a range beyond it.
+    fn disk_buffer(&self, id: u32, offset: u64, len: u64) -> Result<(u32, Option<Views>), Status> {
         let buffers = self.buffers.borrow();
         let buffer = buffers.get(&id).ok_or(Status::InvalidArgs)?;
         let end = offset.checked_add(len).ok_or(Status::InvalidArgs)?;
         if end > buffer.size {
             return Err(Status::InvalidArgs);
         }
-        let views = match (&buffer.copy, buffer.client) {
-            (Some((_, disk)), Some(client)) => Some((client + offset, disk + offset)),
+        let views = match (&buffer.copy, &buffer.client) {
+            (Some((_, disk)), Some(client)) => Some((client.clone(), disk.clone())),
             _ => None,
         };
         Ok((buffer.disk, views))
@@ -422,9 +392,8 @@ impl Link {
                 };
                 let read = disk.read(buffer, offset, block, count).await;
                 if let (Ok(Ok(_)), Some((client, disk))) = (&read, views) {
-                    // SAFETY: both ranges lie in mappings of the link's,
-                    // which the disk filled.
-                    unsafe { core::ptr::copy(disk as *const u8, client as *mut u8, len as usize) };
+                    // The disk filled its memory.
+                    client.copy_from(offset, &disk, offset, len);
                 }
                 read
             }
@@ -450,8 +419,7 @@ impl Link {
                     Err(status) => return Ok(Err(status)),
                 };
                 if let Some((client, disk)) = views {
-                    // SAFETY: both ranges lie in mappings of the link's.
-                    unsafe { core::ptr::copy(client as *const u8, disk as *mut u8, len as usize) };
+                    disk.copy_from(offset, &client, offset, len);
                 }
                 disk.write(buffer, offset, block, count, fua).await
             }

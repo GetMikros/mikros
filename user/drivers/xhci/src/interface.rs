@@ -12,6 +12,7 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use mikros_rt::exec::Spawner;
+use mikros_rt::hardware;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::usb::{
@@ -337,11 +338,9 @@ impl Drop for Pin {
     }
 }
 
-fn kernel(status: i64) -> Result<(), Status> {
-    match status {
-        mikros_rt::OK => Ok(()),
-        status => Err(Status::from_raw(status as i32)),
-    }
+/// The status of a system call that failed with `status`.
+fn kernel(status: sys::Status) -> Status {
+    Status::from_raw(status as i32)
 }
 
 /// Checks and enqueues a bulk transfer of the `length` bytes at `offset`
@@ -368,30 +367,19 @@ async fn bulk(
         false => DEVICE_READ,
     };
     let mark = controller.unconfirmed.mark();
-    let mut pmt = 0;
-    // SAFETY: the out pointer is valid for the call.
-    kernel(unsafe {
-        sys::bti_pin(
-            controller.bti.raw(),
-            buffer.raw(),
-            start,
-            end - start,
-            access,
-            &mut pmt,
-        )
-    })?;
-    let pin = Pin(pmt, mark);
+    let pmt = hardware::pin(
+        controller.bti.raw(),
+        buffer.raw(),
+        start,
+        end - start,
+        access,
+    )
+    .map_err(kernel)?;
+    let pin = Pin(pmt.into_raw(), mark);
     let mut pages = vec![0u64; count as usize];
     for (i, chunk) in pages.chunks_mut(512).enumerate() {
-        // SAFETY: the pointer describes `chunk`.
-        kernel(unsafe {
-            sys::mem_get_physical_pages(
-                buffer.raw(),
-                start / PAGE + 512 * i as u64,
-                chunk.len() as u64,
-                chunk.as_mut_ptr(),
-            )
-        })?;
+        hardware::physical_pages(buffer.raw(), start / PAGE + 512 * i as u64, chunk)
+            .map_err(kernel)?;
     }
     let max_packet = descriptor.max_packet & 0x7FF;
     // A controller without 64-bit addressing cannot reach pages above
@@ -442,10 +430,7 @@ async fn bounced(
     let memory = controller.memory(u64::from(length))?;
     let mut bytes = vec![0u8; length as usize];
     if !input {
-        // SAFETY: the pointer describes `bytes`.
-        kernel(unsafe {
-            sys::mem_read(buffer.raw(), offset, bytes.as_mut_ptr(), bytes.len() as u64)
-        })?;
+        mikros_rt::objects::read_memory(buffer.raw(), offset, &mut bytes).map_err(kernel)?;
         for (i, byte) in bytes.iter().enumerate() {
             memory.write8(i as u64, *byte);
         }
@@ -459,10 +444,7 @@ async fn bounced(
         if input {
             let mut bytes = vec![0u8; actual.min(length) as usize];
             memory.read_bytes(0, &mut bytes);
-            // SAFETY: the pointer describes `bytes`.
-            kernel(unsafe {
-                sys::mem_write(buffer.raw(), offset, bytes.as_ptr(), bytes.len() as u64)
-            })?;
+            mikros_rt::objects::write_memory(buffer.raw(), offset, &bytes).map_err(kernel)?;
         }
         Ok(actual)
     };

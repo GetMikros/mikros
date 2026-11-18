@@ -11,6 +11,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use mikros_rt::exec::Reactor;
+use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::usb::{InterfaceAsyncClient, Setup};
@@ -94,24 +95,18 @@ pub struct Bot {
     bulk_in: u8,
     bulk_out: u8,
     page: OwnedHandle,
-    at: u64,
+    mapping: Mapping,
     tag: Cell<u32>,
     lock: Lock,
 }
 
-fn kernel(status: i64) -> Result<(), Status> {
-    match status {
-        mikros_rt::OK => Ok(()),
-        status => Err(Status::from_raw(status as i32)),
-    }
+/// The status of a system call that failed with `status`.
+fn kernel(status: sys::Status) -> Status {
+    Status::from_raw(status as i32)
 }
 
 fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, Status> {
-    let mut out = 0;
-    // SAFETY: the out pointer is valid for the call.
-    kernel(unsafe { sys::handle_duplicate(handle.raw(), SAME_RIGHTS, &mut out) })?;
-    // SAFETY: the kernel just created the handle for us.
-    Ok(unsafe { OwnedHandle::from_raw(out) })
+    mikros_rt::objects::duplicate(handle.raw(), SAME_RIGHTS).map_err(kernel)
 }
 
 impl Bot {
@@ -128,24 +123,9 @@ impl Bot {
         dma: &OwnedHandle,
         process: sys::Handle,
     ) -> Result<Bot, Status> {
-        let mut mem = 0;
-        // SAFETY: the out pointer is valid for the call.
-        kernel(unsafe { sys::mem_create_pinned(dma.raw(), PAGE, 0, &mut mem) })?;
-        // SAFETY: the kernel just created the handle for us.
-        let page = unsafe { OwnedHandle::from_raw(mem) };
-        let mut at = 0;
-        // SAFETY: the out pointer is valid; the kernel picks a free range.
-        kernel(unsafe {
-            sys::vm_map(
-                process,
-                PERM_READ | PERM_WRITE,
-                0,
-                page.raw(),
-                0,
-                PAGE,
-                &mut at,
-            )
-        })?;
+        let page = mikros_rt::hardware::pinned_memory(dma.raw(), PAGE, 0).map_err(kernel)?;
+        let mapping =
+            Mapping::new(process, PERM_READ | PERM_WRITE, page.raw(), 0, PAGE).map_err(kernel)?;
         Ok(Bot {
             interface: RefCell::new(Rc::new(interface)),
             channels: Cell::new(0),
@@ -155,7 +135,7 @@ impl Bot {
             bulk_in,
             bulk_out,
             page,
-            at,
+            mapping,
             tag: Cell::new(0),
             lock: Lock::default(),
         })
@@ -205,18 +185,14 @@ impl Bot {
     }
 
     fn write(&self, offset: u64, bytes: &[u8]) {
-        for (i, byte) in bytes.iter().enumerate() {
-            // SAFETY: the page is mapped and `offset` lies in it.
-            unsafe { core::ptr::write_volatile((self.at + offset + i as u64) as *mut u8, *byte) };
-        }
+        self.mapping.write(offset, bytes);
     }
 
     /// `len` bytes of the page from `offset`.
     pub fn read(&self, offset: u64, len: usize) -> Vec<u8> {
-        (0..len as u64)
-            // SAFETY: the page is mapped and the bytes lie in it.
-            .map(|i| unsafe { core::ptr::read_volatile((self.at + offset + i) as *const u8) })
-            .collect()
+        let mut bytes = alloc::vec![0u8; len];
+        self.mapping.read(offset, &mut bytes);
+        bytes
     }
 
     async fn class_request(

@@ -15,6 +15,7 @@
 
 #![no_std]
 #![no_main]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -46,8 +47,6 @@ use unit::Unit;
 mikros_rt::raw_main!(main);
 
 const KIND_DMA: u32 = 4;
-const INFO_RESOURCE: u32 = 5;
-const INFO_RESOURCE_SIZE: usize = 0x18;
 const DISK_ID: &str = "storage:disk";
 const SERVICE_CLASS: &str = "storage";
 /// Bulk endpoints, from `bmAttributes`.
@@ -289,17 +288,7 @@ async fn add_disk(
 
 /// The kind of `resource`, if it is one.
 fn kind(resource: &OwnedHandle) -> Option<u32> {
-    let mut info = [0u8; INFO_RESOURCE_SIZE];
-    let mut len = 0;
-    // SAFETY: the pointers describe `info` and `len`.
-    let status = unsafe {
-        sys::object_get_info(
-            resource.raw(),
-            INFO_RESOURCE,
-            info.as_mut_ptr(),
-            info.len() as u64,
-            &mut len,
-        )
-    };
-    (status == mikros_rt::OK).then(|| u32::from_le_bytes([info[0], info[1], info[2], info[3]]))
+    mikros_rt::hardware::resource(resource.raw())
+        .ok()
+        .map(|r| r.kind)
 }

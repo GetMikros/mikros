@@ -14,6 +14,7 @@ use core::future::Future;
 use mikros_display::rects::{Rect, copied};
 use mikros_gpudev::{Backend, Screen};
 use mikros_rt::exec::{Reactor, Spawner};
+use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::gpu::{
@@ -23,6 +24,7 @@ use mikros_rt::interfaces::mikros::gpu::{
     DisplayImportSyncResponse, DisplayRequest, DisplayResources, DumbBuffer, FormatModifier, Mode,
     ModeFlags, Plane, PlaneType, Render,
 };
+use mikros_rt::objects::now;
 use mikros_rt::sys;
 
 /// The IDs of the one connector, CRTC and plane.
@@ -42,9 +44,8 @@ const SAME_RIGHTS: u32 = 1 << 31;
 
 /// A dumb buffer, mapped for reading.
 struct Buffer {
+    mapping: Mapping,
     _memory: OwnedHandle,
-    address: u64,
-    len: u64,
     width: u32,
     height: u32,
     /// Bytes per line.
@@ -76,13 +77,6 @@ pub struct Display {
     /// The commit being presented, and what it will show.
     pending: Cell<Option<(u64, Option<Shown>)>>,
     last_present: Cell<i64>,
-}
-
-fn now() -> i64 {
-    let mut now = 0;
-    // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::clock_get_monotonic(&mut now) };
-    now
 }
 
 fn rect(r: &gpu::Rect) -> Rect {
@@ -178,45 +172,18 @@ impl Display {
         }
         let pitch = width * 4;
         let size = (u64::from(pitch) * u64::from(height)).next_multiple_of(PAGE_SIZE);
-        let mut memory = 0;
-        // SAFETY: the out pointer is valid for the call.
-        let status = unsafe { sys::mem_create(size, 0, &mut memory) };
-        if status != mikros_rt::OK {
-            return Err(Status::NoMemory);
-        }
-        // SAFETY: the kernel just created the handle for us.
-        let memory = unsafe { OwnedHandle::from_raw(memory) };
-        let mut address = 0;
-        // SAFETY: the out pointer is valid for the call.
-        let status = unsafe {
-            sys::vm_map(
-                self.process,
-                PERM_READ,
-                0,
-                memory.raw(),
-                0,
-                size,
-                &mut address,
-            )
-        };
-        if status != mikros_rt::OK {
-            return Err(Status::NoMemory);
-        }
-        let mut client = 0;
-        // SAFETY: the out pointer is valid for the call.
-        let status = unsafe { sys::handle_duplicate(memory.raw(), SAME_RIGHTS, &mut client) };
-        if status != mikros_rt::OK {
-            // SAFETY: nothing refers to the mapping yet.
-            unsafe { sys::vm_unmap(self.process, address, size) };
-            return Err(Status::NoResources);
-        }
+        let memory = mikros_rt::objects::memory(size, 0).map_err(|_| Status::NoMemory)?;
+        let mapping = Mapping::new(self.process, PERM_READ, memory.raw(), 0, size)
+            .map_err(|_| Status::NoMemory)?;
+        // The mapping goes when this fails.
+        let client = mikros_rt::objects::duplicate(memory.raw(), SAME_RIGHTS)
+            .map_err(|_| Status::NoResources)?;
         let buffer = self.id();
         self.buffers.borrow_mut().insert(
             buffer,
             Buffer {
+                mapping,
                 _memory: memory,
-                address,
-                len: size,
                 width,
                 height,
                 pitch,
@@ -227,8 +194,7 @@ impl Display {
             buffer,
             stride: pitch,
             size,
-            // SAFETY: the kernel just created the handle for us.
-            memory: unsafe { OwnedHandle::from_raw(client) },
+            memory: client,
         })
     }
 
@@ -252,11 +218,9 @@ impl Display {
             .filter(|(id, b)| b.destroyed && !used(**id))
             .map(|(id, _)| *id)
             .collect();
+        // Their mappings go with them.
         for id in gone {
-            if let Some(b) = buffers.remove(&id) {
-                // SAFETY: nothing reads the buffer any more.
-                unsafe { sys::vm_unmap(self.process, b.address, b.len) };
-            }
+            buffers.remove(&id);
         }
     }
 
@@ -419,11 +383,9 @@ impl Display {
             let (dx, dy) = (shown.dst.x - shown.src.x, shown.dst.y - shown.src.y);
             for row in 0..r.height {
                 let y = r.y as u64 + row;
-                let line = buffer.address + y * u64::from(buffer.pitch) + r.x as u64 * 4;
-                let pixels = (0..r.width).map(|i| {
-                    // SAFETY: `check` kept the source within the buffer.
-                    unsafe { ((line + i * 4) as *const u32).read_volatile() }
-                });
+                // `check` kept the source within the buffer.
+                let line = y * u64::from(buffer.pitch) + r.x as u64 * 4;
+                let pixels = (0..r.width).map(|i| buffer.mapping.read32(line + i * 4));
                 fb.write_row((r.x + dx) as u32, (y as i64 + dy) as u32, pixels);
             }
         }

@@ -446,8 +446,7 @@ const SETTLE_NS: i64 = 10_000_000;
 
 /// Lets the driver's other tasks run for `SETTLE_NS`.
 async fn settle(reactor: &Reactor) {
-    let mut now = 0;
-    // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::clock_get_monotonic(&mut now) };
-    let _ = reactor.sleep_until(now + SETTLE_NS).await;
+    let _ = reactor
+        .sleep_until(mikros_rt::objects::now() + SETTLE_NS)
+        .await;
 }

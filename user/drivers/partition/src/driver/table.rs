@@ -4,7 +4,9 @@
 
 use crate::gpt::probe::{self, Found};
 use crate::gpt::{Header, Partition, mbr};
+use alloc::vec;
 use alloc::vec::Vec;
+use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockAsyncClient, BlockInfo};
 use mikros_rt::sys;
@@ -26,10 +28,8 @@ pub enum Table {
 /// A disk buffer mapped into the driver.
 struct Mapped<'a> {
     disk: &'a BlockAsyncClient,
-    process: sys::Handle,
     id: u32,
-    at: u64,
-    size: u64,
+    mapping: Mapping,
 }
 
 impl<'a> Mapped<'a> {
@@ -44,29 +44,17 @@ impl<'a> Mapped<'a> {
             Err(_) => return Err(Status::PeerClosed),
         };
         let size = size.next_multiple_of(PAGE);
-        let mut at = 0;
-        // SAFETY: the out pointer is valid; the kernel picks a free range.
-        let status = unsafe {
-            sys::vm_map(
-                process,
-                PERM_READ,
-                0,
-                created.memory.raw(),
-                0,
-                size,
-                &mut at,
-            )
+        let mapping = match Mapping::new(process, PERM_READ, created.memory.raw(), 0, size) {
+            Ok(mapping) => mapping,
+            Err(status) => {
+                let _ = disk.destroy_buffer(created.buffer);
+                return Err(Status::from_raw(status as i32));
+            }
         };
-        if status != mikros_rt::OK {
-            let _ = disk.destroy_buffer(created.buffer);
-            return Err(Status::from_raw(status as i32));
-        }
         Ok(Mapped {
             disk,
-            process,
             id: created.buffer,
-            at,
-            size,
+            mapping,
         })
     }
 
@@ -98,20 +86,16 @@ impl<'a> Mapped<'a> {
             }
             done += step;
         }
-        let copy = (0..bytes)
-            // SAFETY: the buffer is mapped at `at` for `size` bytes, which
-            // cover the bytes asked for; volatile reads allow for others
-            // writing them meanwhile.
-            .map(|i| unsafe { core::ptr::read_volatile((self.at + i) as *const u8) })
-            .collect();
+        // Volatile reads allow for others writing the bytes meanwhile.
+        let mut copy = vec![0u8; bytes as usize];
+        self.mapping.read(0, &mut copy);
         Ok(copy)
     }
 }
 
 impl Drop for Mapped<'_> {
     fn drop(&mut self) {
-        // SAFETY: nothing refers to the mapping any more.
-        unsafe { sys::vm_unmap(self.process, self.at, self.size) };
+        // The mapping goes after this.
         let _ = self.disk.destroy_buffer(self.id);
     }
 }

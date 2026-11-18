@@ -16,6 +16,7 @@
 
 #![no_std]
 #![no_main]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -100,7 +101,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     if let Some((gpu, _)) = &running
                         && let Some(fb) = gpu.backend().framebuffer.borrow_mut().take()
                     {
-                        fb.unmap(process);
+                        fb.unmap();
                     }
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
