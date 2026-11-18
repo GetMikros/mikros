@@ -1,7 +1,20 @@
-//! What ps writes: a header line and one line per process in aligned
-//! columns, or a JSON array with an object per process.
+//! What ps takes, and what it writes: a header line and one line per
+//! process in aligned columns, or a JSON array with an object per process
+//! (MIKSPEC-0098.R9).
 
-use mikros_cli::json_string;
+use mikros_cli::{Opt, Paint, Role, Spec, json_string};
+
+pub static COMMAND: Spec = Spec {
+    options: &[Opt::long(
+        "json",
+        "write the processes as a JSON array of objects",
+    )],
+    ..Spec::new(
+        "ps",
+        "Lists the processes, sorted by process ID, with their parent, user,\n\
+         app ID and executable.",
+    )
+};
 
 /// A process, as ps shows it.
 #[derive(Debug, PartialEq)]
@@ -19,41 +32,64 @@ pub struct Process {
 
 /// The header and lines of `processes`: the process and parent IDs
 /// aligned to the right, the user and app ID to the left, and the path.
-pub fn text(processes: &[Process]) -> String {
+pub fn text(processes: &[Process], paint: Paint) -> String {
     let header = ["PID", "PARENT", "USER", "APP ID", "PATH"];
-    let mut rows = vec![header.map(String::from)];
-    rows.extend(processes.iter().map(|p| {
-        [
-            p.pid.to_string(),
-            p.parent.to_string(),
-            p.user_name.clone(),
-            p.app_id.clone(),
-            p.path.clone(),
-        ]
-    }));
-    let width = |column: usize| {
-        rows.iter()
-            .map(|r| r[column].chars().count())
-            .max()
-            .unwrap_or(0)
-    };
-    let widths = [width(0), width(1), width(2), width(3)];
-    rows.iter()
-        .map(|r| {
-            format!(
-                "{:>w0$}  {:>w1$}  {:<w2$}  {:<w3$}  {}\n",
-                r[0],
-                r[1],
-                r[2],
-                r[3],
-                r[4],
-                w0 = widths[0],
-                w1 = widths[1],
-                w2 = widths[2],
-                w3 = widths[3],
-            )
+    let rows: Vec<Vec<Cell>> = processes
+        .iter()
+        .map(|p| {
+            vec![
+                (p.pid.to_string(), Some(Role::Number)),
+                (p.parent.to_string(), Some(Role::Number)),
+                (p.user_name.clone(), None),
+                (p.app_id.clone(), None),
+                (p.path.clone(), Some(Role::Path)),
+            ]
         })
-        .collect()
+        .collect();
+    columns(&header, &rows, &[true, true, false, false, false], paint)
+}
+
+/// A cell of a table: its text, and the role it is coloured in.
+type Cell = (String, Option<Role>);
+
+/// The header and `rows` in columns two spaces apart, the header in the
+/// secondary colour, each column as wide as its widest text without
+/// colours, aligned to the right where `right` says, the last one not
+/// padded.
+fn columns(header: &[&str], rows: &[Vec<Cell>], right: &[bool], paint: Paint) -> String {
+    let header: Vec<Cell> = header
+        .iter()
+        .map(|h| (h.to_string(), Some(Role::Secondary)))
+        .collect();
+    let all: Vec<&Vec<Cell>> = std::iter::once(&header).chain(rows).collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|c| {
+            all.iter()
+                .map(|r| r[c].0.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut text = String::new();
+    for row in all {
+        for (c, (cell, role)) in row.iter().enumerate() {
+            let pad = " ".repeat(widths[c] - cell.chars().count());
+            let shown = match role {
+                Some(role) => paint.paint(*role, cell),
+                None => cell.clone(),
+            };
+            if c > 0 {
+                text.push_str("  ");
+            }
+            match (right[c], c + 1 == row.len()) {
+                (true, _) => text.push_str(&(pad + &shown)),
+                (false, true) => text.push_str(&shown),
+                (false, false) => text.push_str(&(shown + &pad)),
+            }
+        }
+        text.push('\n');
+    }
+    text
 }
 
 /// `processes` as a JSON array of objects, on one line.
@@ -105,13 +141,35 @@ mod tests {
     #[test]
     fn aligns_the_columns_under_a_header() {
         assert_eq!(
-            text(&processes()),
+            text(&processes(), Paint::never()),
             "PID  PARENT  USER    APP ID          PATH\n  \
              1       0  system  system.init     init\n \
              27       3  system  system.termsvc  /usr/bin/termsvc\n\
              115      27  ada     system.cli      /usr/bin/msh\n"
         );
-        assert_eq!(text(&[]), "PID  PARENT  USER  APP ID  PATH\n");
+        assert_eq!(
+            text(&[], Paint::never()),
+            "PID  PARENT  USER  APP ID  PATH\n"
+        );
+    }
+
+    #[test]
+    fn colours_by_role_and_keeps_the_columns() {
+        let on = Paint::new(Some("always"), false, None);
+        let paint = |sgr: &str, t: &str| format!("\x1b[{sgr}m{t}\x1b[0m");
+        let number = |t| paint("38;2;21;193;160", t);
+        let line = text(&processes()[..2], on);
+        let second = line.lines().nth(2).unwrap();
+        assert_eq!(
+            second,
+            format!(
+                " {}       {}  system  system.termsvc  {}",
+                number("27"),
+                number("3"),
+                paint("38;2;27;213;177", "/usr/bin/termsvc")
+            )
+        );
+        assert!(line.starts_with("\x1b[90mPID\x1b[0m  \x1b[90mPARENT\x1b[0m  "));
     }
 
     #[test]
@@ -124,5 +182,11 @@ mod tests {
              \"app_id\":\"system.cli\",\"path\":\"/usr/bin/msh\"}]\n"
         );
         assert_eq!(json(&[]), "[]\n");
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/ps.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
     }
 }

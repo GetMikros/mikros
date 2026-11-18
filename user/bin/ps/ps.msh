@@ -1,5 +1,7 @@
-# What `ps` takes, for msh's completion and colours.
+# What `ps` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
 extern ps(
-    --json: bool "write the processes as JSON",
-    --help: bool "show how to use ps"
-)
+    --json: bool "write the processes as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

@@ -2,8 +2,8 @@
 //! `mikros.driver.Devices` of the device manager, and writes what it
 //! got.
 
-use crate::listing::{self, Device};
-use mikros_cli::{Arguments, Command, FAILURE, INVALID, SUCCESS};
+use crate::listing::{self, COMMAND, Device};
+use mikros_cli::{FAILURE, INVALID, Paint, Run, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_rt::interfaces::mikros::driver::DevicesClient;
 use std::io::Write;
@@ -11,53 +11,31 @@ use std::process::ExitCode;
 
 const DEVICES: &str = "mikros.driver.Devices";
 const FOREVER: i64 = i64::MAX;
-/// The longest class that `List` takes, in bytes.
-const CLASS_MAX: usize = 32;
-
-const COMMAND: Command = Command {
-    name: "devices",
-    operands: "[class]",
-    most: 1,
-    about: "Lists the named devices, of every class or of class, each as\n\
-            <class>/<name> followed by its description.",
-    options: &[("--json", "write the devices as a JSON array of objects")],
-    values: &[],
-};
 
 pub fn main() -> ExitCode {
-    let (json, class) = match COMMAND.parse(std::env::args().skip(1)) {
-        Arguments::Run {
-            options, operands, ..
-        } => (options.contains(&"--json"), operands.into_iter().next()),
-        Arguments::Help => return write(&COMMAND.help()),
-        Arguments::Invalid(reason) => return fail(INVALID, &reason),
+    let run = start(&COMMAND, &mikros_command::list);
+    let class = match listing::class(&run) {
+        Ok(class) => class,
+        Err(reason) => return fail(&run, INVALID, &reason),
     };
-    if class.as_ref().is_some_and(|c| c.len() > CLASS_MAX) {
-        return fail(INVALID, &format!("a class has at most {CLASS_MAX} bytes"));
-    }
     let devices = match list(class.as_deref()) {
         Ok(devices) => devices,
-        Err(message) => return fail(FAILURE, &message),
+        Err(message) => return fail(&run, FAILURE, &message),
     };
-    if json {
-        write(&listing::json(&devices))
-    } else {
-        write(&listing::text(&devices))
-    }
-}
-
-/// Writes `text` to standard output.
-fn write(text: &str) -> ExitCode {
+    let text = match run.has("--json") {
+        true => listing::json(&devices),
+        false => listing::text(&devices, Paint::stdout(&run)),
+    };
     let mut out = std::io::stdout().lock();
     match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
         Ok(()) => ExitCode::from(SUCCESS),
-        Err(error) => fail(FAILURE, &format!("cannot write the list: {error}")),
+        Err(error) => fail(&run, FAILURE, &format!("cannot write the list: {error}")),
     }
 }
 
 /// Writes the error `message` to standard error and gives `status`.
-fn fail(status: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
+fn fail(run: &Run, status: u8, message: &str) -> ExitCode {
+    complain(&COMMAND, run, message);
     ExitCode::from(status)
 }
 

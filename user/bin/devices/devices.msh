@@ -1,8 +1,8 @@
-# What `devices` takes, for msh's completion and colours. The classes are
-# those whose services drivers may publish, as the device manager knows
-# them.
+# What `devices` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
 extern devices(
     class?: [acpi filesystem gpu hid input rtc storage subvolumes] "the class of the devices to list",
-    --json: bool "write the devices as JSON",
-    --help: bool "show how to use devices"
-)
+    --json: bool "write the devices as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
