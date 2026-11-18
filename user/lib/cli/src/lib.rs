@@ -1,9 +1,6 @@
 //! What the command-line utilities share: reading their arguments, the
 //! text of `--help`, their exit statuses and error messages, and JSON
-//! strings. It needs only `alloc`, so that programs on either runtime
-//! can use it.
-
-#![cfg_attr(not(test), no_std)]
+//! strings. It needs the standard library, which every utility has.
 
 extern crate alloc;
 

@@ -351,13 +351,14 @@ pub fn run(args: &Args) -> Result<()> {
     problems.extend(untested_members()?);
 
     // User programs are only compiled for the user target, those with std
-    // apart from those without. The test init has code that only fuzz
-    // builds compile.
-    let with_std: Vec<String> = crate::components::programs()?
+    // and the libraries that need it apart from those without. The test
+    // init has code that only fuzz builds compile.
+    let mut with_std: Vec<String> = crate::components::programs()?
         .into_iter()
         .filter(|(_, runtime)| *runtime == crate::components::Runtime::Std)
         .map(|(name, _)| name)
         .collect();
+    with_std.extend(crate::components::std_libraries()?);
     let target = crate::workspace_root().join(crate::build::USER_TARGET);
     let target = target.to_str().context("the workspace path is not UTF-8")?;
     let mut without_std = vec!["clippy", "--workspace"];

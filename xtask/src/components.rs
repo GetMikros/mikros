@@ -17,7 +17,9 @@
 //!   its package. A `<stem>.diag.yaml` beside it replaces it in the
 //!   diagnostic build.
 //! - `runtime`: `rt` for a program built on `mikros-rt` without the
-//!   standard library, whose programs are the default.
+//!   standard library, whose programs are the default; `std` for a
+//!   library that needs the standard library, which only programs with
+//!   it use.
 //! - `kinds`: the build kinds that install it, when not all of them.
 //! - `path`: the member name of the program instead, for `init`.
 //! - `completions`: the file name, in its package, of the declarations of
@@ -156,6 +158,21 @@ pub fn all() -> Result<Vec<Component>> {
 
 /// The programs of every package of the `user` workspace, by name, with
 /// the runtime each is built on.
+/// The libraries that declare `runtime = "std"`, by package name.
+pub fn std_libraries() -> Result<Vec<String>> {
+    let metadata = metadata()?;
+    let mut libraries = Vec::new();
+    for package in metadata["packages"].as_array().context("no packages")? {
+        if package["metadata"]["mikros"]["runtime"].as_str() == Some("std") {
+            let name = package["name"]
+                .as_str()
+                .context("a package without a name")?;
+            libraries.push(name.to_owned());
+        }
+    }
+    Ok(libraries)
+}
+
 pub fn programs() -> Result<Vec<(String, Runtime)>> {
     let metadata = metadata()?;
     let mut programs = Vec::new();
@@ -181,6 +198,7 @@ fn runtime(package: &Value) -> Result<Runtime> {
     match &package["metadata"]["mikros"]["runtime"] {
         Value::Null => Ok(Runtime::Std),
         Value::String(s) if s == "rt" => Ok(Runtime::Rt),
+        Value::String(s) if s == "std" => Ok(Runtime::Std),
         other => bail!("{name}: unknown runtime {other}"),
     }
 }
