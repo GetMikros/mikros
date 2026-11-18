@@ -210,6 +210,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chmod"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"

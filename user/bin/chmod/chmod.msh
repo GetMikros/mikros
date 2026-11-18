@@ -1,0 +1,11 @@
+# What `chmod` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern chmod(
+    mode: string "the mode, octal or symbolic, such as 755, u+x or a-w",
+    ...path: path "the files and folders to change",
+    --recursive(-R): bool "change the folders' entries too, leaving links alone",
+    --verbose(-v): bool "name each file and its old and new mode",
+    --reference: file "use the mode of <file>, and take no mode",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
