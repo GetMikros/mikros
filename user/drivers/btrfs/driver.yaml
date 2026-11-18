@@ -8,4 +8,4 @@ match:
   - fs:btrfs
 kind: normal
 # To ask the broker for admin.acls.manage for the subjects of connections.
-permissions: [system.permissions.read]
+permissions: [system.permissions.read, system.permissions.request]

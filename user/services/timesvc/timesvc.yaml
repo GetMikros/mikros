@@ -5,6 +5,6 @@ binary: /system/services/system.timesvc/timesvc
 start: boot
 boot_handles: [platform_info]
 # admin.time.set also to reach the real-time clock's device.rtc.
-permissions: [system.permissions.read, system.filesystems.mount, admin.time.set]
+permissions: [system.permissions.read, system.permissions.request, system.filesystems.mount, admin.time.set]
 provides:
   - protocol: mikros.time.Clock

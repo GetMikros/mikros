@@ -30,6 +30,7 @@ pub const SERVICE_MANAGER: &str = "system.servicemgr";
 pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
     "system.identity.set",
     "system.permissions.read",
+    "system.permissions.request",
     "system.permissions.set",
     "system.devices.manage",
     "admin.power.control",
@@ -126,7 +127,8 @@ impl Call {
     /// The `system` permission a caller needs to make this call.
     pub fn needs(self) -> &'static str {
         match self {
-            Call::Check | Call::Request | Call::Watch => "system.permissions.read",
+            Call::Check | Call::Watch => "system.permissions.read",
+            Call::Request => "system.permissions.request",
             Call::SetGrant | Call::ListGrants => "system.grants.manage",
             Call::GrantSystem => "system.permissions.set",
             Call::RegisterPrompter => "system.prompts.use",

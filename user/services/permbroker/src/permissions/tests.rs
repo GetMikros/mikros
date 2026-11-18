@@ -42,7 +42,7 @@ fn grant(user: u32, permission: &str, decision: Decision) -> Grant {
 #[test]
 fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
-    assert_eq!(PERMISSIONS.len(), 61);
+    assert_eq!(PERMISSIONS.len(), 62);
     assert_eq!(scope("user.camera.use"), Some(Scope::User));
     assert_eq!(scope("user.developer.access"), Some(Scope::User));
     assert_eq!(scope("system.diagnostics.read"), Some(Scope::System));
@@ -57,7 +57,7 @@ fn table_is_sorted_and_unique() {
 }
 
 /// The verbs that a permission's name may end with.
-const VERBS: [&str; 12] = [
+const VERBS: [&str; 13] = [
     "access",
     "read",
     "write",
@@ -70,6 +70,7 @@ const VERBS: [&str; 12] = [
     "debug",
     "mount",
     "authenticate",
+    "request",
 ];
 
 #[test]
@@ -157,7 +158,7 @@ fn bootstrap_refuses_a_bad_manifest() {
 fn each_call_needs_its_permission() {
     let calls = [
         (Call::Check, "system.permissions.read"),
-        (Call::Request, "system.permissions.read"),
+        (Call::Request, "system.permissions.request"),
         (Call::Watch, "system.permissions.read"),
         (Call::SetGrant, "system.grants.manage"),
         (Call::ListGrants, "system.grants.manage"),

@@ -43,6 +43,7 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("system.input.control", Scope::System),
     ("system.log_sources.create", Scope::System),
     ("system.permissions.read", Scope::System),
+    ("system.permissions.request", Scope::System),
     ("system.permissions.set", Scope::System),
     ("system.processes.control", Scope::System),
     ("system.processes.debug", Scope::System),

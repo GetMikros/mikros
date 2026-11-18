@@ -13,4 +13,4 @@ namespace:
     rights: rw
 # system.subvolumes.manage is only for creating and deleting the subvolumes of
 # users' home folders on the root file system.
-permissions: [system.permissions.read, system.subvolumes.manage]
+permissions: [system.permissions.read, system.permissions.request, system.subvolumes.manage]

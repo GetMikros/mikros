@@ -404,6 +404,15 @@ async fn probe(
 
     let admin = connect(&provider, ADMIN, reactor);
     let watcher = connect(&provider, ADMIN, reactor);
+    // Request needs a permission of its own (MIKSPEC-0037.R44).
+    c(
+        "refusing Request with system.permissions.read alone",
+        request(&admin, APP, "user.camera.use").await == Err(Status::AccessDenied),
+    )?;
+    c(
+        "granting system.permissions.request",
+        grant_system(&manager, ADMIN, &["system.permissions.request"]).await == Ok(()),
+    )?;
     c(
         "refusing to set a system permission",
         set(&admin, "system.devices.manage", Decision::Allowed).await == Err(Status::InvalidArgs),

@@ -4,7 +4,7 @@ name: devicemgr
 binary: /system/services/system.devicemgr/devicemgr
 start: boot
 boot_handles: [root_resource, log_manage, framebuffer, platform_info]
-permissions: [system.identity.set, system.permissions.read, system.permissions.set, system.services.create, system.filesystems.mount]
+permissions: [system.identity.set, system.permissions.read, system.permissions.request, system.permissions.set, system.services.create, system.filesystems.mount]
 # Removing every device at shutdown may wait up to 60 s for each driver.
 stop_timeout: 600
 provides:

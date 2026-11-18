@@ -20,7 +20,7 @@ const DRIVERS: &str = "drivers";
 const BOOT_MODULES: &str = "drivers/boot-modules";
 /// The only `system` permissions that an installed driver may have; it
 /// may have no `admin` one.
-const ALLOWED: [&str; 2] = ["system.permissions.read", "system.filesystems.mount"];
+const ALLOWED: [&str; 2] = ["system.permissions.request", "system.filesystems.mount"];
 const ATTEMPTS: &str = "mikros.boot.Attempts";
 /// The first line of the boot list.
 const HEADER: &str = "# The installed drivers that the bootloader loads, written by pkgsvc.\n";

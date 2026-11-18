@@ -4,7 +4,7 @@ name: tmpfs
 binary: /system/services/system.tmpfs/tmpfs
 start: boot
 # To ask the broker for admin.acls.manage for the subjects of connections.
-permissions: [system.permissions.read]
+permissions: [system.permissions.read, system.permissions.request]
 provides:
   - protocol: mikros.fs.Filesystem
     permission: system.filesystems.mount

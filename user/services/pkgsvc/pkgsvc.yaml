@@ -6,6 +6,6 @@ start: on-demand
 # To reach the root file system and make the subvolumes of packages there,
 # to ask the broker for the permissions that installs need, and to start a
 # new try of the boot when the drivers loaded at boot change.
-permissions: [system.filesystems.mount, system.subvolumes.manage, system.permissions.read, system.boot_state.set]
+permissions: [system.filesystems.mount, system.subvolumes.manage, system.permissions.read, system.permissions.request, system.boot_state.set]
 provides:
   - protocol: mikros.packages.Installer
