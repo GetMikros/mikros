@@ -12,11 +12,13 @@ const PORTS: [(u64, u64); 4] = [(0x20, 0x22), (0xA0, 0xA2), (0x40, 0x44), (0x61,
 /// The ports of the debug serial port.
 const SERIAL_PORTS: (u64, u64) = (0x3F8, 0x400);
 
-/// The memory map kinds that may be device memory; every other kind,
-/// one that a later version of the boot protocol adds included, is not
-/// (MIKSPEC-0011.R33).
-const DEVICE: [Kind; 5] = [
+/// The memory map kinds that may be device memory, I/O memory that the
+/// runtime services also use among them; every other kind, one that a
+/// later version of the boot protocol adds included, is not
+/// (MIKSPEC-0011.R34).
+const DEVICE: [Kind; 6] = [
     Kind::Mmio,
+    Kind::FirmwareRuntimeMmio,
     Kind::Framebuffer,
     Kind::Reserved,
     Kind::AcpiReclaimable,

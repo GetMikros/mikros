@@ -289,8 +289,8 @@ const ACPI_SERVER: &str = "acpi";
 
 /// Whether the driver `driver` may have `size` bytes of MMIO at `base`:
 /// the `AcpiReclaimable` and `AcpiNvs` memory only the ACPI server, and
-/// `Reserved` memory only the ACPI server or within device memory that
-/// an ACPI table names (MIKSPEC-0011.R33).
+/// `Reserved` and `FirmwareRuntimeMmio` memory only the ACPI server or
+/// within device memory that an ACPI table names (MIKSPEC-0011.R34).
 fn may_map(m: &Manager, driver: &str, base: u64, size: u64) -> bool {
     let end = base.saturating_add(size);
     let overlaps = |&(start, len): &(u64, u64)| start < end && base < start.saturating_add(len);

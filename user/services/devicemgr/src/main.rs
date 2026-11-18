@@ -85,7 +85,8 @@ const CMDLINE_LEN: usize = 0x4C;
 const CMDLINE_MAX: usize = 4096;
 /// Where the header gives the memory map's offset and entry count, the
 /// size of an entry, the offsets of an entry's start, page count and
-/// kind, and the kinds `AcpiNvs` and `Reserved`.
+/// kind, and the kinds `AcpiReclaimable`, `AcpiNvs`, `Reserved` and
+/// `FirmwareRuntimeMmio`.
 const MEMORY_MAP_OFFSET: usize = 0x50;
 const MEMORY_MAP_COUNT: usize = 0x54;
 const MAP_ENTRY_SIZE: usize = 24;
@@ -94,6 +95,7 @@ const ENTRY_KIND: usize = 0x10;
 const KIND_ACPI_RECLAIMABLE: u32 = 7;
 const KIND_ACPI_NVS: u32 = 8;
 const KIND_RESERVED: u32 = 13;
+const KIND_FIRMWARE_RUNTIME_MMIO: u32 = 16;
 const PAGE_SIZE: u64 = 4096;
 const KIND_MMIO: u32 = 1;
 const SHARED: u32 = 1 << 0;
@@ -140,7 +142,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let (firmware_memory, reserved_memory, acpi_memory) = match (&info_memory, &info) {
         (Some(memory), Some(header)) => (
             memory_ranges(memory, header, &[KIND_ACPI_NVS, KIND_RESERVED]),
-            memory_ranges(memory, header, &[KIND_RESERVED]),
+            memory_ranges(memory, header, &[KIND_RESERVED, KIND_FIRMWARE_RUNTIME_MMIO]),
             memory_ranges(memory, header, &[KIND_ACPI_RECLAIMABLE, KIND_ACPI_NVS]),
         ),
         _ => (Vec::new(), Vec::new(), Vec::new()),
@@ -160,8 +162,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let rsdp = info.map(|i| u64_at(&i, FIRMWARE_TABLE)).filter(|&r| r != 0);
     let mcfg = rsdp.and_then(|rsdp| memory.find(rsdp, b"MCFG"));
     // The device memory that ACPI tables name, which firmware reports as
-    // reserved (MIKSPEC-0011.R33): the configuration space windows, the
-    // HPET and the interrupt controllers.
+    // reserved or as I/O memory of its runtime services (MIKSPEC-0011.R34):
+    // the configuration space windows, the HPET and the interrupt
+    // controllers.
     let mut device_memory: Vec<(u64, u64)> = Vec::new();
     for e in mcfg.as_deref().map(acpi::ecams).into_iter().flatten() {
         let buses = u64::from(e.bus_end - e.bus_start) + 1;
