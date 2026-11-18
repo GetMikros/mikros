@@ -16,6 +16,8 @@ const LOGS: &str = "/system/bin/logs";
 const SERVICES: &str = "/system/bin/services";
 const PERMISSIONS: &str = "/system/bin/permissions";
 const ACCOUNTS: &str = "/system/bin/accounts";
+/// The rewrite of ls, beside the port's until the switch.
+const LS: &str = "/system/utilities/ls";
 /// An app ID that no program has, whose grants the checks set.
 const NO_APP: &str = "system.no-such-app";
 /// A file that every system holds with devices.
@@ -70,6 +72,9 @@ fn main() {
         ("accounts_needs_a_terminal", accounts_needs_a_terminal),
         ("accounts_unknown_user", accounts_unknown_user),
         ("accounts_bad_arguments", accounts_bad_arguments),
+        ("ls_lists_a_folder", ls_lists_a_folder),
+        ("ls_long_lines_and_json", ls_long_lines_and_json),
+        ("ls_names_what_is_missing", ls_names_what_is_missing),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -621,5 +626,94 @@ fn accounts_bad_arguments() -> Result<(), Failure> {
             run.err.starts_with("accounts: "),
         )?;
     }
+    Ok(())
+}
+
+/// A new folder for the checks of ls, with the file `a`, the folder `b`
+/// and the hidden file `.c`.
+fn ls_folder() -> Result<std::path::PathBuf, Failure> {
+    let failed = |what| Failure { what, status: -1 };
+    let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
+    let dir = std::path::Path::new(&base).join(format!("utilities-ls-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("b")).map_err(|_| failed("making the folder"))?;
+    std::fs::write(dir.join("a"), b"12345").map_err(|_| failed("writing a file"))?;
+    std::fs::write(dir.join(".c"), b"").map_err(|_| failed("writing a hidden file"))?;
+    Ok(dir)
+}
+
+fn ls_lists_a_folder() -> Result<(), Failure> {
+    let dir = ls_folder()?;
+    let path = dir.to_str().unwrap_or_default();
+    let plain = run(LS, &[path])?;
+    ensure(
+        &plain,
+        "succeeding",
+        plain.status == 0 && plain.err.is_empty(),
+    )?;
+    ensure(
+        &plain,
+        "the names in order, one per line",
+        plain.out == "a\nb\n",
+    )?;
+    let all = run(LS, &["-AF", path])?;
+    ensure(&all, "hidden names and marks", all.out == ".c\na\nb/\n")?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// Long lines show the type, what the caller may do and the size, and
+/// no owner; JSON has an object per entry.
+fn ls_long_lines_and_json() -> Result<(), Failure> {
+    let dir = ls_folder()?;
+    let path = dir.to_str().unwrap_or_default();
+    let long = run(LS, &["-l", path])?;
+    ensure(&long, "succeeding with -l", long.status == 0)?;
+    let lines: Vec<&str> = long.out.lines().collect();
+    ensure(&long, "a line per entry", lines.len() == 2)?;
+    let file: Vec<&str> = lines[0].split_whitespace().collect();
+    ensure(
+        &long,
+        "the type, access and size of a",
+        file.len() == 5 && file[0].starts_with("-r") && file[1] == "5" && file[4] == "a",
+    )?;
+    ensure(
+        &long,
+        "b as a folder",
+        lines[1].starts_with('d') && lines[1].ends_with(" b"),
+    )?;
+    ensure(&long, "no owner", !long.out.contains("system "))?;
+    let json = run(LS, &["--json", path])?;
+    ensure(&json, "succeeding with --json", json.status == 0)?;
+    ensure(
+        &json,
+        "the file's object",
+        json.out
+            .starts_with("[{\"name\":\"a\",\"type\":\"file\",\"size\":5,")
+            && json.out.contains("\"access\":\"r")
+            && json.out.contains("\"acl\":false"),
+    )?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// A path that is not there is named, the others are still listed, and
+/// ls exits with 1.
+fn ls_names_what_is_missing() -> Result<(), Failure> {
+    let dir = ls_folder()?;
+    let missing = dir.join("nothing");
+    let file = dir.join("a");
+    let arguments = [
+        missing.to_str().unwrap_or_default(),
+        file.to_str().unwrap_or_default(),
+    ];
+    let run = run(LS, &arguments)?;
+    ensure(&run, "failing", run.status == 1)?;
+    ensure(
+        &run,
+        "naming the missing path",
+        run.err.starts_with("ls: cannot access ") && run.err.contains("nothing"),
+    )?;
+    ensure(&run, "still naming the file", run.out.ends_with("/a\n"))?;
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
