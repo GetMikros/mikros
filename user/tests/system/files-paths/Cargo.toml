@@ -1,0 +1,12 @@
+[package]
+name = "files-paths"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+# A system test, which test images alone hold. It runs the file commands
+# from where the system installs them.
+[package.metadata.mikros]
+kind = "test"
+image = "tests"
