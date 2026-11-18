@@ -1357,6 +1357,14 @@ name = "spawn-std"
 version = "0.0.0"
 
 [[package]]
+name = "stat"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "sudo"
 version = "0.0.0"
 dependencies = [
