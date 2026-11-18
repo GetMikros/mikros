@@ -1,10 +1,12 @@
-# What `logs` takes, for msh's completion and colours. Its short options
-# -n and -f have no long forms, which a declaration needs, so they are
-# left out.
+# What `logs` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
 extern logs(
-    --app: string "print only the records of this app ID",
-    --pid: int "print only the records of this process",
-    --severity: [debug info warning error] "print only the records of this severity or higher",
-    --json: bool "write the records as JSON",
-    --help: bool "show how to use logs"
-)
+    --app: app "print only the records of app-id",
+    --pid: int "print only the records of process pid",
+    --severity: [debug info warning error] "print only the records of severity or higher",
+    -n: int "print only the last count records that match",
+    -f: bool "print the new records as they come, until interrupted",
+    --json: bool "write the records as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

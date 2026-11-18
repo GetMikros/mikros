@@ -3,7 +3,7 @@
 //! administrator, from the first record and, when asked, follows it.
 
 use crate::listing::{self, COMMAND, Entry, Filter, Request};
-use mikros_cli::{FAILURE, INVALID, SUCCESS};
+use mikros_cli::{FAILURE, INVALID, Paint, Run, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_rt::interfaces::mikros::log::{Reader, ReaderClient, ReaderEvent, Record, Severity};
 use std::collections::VecDeque;
@@ -16,20 +16,18 @@ const BATCH: u32 = 32;
 const FOREVER: i64 = i64::MAX;
 
 pub fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let (filter, last, follow, json) = match listing::read(arguments) {
-        Request::Print {
-            filter,
-            last,
-            follow,
-            json,
-        } => (filter, last, follow, json),
-        Request::Help => {
-            let _ = std::io::stdout().write_all(COMMAND.help().as_bytes());
-            return ExitCode::from(SUCCESS);
-        }
-        Request::Invalid(reason) => return fail(INVALID, &reason),
+    let run = start(&COMMAND, &mikros_command::list);
+    let fail = |status: u8, message: &str| fail(&run, status, message);
+    let Request {
+        filter,
+        last,
+        follow,
+        json,
+    } = match listing::read(&run) {
+        Ok(request) => request,
+        Err(reason) => return fail(INVALID, &reason),
     };
+    let paint = Paint::stdout(&run);
     let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
         return fail(FAILURE, "cannot reach the service directory");
     };
@@ -53,7 +51,7 @@ pub fn main() -> ExitCode {
     } else {
         entries
             .iter()
-            .try_for_each(|e| writeln!(out, "{}", listing::line(e)))
+            .try_for_each(|e| writeln!(out, "{}", listing::line(e, paint)))
     };
     if written.and_then(|()| out.flush()).is_err() {
         return ExitCode::from(FAILURE);
@@ -67,7 +65,8 @@ pub fn main() -> ExitCode {
                 continue;
             }
             latest = entry.sequence;
-            if filter.matches(&entry) && writeln!(out, "{}", listing::line(&entry)).is_err() {
+            if filter.matches(&entry) && writeln!(out, "{}", listing::line(&entry, paint)).is_err()
+            {
                 return ExitCode::from(FAILURE);
             }
         }
@@ -130,7 +129,7 @@ fn entry(record: Record) -> Entry {
 }
 
 /// Writes the error `message` to standard error and gives `status`.
-fn fail(status: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
+fn fail(run: &Run, status: u8, message: &str) -> ExitCode {
+    complain(&COMMAND, run, message);
     ExitCode::from(status)
 }

@@ -1,40 +1,28 @@
 //! What logs is asked, which records it prints, and how: a line per
 //! record, or a JSON array.
 
-use mikros_cli::{Arguments, Command, json_string, value};
-
-pub const COMMAND: Command = Command {
-    name: "logs",
-    operands: "",
-    most: 0,
-    about: "Prints the system log from its first record, once an administrator\n\
-            allowed it, each record as <time> <severity> <app-id>[<pid>]: <message>.\n\
-            The severities are debug, info, warning and error.",
-    options: &[
-        (
-            "-f",
-            "print the new records as they come, until interrupted",
-        ),
-        ("--json", "write the records as a JSON array of objects"),
-    ],
-    values: &[
-        ("--app", "app-id", "print only the records of app-id"),
-        ("--pid", "pid", "print only the records of process pid"),
-        (
-            "--severity",
-            "severity",
-            "print only the records of severity or higher",
-        ),
-        (
-            "-n",
-            "count",
-            "print only the last count records that match",
-        ),
-    ],
-};
+use mikros_cli::{Kind, Opt, Paint, Role, Run, Spec, json_string};
 
 /// The names of the severities, from the lowest.
 const SEVERITIES: [&str; 4] = ["debug", "info", "warning", "error"];
+
+pub static COMMAND: Spec = Spec {
+    options: &[
+        Opt::long("app", "print only the records of app-id").takes("app-id", Kind::App),
+        Opt::long("pid", "print only the records of process pid").takes("pid", Kind::Int),
+        Opt::long("severity", "print only the records of severity or higher")
+            .takes("severity", Kind::Choice(&SEVERITIES)),
+        Opt::short('n', "print only the last count records that match").takes("count", Kind::Int),
+        Opt::short('f', "print the new records as they come, until interrupted"),
+        Opt::long("json", "write the records as a JSON array of objects"),
+    ],
+    ..Spec::new(
+        "logs",
+        "Prints the system log from its first record, once an administrator\n\
+         allowed it, each record as <time> <severity> <app-id>[<pid>]: <message>.\n\
+         The severities are debug, info, warning and error.",
+    )
+};
 
 /// A record of the log.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,60 +57,50 @@ impl Filter {
 
 /// What logs is asked to do.
 #[derive(Debug, PartialEq)]
-pub enum Request {
-    Print {
-        filter: Filter,
-        /// The most records to print, the last that match.
-        last: Option<usize>,
-        follow: bool,
-        json: bool,
-    },
-    Help,
-    Invalid(String),
+pub struct Request {
+    pub filter: Filter,
+    /// The most records to print, the last that match.
+    pub last: Option<usize>,
+    pub follow: bool,
+    pub json: bool,
 }
 
-pub fn read(arguments: Vec<String>) -> Request {
-    let (options, values) = match COMMAND.parse(arguments) {
-        Arguments::Run {
-            options, values, ..
-        } => (options, values),
-        Arguments::Help => return Request::Help,
-        Arguments::Invalid(reason) => return Request::Invalid(reason),
-    };
-    let follow = options.contains(&"-f");
-    let json = options.contains(&"--json");
+/// What `run` asks, or why its arguments are invalid.
+pub fn read(run: &Run) -> Result<Request, String> {
+    let follow = run.has("-f");
+    let json = run.has("--json");
     if follow && json {
-        return Request::Invalid("-f and --json cannot go together".into());
+        return Err("-f and --json cannot go together".into());
     }
     let mut filter = Filter {
-        app: value(&values, "--app").map(String::from),
+        app: run.value("--app").map(String::from),
         ..Filter::default()
     };
-    if let Some(pid) = value(&values, "--pid") {
+    if let Some(pid) = run.value("--pid") {
         match pid.parse() {
             Ok(pid) => filter.pid = Some(pid),
-            Err(_) => return Request::Invalid(format!("invalid process ID {pid}")),
+            Err(_) => return Err(format!("invalid process ID {pid}")),
         }
     }
-    if let Some(name) = value(&values, "--severity") {
+    if let Some(name) = run.value("--severity") {
         match SEVERITIES.iter().position(|s| *s == name) {
             Some(severity) => filter.severity = severity as u8,
-            None => return Request::Invalid(format!("unknown severity {name}")),
+            None => return Err(format!("unknown severity {name}")),
         }
     }
-    let last = match value(&values, "-n") {
+    let last = match run.value("-n") {
         Some(count) => match count.parse() {
             Ok(count) => Some(count),
-            Err(_) => return Request::Invalid(format!("invalid count {count}")),
+            Err(_) => return Err(format!("invalid count {count}")),
         },
         None => None,
     };
-    Request::Print {
+    Ok(Request {
         filter,
         last,
         follow,
         json,
-    }
+    })
 }
 
 /// The name of `severity`, or its number when it has none.
@@ -167,15 +145,33 @@ fn one_line(message: &str) -> String {
     line
 }
 
-/// The line of `entry`, without its line feed.
-pub fn line(entry: &Entry) -> String {
+/// The line of `entry`, without its line feed: the time in the
+/// secondary colour, the severities error and warning in theirs, the
+/// process ID as a number and the message as free text, or all of it in
+/// the secondary colour for a debug record.
+pub fn line(entry: &Entry, paint: Paint) -> String {
+    let time = time(entry.utc);
+    let time = time.as_deref().unwrap_or("-");
+    let severity = severity(entry.severity);
+    let message = one_line(&entry.message);
+    if entry.severity == 0 {
+        let line = format!(
+            "{time} {severity} {}[{}]: {message}",
+            entry.app_id, entry.pid
+        );
+        return paint.paint(Role::Secondary, &line);
+    }
+    let severity = match entry.severity {
+        3 => paint.paint(Role::Error, &severity),
+        2 => paint.paint(Role::Warning, &severity),
+        _ => severity,
+    };
     format!(
-        "{} {} {}[{}]: {}",
-        time(entry.utc).as_deref().unwrap_or("-"),
-        severity(entry.severity),
+        "{} {severity} {}[{}]: {}",
+        paint.paint(Role::Secondary, time),
         entry.app_id,
-        entry.pid,
-        one_line(&entry.message)
+        paint.paint(Role::Number, &entry.pid.to_string()),
+        paint.paint(Role::String, &message)
     )
 }
 
@@ -206,9 +202,14 @@ pub fn json(entries: &[Entry]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mikros_cli::Parsed;
 
-    fn read_args(arguments: &[&str]) -> Request {
-        read(arguments.iter().map(|a| a.to_string()).collect())
+    fn read_args(arguments: &[&str]) -> Result<Request, String> {
+        match COMMAND.parse(arguments.iter().map(|a| a.to_string())) {
+            Parsed::Run(run) => read(&run),
+            Parsed::Invalid(reason) => Err(reason),
+            Parsed::Help(path) => Err(format!("help for {path:?}")),
+        }
     }
 
     fn entry(utc: i64, severity: u8, message: &str) -> Entry {
@@ -229,27 +230,25 @@ mod tests {
     fn reads_filters_counts_and_follow() {
         assert_eq!(
             read_args(&[]),
-            Request::Print {
+            Ok(Request {
                 filter: Filter::default(),
                 last: None,
                 follow: false,
                 json: false,
-            }
+            })
         );
         let args = [
             "--app",
             "system.a",
-            "--pid",
-            "9",
+            "--pid=9",
             "--severity",
             "warning",
-            "-n",
-            "3",
+            "-n3",
             "-f",
         ];
         assert_eq!(
             read_args(&args),
-            Request::Print {
+            Ok(Request {
                 filter: Filter {
                     app: Some("system.a".into()),
                     pid: Some(9),
@@ -258,14 +257,15 @@ mod tests {
                 last: Some(3),
                 follow: true,
                 json: false,
-            }
+            })
         );
-        assert_eq!(read_args(&["--help"]), Request::Help);
+        assert_eq!(read_args(&["-fn", "2"]).map(|r| r.last), Ok(Some(2)));
+        assert_eq!(read_args(&["--help"]), Err("help for []".into()));
     }
 
     #[test]
     fn refuses_bad_values_and_follow_with_json() {
-        let invalid = |reason: &str| Request::Invalid(reason.into());
+        let invalid = |reason: &str| Err(reason.into());
         assert_eq!(
             read_args(&["-f", "--json"]),
             invalid("-f and --json cannot go together")
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(read_args(&["-n", "-1"]), invalid("invalid count -1"));
         assert_eq!(
             read_args(&["--severity", "fatal"]),
-            invalid("unknown severity fatal")
+            invalid("invalid value fatal for --severity")
         );
         assert_eq!(read_args(&["x"]), invalid("unexpected argument x"));
         assert_eq!(read_args(&["-n"]), invalid("option -n needs a value"));
@@ -300,16 +300,42 @@ mod tests {
 
     #[test]
     fn prints_a_line_per_record() {
+        let never = Paint::never();
         assert_eq!(
-            line(&entry(UTC, 2, "clock set")),
+            line(&entry(UTC, 2, "clock set"), never),
             "2026-11-15T09:08:07.123Z warning system.timesvc[12]: clock set"
         );
         assert_eq!(
-            line(&entry(0, 0, "a\\b\nc\x1b[2Jd\u{9b}")),
+            line(&entry(0, 0, "a\\b\nc\x1b[2Jd\u{9b}"), never),
             "- debug system.timesvc[12]: a\\\\b\\nc?[2Jd?"
         );
         assert_eq!(time(-1), Some("1969-12-31T23:59:59.999Z".into()));
         assert_eq!(severity(9), "9");
+    }
+
+    #[test]
+    fn colours_by_role() {
+        let on = Paint::new(Some("always"), false, None);
+        let paint = |sgr: &str, t: &str| format!("\x1b[{sgr}m{t}\x1b[0m");
+        assert_eq!(
+            line(&entry(0, 3, "disk \x1b gone"), on),
+            format!(
+                "{} {} system.timesvc[{}]: {}",
+                paint("90", "-"),
+                paint("38;2;231;76;60", "error"),
+                paint("38;2;21;193;160", "12"),
+                paint("38;2;255;134;26", "disk ? gone")
+            )
+        );
+        assert_eq!(
+            line(&entry(0, 2, "w"), on).split(' ').nth(1),
+            Some(paint("33", "warning").as_str())
+        );
+        assert_eq!(line(&entry(0, 1, "i"), on).split(' ').nth(1), Some("info"));
+        assert_eq!(
+            line(&entry(0, 0, "d"), on),
+            paint("90", "- debug system.timesvc[12]: d")
+        );
     }
 
     #[test]
@@ -322,5 +348,11 @@ mod tests {
              {\"sequence\":7,\"time\":null,\"pid\":12,\"app_id\":\"system.timesvc\",\
              \"severity\":\"info\",\"message\":\"c\"}]\n"
         );
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/logs.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
     }
 }
