@@ -1,8 +1,14 @@
 //! What the command-line utilities share: reading their arguments, the
 //! text of `--help`, their exit statuses and error messages, and JSON
-//! strings. It needs the standard library, which every utility has.
+//! strings. The tables of `spec` describe what each utility takes;
+//! `Command` is the older form, which the utilities leave as they move
+//! to the tables.
 
 extern crate alloc;
+
+pub mod spec;
+
+pub use spec::{Kind, Operand, Opt, Parsed, Run, Spec};
 
 use alloc::format;
 use alloc::string::String;
