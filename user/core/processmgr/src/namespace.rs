@@ -153,8 +153,8 @@ impl Roots {
 pub struct Namespaces {
     live: bool,
     /// The root of the EFI system partition's file system, once
-    /// connected.
-    esp: RefCell<Option<Rc<NodeAsyncClient>>>,
+    /// connected, and the rights it was connected with.
+    esp: RefCell<Option<(Rc<NodeAsyncClient>, Rights)>>,
     ready: RefCell<Option<Rc<Ready>>>,
     /// tmpfs, once it serves, and the tasks that wait for it.
     tmpfs: RefCell<Option<Rc<Tmpfs>>>,
@@ -838,14 +838,26 @@ impl Namespaces {
 
     /// Connects through `directory`, the process manager's own, to the
     /// file system of the EFI system partition the system booted from,
-    /// once it is published, to serve it as `/system/boot/efi`.
+    /// once it is published, to serve it as `/system/boot/efi`: read and
+    /// write, or read only when its server refuses writing, as a FAT
+    /// server does for a volume that was not shut down cleanly
+    /// (MIKSPEC-0064.R14, MIKSPEC-0064.R22).
     pub async fn prepare_esp(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
-        match filesystem(&directory, &reactor, ESP_INSTANCE, RW).await {
-            Ok(root) => {
-                *self.esp.borrow_mut() = Some(Rc::new(root));
+        let mut found = filesystem(&directory, &reactor, ESP_INSTANCE, RW)
+            .await
+            .map(|root| (root, RW));
+        if let Err(Status::AccessDenied) = found {
+            found = filesystem(&directory, &reactor, ESP_INSTANCE, Rights::READ)
+                .await
+                .map(|root| (root, Rights::READ));
+        }
+        match found {
+            Ok((root, rights)) => {
+                *self.esp.borrow_mut() = Some((Rc::new(root), rights));
+                let only = if rights == RW { "" } else { ", read only," };
                 mikros_rt::log!(
                     Info,
-                    "process-manager: serving the EFI system partition as /system/boot/efi"
+                    "process-manager: serving the EFI system partition{only} as /system/boot/efi"
                 );
             }
             Err(Status::PeerClosed) => {}
@@ -1663,8 +1675,8 @@ impl Namespaces {
             (PUBLIC, Source::Dir(root.clone(), "public"), RW),
             ("/users", users, RWX),
         ];
-        if let Some(esp) = self.esp.borrow().as_ref() {
-            table.push((BOOT_EFI, Source::Dir(esp.clone(), ""), RW));
+        if let Some((esp, rights)) = self.esp.borrow().as_ref() {
+            table.push((BOOT_EFI, Source::Dir(esp.clone(), ""), *rights));
         }
         // The longest root that holds the path.
         let (top, source, most, rest) = table
