@@ -70,6 +70,8 @@ pub struct Starter {
     /// The log handle with `MANAGE`, until the kernel console is
     /// released.
     console: RefCell<Option<OwnedHandle>>,
+    /// Whether an IOMMU isolates DMA, as the platform information says.
+    dma_isolated: bool,
 }
 
 /// What `Start` gets for a device: its description and copies of the
@@ -105,6 +107,7 @@ impl Starter {
         root: OwnedHandle,
         framebuffer: Option<OwnedHandle>,
         console: Option<OwnedHandle>,
+        dma_isolated: bool,
         reactor: Reactor,
     ) -> Starter {
         let priority = resource(&root, KIND_PRIORITY, PRIORITY_FIRST as u64, 15, 0);
@@ -122,6 +125,7 @@ impl Starter {
             reactor,
             framebuffer,
             console: RefCell::new(console),
+            dma_isolated,
         }
     }
 
@@ -142,8 +146,15 @@ impl Starter {
     /// ID, after registering its permissions with
     /// the broker. Before the first driver of a display device, the
     /// kernel console is released; the driver of the device that has the
-    /// boot framebuffer gets the framebuffer's memory object.
+    /// boot framebuffer gets the framebuffer's memory object. An
+    /// installed driver that needs `dma` is not started while DMA is not
+    /// isolated (MIKSPEC-0025.R69).
     pub async fn spawn(&self, driver: &Driver, hardware_ids: &[String]) -> Result<Spawned, String> {
+        if driver.is_installed() && driver.needs.contains(&Need::Dma) && !self.dma_isolated {
+            return Err(String::from(
+                "it is installed and needs DMA, which no IOMMU isolates",
+            ));
+        }
         if hardware_ids.iter().any(|id| is_display(id)) {
             self.release_console();
         }

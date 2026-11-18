@@ -73,6 +73,8 @@ const HAS_FRAMEBUFFER: u32 = 1 << 0;
 /// The flag set when the header names the framebuffer's PCI function,
 /// and where it does, as segment, bus and devfn in one word.
 const HAS_FRAMEBUFFER_PCI: u32 = 1 << 2;
+/// The flag set when an IOMMU isolates DMA.
+const DMA_ISOLATED: u32 = 1 << 3;
 const FRAMEBUFFER_PCI: usize = 0x5C;
 /// Where the header holds the framebuffer's description.
 const FRAMEBUFFER: usize = 0x10;
@@ -147,6 +149,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let has_framebuffer = info
         .as_ref()
         .is_some_and(|i| u32_at(i, FLAGS) & HAS_FRAMEBUFFER != 0);
+    // Without the platform information, DMA counts as not isolated.
+    let dma_isolated = info
+        .as_ref()
+        .is_some_and(|i| u32_at(i, FLAGS) & DMA_ISOLATED != 0);
     let memory = acpi::Memory {
         root: &root,
         process: managed.header.process.raw(),
@@ -264,7 +270,15 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
     let console = log.as_ref().and_then(|l| start::duplicate(l).ok());
     let shared = framebuffer.as_ref().and_then(|f| start::duplicate(f).ok());
-    let starter = Starter::new(launcher, broker, root, shared, console, reactor.clone());
+    let starter = Starter::new(
+        launcher,
+        broker,
+        root,
+        shared,
+        console,
+        dma_isolated,
+        reactor.clone(),
+    );
     let manager = Rc::new(Manager {
         devices: RefCell::new(devices),
         drivers: RefCell::new(drivers),

@@ -14,6 +14,9 @@ use mikros_rt::interfaces::__midl::ClientEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::Provider;
 
+/// The only class of `CLASSES` that installed drivers may publish
+/// (MIKSPEC-0025.R69).
+const INSTALLED_CLASS: &str = "gpu";
 /// The classes of services that drivers may publish, and the permission
 /// that connecting to each one's instances needs.
 const CLASSES: [(&str, &str); 8] = [
@@ -91,9 +94,10 @@ pub struct Published {
 /// is the boot's EFI system partition, and otherwise as `volume-<guid>`
 /// unless its `no_automount` property is `true`; a partition that a
 /// mount asked for gets `volume-<guid>` in either case. Fails with
-/// `INVALID_ARGS` for a class that drivers may not publish, and with
-/// `BAD_STATE` for a `subvolumes` service before any `filesystem`
-/// service.
+/// `INVALID_ARGS` for a class that drivers may not publish, with
+/// `ACCESS_DENIED` for a class other than `INSTALLED_CLASS` when the
+/// driver is an installed one, and with `BAD_STATE` for a `subvolumes`
+/// service before any `filesystem` service.
 pub async fn publish(
     m: &Manager,
     published: &Published,
@@ -103,6 +107,9 @@ pub async fn publish(
 ) -> Result<u64, Status> {
     let permission = CLASSES.iter().find(|(c, _)| *c == class);
     let (_, permission) = permission.ok_or(Status::InvalidArgs)?;
+    if class != INSTALLED_CLASS && installed(m, caller) {
+        return Err(Status::AccessDenied);
+    }
     let registrar = m.registrar.as_ref().ok_or(Status::BadState)?;
     let named = match class.as_str() {
         SUBVOLUMES => Some(published.filesystem.get().ok_or(Status::BadState)?),
@@ -297,4 +304,17 @@ async fn unregister(m: &Manager, protocol: &str, instance: &str) {
             failed.map(|r| r.err())
         ),
     }
+}
+
+/// Whether the driver bound to device `caller` is an installed one.
+fn installed(m: &Manager, caller: u64) -> bool {
+    let devices = m.devices.borrow();
+    let Some(bound) = devices.get(caller).and_then(|d| d.driver.as_ref()) else {
+        return false;
+    };
+    let drivers = m.drivers.borrow();
+    drivers
+        .iter()
+        .find(|d| &d.name == bound)
+        .is_some_and(|d| d.is_installed())
 }
