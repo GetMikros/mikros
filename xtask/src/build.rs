@@ -304,6 +304,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", hello.display());
             let coreutils_check = crate::rust_std::build("coreutils-check", kind)?;
             let global_check = crate::rust_std::build("global-check", kind)?;
+            let forge_probe = crate::rust_std::build("forge-probe", kind)?;
+            let forge_manifest =
+                crate::workspace_root().join("user/tests/forge-probe/system.forge-probe.yaml");
             let files_c = c_build(
                 "files-c",
                 &["user/tests/files-c/files.c"],
@@ -1847,6 +1850,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("system/bin/files-c", files_c.as_path()),
                     ("system/bin/coreutils-check", coreutils_check.as_path()),
                     ("system/bin/global-check", global_check.as_path()),
+                    ("system/bin/forge-probe", forge_probe.as_path()),
+                    (
+                        "system/programs/system.forge-probe.yaml",
+                        forge_manifest.as_path(),
+                    ),
                     (
                         "system/share/package-c/package-user",
                         package_user.as_path(),

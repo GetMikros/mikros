@@ -1,0 +1,8 @@
+# The program manifest of forge-probe, which only the setup run's root
+# holds, installed as system/programs/system.forge-probe.yaml, so that
+# global-check runs it with the permissions of a service that asks the
+# broker for its clients.
+app_id: system.forge-probe
+binary: /system/bin/forge-probe
+permissions: [system.permissions.read, system.permissions.request]
+command: true

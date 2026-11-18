@@ -24,6 +24,7 @@ const IDLE: &str = "idle";
 const PACKAGE_C: &str = "/system/share/package-c";
 /// This program, which the package's service and driver copy.
 const ITSELF: &str = "/system/bin/global-check";
+const FORGE_PROBE: &str = "/system/bin/forge-probe";
 const DAEMON: &str = "org.example.daemon";
 const SERVICE: &str = "org.example.daemon.idle";
 const DRIVER: &str = "org.example.thing";
@@ -202,6 +203,7 @@ fn all() -> Result<(), Failed> {
     protocol_names(&installer)?;
     components(&installer)?;
     at_once()?;
+    forged()?;
     run_app(&format!("/apps/{DAEMON}/bin/idle"))?;
     grants::revoke_while_open(&format!("/apps/{DAEMON}/bin/idle"))?;
     let _ = std::fs::remove_file("/users/ada/documents/global-check-note");
@@ -498,6 +500,21 @@ fn at_once() -> Result<(), Failed> {
         )?;
     }
     Ok(())
+}
+
+/// forge-probe, which asks the broker for a permission of its own
+/// process under another app's ID, sees that refused without a question
+/// (MIKSPEC-0057.R33).
+fn forged() -> Result<(), Failed> {
+    const CODE: u8 = 61;
+    let status = Command::new(FORGE_PROBE)
+        .status()
+        .or(failed(CODE, "starting forge-probe"))?;
+    ensure(
+        status.success(),
+        CODE,
+        &format!("forge-probe exited with {status}"),
+    )
 }
 
 /// The bytes of a package of the library `id` for its user alone.
