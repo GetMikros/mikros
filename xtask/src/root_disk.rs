@@ -7,6 +7,9 @@
 //! - the fresh GUIDs run: the root disk run behind an NVMe controller with
 //!   `renew_guids` in `boot.conf`, after which the disk has new partition
 //!   GUIDs and `boot.conf` asks for none;
+//! - the dirty ESP run: the root disk run behind an NVMe controller with
+//!   the EFI system partition's FAT marked as not shut down cleanly, which
+//!   the FAT server must serve writable and heal (MIKSPEC-0064.R23);
 //! - the root clone run: as the root disk run behind an NVMe controller,
 //!   with `test=root-clone` and a copy of the boot disk as the scratch
 //!   disk behind the AHCI controller, whose root and EFI system
@@ -268,6 +271,71 @@ pub fn run_fresh_guids(
     if let Some(word) = left {
         bail!("boot.conf still holds {word} after the boot: {conf:?}");
     }
+    Ok(())
+}
+
+const DIRTY_ESP: Runs = Runs {
+    name: "dirty ESP",
+    scenario: "test=root-disk",
+    passed: "SCENARIO root-disk PASSED",
+    // Only a partition with `boot_esp` is healed; the device manager's log
+    // line of the partition is cut before that property.
+    also: &["fat: the boot's EFI system partition was not shut down cleanly"],
+    disks: &[("nvme", Disk::Nvme)],
+    clone: false,
+};
+
+/// Boots the dirty ESP run in `dir`: the root disk run's image from an
+/// NVMe controller, with the clean-shutdown bit of the EFI system
+/// partition's FATs cleared as a crash leaves it. The device manager must
+/// mark the partition as the boot's (MIKSPEC-0025.R74), and the FAT
+/// server must log that it heals it and serve it writable, which the
+/// scenario sees as the process manager serving `/system/boot/efi`.
+pub fn run_dirty_esp(
+    machine: &MachineArgs,
+    kind: Kind,
+    built: &build::Built,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    let dir = dir.join("nvme");
+    fs::create_dir_all(&dir)?;
+    let disk = dir.join("disk.img");
+    image::create_with(kind, built, &disk, DIRTY_ESP.scenario, &[])?;
+    leave_esp_dirty(&disk)?;
+    let mut machine = machine.clone();
+    machine.disk = Disk::Nvme;
+    boot(&DIRTY_ESP, "nvme", &machine, &dir, timeout)
+}
+
+/// Clears the clean-shutdown bit of FAT entry 1 in every FAT of the
+/// FAT32 EFI system partition of the disk image at `path`.
+fn leave_esp_dirty(path: &Path) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    const CLEAN: u32 = 0x0800_0000;
+    let table = Table::read(path)?;
+    let esp = image::ESP_TYPE.to_bytes_le();
+    let Some((_, _, (first, _))) = table.partitions.iter().find(|(kind, _, _)| *kind == esp) else {
+        bail!("{} has no EFI system partition", path.display());
+    };
+    let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let start = first * image::gpt::SECTOR;
+    let mut boot = [0u8; 512];
+    file.read_exact_at(&mut boot, start)?;
+    let sector = u64::from(u16::from_le_bytes([boot[11], boot[12]]));
+    let reserved = u64::from(u16::from_le_bytes([boot[14], boot[15]]));
+    let fats = u64::from(boot[16]);
+    let fat_sectors = u64::from(u32::from_le_bytes(
+        boot[36..40].try_into().expect("4 bytes"),
+    ));
+    for n in 0..fats {
+        let at = start + (reserved + n * fat_sectors) * sector + 4;
+        let mut entry = [0u8; 4];
+        file.read_exact_at(&mut entry, at)?;
+        let value = u32::from_le_bytes(entry) & !CLEAN;
+        file.write_all_at(&value.to_le_bytes(), at)?;
+    }
+    file.sync_all()?;
     Ok(())
 }
 
