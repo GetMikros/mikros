@@ -61,7 +61,7 @@ async fn elevate(
         return Some(Err(Status::AccessDenied));
     }
     let answer = requests
-        .authorize(client, ADMIN_RUN.into(), reason.clone())
+        .authorize(client, String::new(), ADMIN_RUN.into(), reason.clone())
         .await;
     let elevated = match answer {
         None => return None,

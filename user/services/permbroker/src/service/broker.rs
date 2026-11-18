@@ -230,6 +230,7 @@ impl Inner {
     async fn ask_administrator(
         &self,
         client: &ClientIdentity,
+        via: String,
         permission: &str,
         mut reason: String,
     ) -> bool {
@@ -248,7 +249,7 @@ impl Inner {
         }
         let authorization = AuthorizationAsyncClient::new(authorization, self.reactor.clone());
         let answer = authorization
-            .authorize(client.clone(), permission.into(), reason)
+            .authorize(client.clone(), via, permission.into(), reason)
             .await;
         let allowed = matches!(answer, Ok(Ok(a)) if a.allowed);
         if allowed {
@@ -269,7 +270,9 @@ impl Inner {
                 Ok(())
             }
             (Requested::Authorize, _)
-                if self.ask_administrator(caller, MANAGE_GRANTS, reason).await =>
+                if self
+                    .ask_administrator(caller, String::new(), MANAGE_GRANTS, reason)
+                    .await =>
             {
                 Ok(())
             }
@@ -540,6 +543,12 @@ async fn decide_request(
     q: BrokerRequestRequest,
 ) -> Result<BrokerRequestResponse, Status> {
     inner.authorize(caller, Call::Request)?;
+    // The service that asks for a permission of one of its clients, which
+    // a question names besides the client (MIKSPEC-0037.R46).
+    let via = match caller.koid == q.client.koid {
+        true => String::new(),
+        false => caller.app_id.clone(),
+    };
     let client = identity(&q.client);
     let requested = inner.store.borrow().request(client, &q.permission);
     let (requested, elevated) = requested.map_err(status)?;
@@ -550,7 +559,7 @@ async fn decide_request(
         Requested::Decided(decision) => decision,
         Requested::Authorize => {
             match inner
-                .ask_administrator(&q.client, &q.permission, q.reason)
+                .ask_administrator(&q.client, via, &q.permission, q.reason)
                 .await
             {
                 true => Decision::Allowed,
@@ -562,7 +571,7 @@ async fn decide_request(
             match prompter {
                 None => Decision::Denied,
                 Some(prompter) => {
-                    let asked = prompter.ask(q.client.clone(), q.permission.clone(), q.reason);
+                    let asked = prompter.ask(q.client.clone(), via, q.permission.clone(), q.reason);
                     match asked.await {
                         // Nobody answered: denied, and nothing recorded
                         // (MIKSPEC-0037.R41).

@@ -172,6 +172,7 @@ impl Requests {
     pub async fn authorize(
         &self,
         client: &ClientIdentity,
+        via: String,
         action: String,
         reason: String,
     ) -> Option<(bool, u32)> {
@@ -188,7 +189,7 @@ impl Requests {
             );
             return Some((true, admin));
         }
-        self.ask(client, action, reason).await
+        self.ask(client, via, action, reason).await
     }
 
     /// The text console of the client's login session, and the
@@ -295,9 +296,12 @@ impl Requests {
 
     /// Asks on the client's console for `action`, as `authorize` does for
     /// a process that is not elevated.
+    /// `via` is the service that asks for its client, or empty
+    /// (MIKSPEC-0057.R35).
     async fn ask(
         &self,
         client: &ClientIdentity,
+        via: String,
         action: String,
         reason: String,
     ) -> Option<(bool, u32)> {
@@ -313,7 +317,7 @@ impl Requests {
         let app_id = client.app_id.clone();
         let sent = server
             .server()
-            .send_on_authorize(request, console, app_id, action, reason, name);
+            .send_on_authorize(request, console, app_id, via, action, reason, name);
         match self
             .wait(client, request, &slot, &server, sent.is_ok())
             .await
@@ -331,6 +335,7 @@ impl Requests {
     pub async fn ask_permission(
         &self,
         client: &ClientIdentity,
+        via: String,
         permission: String,
         reason: String,
     ) -> Decision {
@@ -341,7 +346,7 @@ impl Requests {
         let app_id = client.app_id.clone();
         let sent = server
             .server()
-            .send_on_ask(request, console, app_id, permission, reason);
+            .send_on_ask(request, console, app_id, via, permission, reason);
         match self
             .wait(client, request, &slot, &server, sent.is_ok())
             .await
@@ -382,7 +387,9 @@ pub async fn serve(requests: Rc<Requests>, end: ServerEnd<Authorization>, spawne
     while let Ok(AuthorizationRequest::Authorize(q, r)) = server.next().await {
         let (requests, server) = (requests.clone(), server.clone());
         spawner.spawn(async move {
-            let answer = requests.authorize(&q.client, q.action, q.reason).await;
+            let answer = requests
+                .authorize(&q.client, q.via, q.action, q.reason)
+                .await;
             if let Some((allowed, admin)) = answer {
                 let reply = AuthorizationAuthorizeResponse { allowed, admin };
                 let _ = r.reply(server.server(), Ok(reply));
@@ -399,7 +406,7 @@ pub async fn serve_prompter(requests: Rc<Requests>, end: ServerEnd<Prompter>, sp
         let (requests, server) = (requests.clone(), server.clone());
         spawner.spawn(async move {
             let decision = requests
-                .ask_permission(&q.client, q.permission, q.reason)
+                .ask_permission(&q.client, q.via, q.permission, q.reason)
                 .await;
             let _ = r.reply(server.server(), PrompterAskResponse { decision });
         });

@@ -21,6 +21,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::Cell;
+use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -139,11 +140,18 @@ async fn serve_directory(
     }
 }
 
+/// How many `Authorize` calls named the service manager as the service
+/// that asked for its client (MIKSPEC-0037.R46).
+static VIA_MANAGER: AtomicU32 = AtomicU32::new(0);
+
 /// The stub of `Authorization`: allows `test.admin` only, as user 1000.
 async fn authorization(end: ServerEnd<Authorization>, reactor: Reactor, asked: Rc<Cell<u32>>) {
     let server = AuthorizationAsyncServer::new(end, reactor);
     while let Ok(AuthorizationRequest::Authorize(q, r)) = server.next().await {
         asked.set(asked.get() + 1);
+        if q.via == MANAGER {
+            VIA_MANAGER.fetch_add(1, Ordering::Relaxed);
+        }
         let allowed = q.client.app_id == ADMIN;
         let admin = if allowed { 1000 } else { 0 };
         let reply = AuthorizationAuthorizeResponse { allowed, admin };
@@ -471,6 +479,10 @@ async fn probe(
         request_for(&manager, process(1, APP, 8), "admin.time.set").await == Ok(Decision::Denied),
     )?;
     c("asking twice more", asked.get() == 4)?;
+    c(
+        "naming the service that asked for its clients",
+        VIA_MANAGER.load(Ordering::Relaxed) == 2,
+    )?;
     let watched = watcher.watch("user.camera.use".into()).await;
     c("watching", watched.is_ok_and(|r| r.is_ok()))?;
     c(

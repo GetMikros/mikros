@@ -1,10 +1,11 @@
-// MIKSPEC-0057.R7
+// MIKSPEC-0057.R34
 
 library mikros.session;
 using mikros.base;
 using mikros.service;
 
 protocol Authorization {
-    @1 Authorize(client mikros.service.ClientIdentity, action string<64>,
-                 reason string<256>) -> (allowed bool, admin u32) error base.Status;
+    @1 Authorize(client mikros.service.ClientIdentity, via string<128>,
+                 action string<64>, reason string<256>)
+        -> (allowed bool, admin u32) error base.Status;
 };

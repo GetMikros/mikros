@@ -28,6 +28,8 @@ pub struct Request {
     /// The text console of the client's session.
     pub console: u8,
     pub app_id: String,
+    /// The service that asks for the app, or empty.
+    pub via: String,
     /// The action, or the permission of an `OnAsk`.
     pub action: String,
     pub reason: String,
@@ -233,6 +235,16 @@ impl Prompt {
     /// The lines, as they show now: the request, the name when it is
     /// asked for, the password once the name is given, and the failure,
     /// with the field that the cursor ends, if any.
+    /// Who asks: the app, and the service that asks for it when there is
+    /// one (MIKSPEC-0067.R22).
+    fn who(&self) -> String {
+        let r = &self.request;
+        match r.via.is_empty() {
+            true => r.app_id.clone(),
+            false => format!("{} through {}", r.app_id, r.via),
+        }
+    }
+
     fn lines(&self) -> (Vec<String>, Option<usize>) {
         let r = &self.request;
         let sudo = r.action == ADMIN_RUN;
@@ -245,7 +257,9 @@ impl Prompt {
             };
             let line = format!(
                 "{PREFIX}{} wants {}: {} {ASK}{answer}",
-                r.app_id, r.action, r.reason
+                self.who(),
+                r.action,
+                r.reason
             );
             let cursor = (!self.waiting).then_some(0);
             return (vec![line], cursor);
@@ -253,7 +267,9 @@ impl Prompt {
         if !sudo {
             lines.push(format!(
                 "{prefix}{} wants {}: {}",
-                r.app_id, r.action, r.reason
+                self.who(),
+                r.action,
+                r.reason
             ));
         }
         let name = match r.name.is_empty() {
@@ -357,6 +373,7 @@ mod tests {
             request: 7,
             console: 1,
             app_id: "system.power".into(),
+            via: String::new(),
             action: "admin.power.control".into(),
             reason: "power off".into(),
             name: name.into(),
@@ -416,6 +433,17 @@ mod tests {
         let mut p = prompt("", 1, (1, 0));
         assert_eq!(p.type_bytes(b"\x1b[A"), Step::Nothing);
         assert_eq!(p.type_bytes(b"\x1b"), Step::Cancel);
+    }
+
+    #[test]
+    fn names_the_service_that_asks_for_the_app() {
+        let mut asked = request("");
+        asked.via = "system.btrfs".into();
+        let p = Prompt::new(asked, 120, 6, (1, 0), |_, _| Cell::default());
+        assert_eq!(
+            rows(&p.screen())[1],
+            "[authorize] system.power through system.btrfs wants admin.power.control: power off"
+        );
     }
 
     #[test]

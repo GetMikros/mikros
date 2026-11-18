@@ -1,4 +1,4 @@
-// MIKSPEC-0037.R40, MIKSPEC-0037.R34
+// MIKSPEC-0037.R46, MIKSPEC-0037.R34
 
 library mikros.permissions;
 using mikros.base;
@@ -32,6 +32,6 @@ protocol Broker {
 };
 
 protocol Prompter {
-    @1 Ask(client mikros.service.ClientIdentity, permission string<64>,
-           reason string<256>) -> (decision Decision);
+    @1 Ask(client mikros.service.ClientIdentity, via string<128>,
+           permission string<64>, reason string<256>) -> (decision Decision);
 };

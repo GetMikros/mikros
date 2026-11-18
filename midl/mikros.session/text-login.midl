@@ -1,4 +1,4 @@
-// MIKSPEC-0057.R31
+// MIKSPEC-0057.R35
 
 library mikros.session;
 using mikros.base;
@@ -10,12 +10,13 @@ protocol TextLogin {
              terminal base.Token) -> () error base.Status;
     @4 -> OnSessionEnded(console u8);
     @5 -> OnAuthorize(request u32, console u8, app_id string<128>,
-                      action string<64>, reason string<256>, name string<32>);
+                      via string<128>, action string<64>, reason string<256>,
+                      name string<32>);
     @6 Answer(request u32, name string<32>, password string<1024>)
         -> () error base.Status;
     @7 Cancel(request u32) -> () error base.Status;
     @8 -> OnAuthorizeEnded(request u32);
-    @9 -> OnAsk(request u32, console u8, app_id string<128>,
+    @9 -> OnAsk(request u32, console u8, app_id string<128>, via string<128>,
                 permission string<64>, reason string<256>);
     @10 AnswerAsk(request u32, allowed bool) -> () error base.Status;
 };
