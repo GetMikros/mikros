@@ -283,6 +283,15 @@ impl Run {
             .collect()
     }
 
+    /// Which of `names` was given last, for options of which the last
+    /// one wins.
+    pub fn last_of<'a>(&self, names: &[&'a str]) -> Option<&'a str> {
+        self.given
+            .iter()
+            .rev()
+            .find_map(|(o, _)| names.iter().find(|n| o.named(n)).copied())
+    }
+
     /// The subcommand given right below the command, if any.
     pub fn subcommand(&self) -> Option<&'static str> {
         self.subcommands.first().copied()
@@ -513,6 +522,10 @@ mod tests {
         let r = run(&LIST, &["-l", "-l", "--color=never"]);
         assert_eq!(r.count("-l"), 2);
         assert_eq!(r.value("--color"), Some("never"));
+        let r = run(&LIST, &["-l", "--all", "-l"]);
+        assert_eq!(r.last_of(&["-a", "-l"]), Some("-l"));
+        assert_eq!(r.last_of(&["--all"]), Some("--all"));
+        assert_eq!(r.last_of(&["-n"]), None);
     }
 
     #[test]
