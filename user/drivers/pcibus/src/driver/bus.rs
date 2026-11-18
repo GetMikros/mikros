@@ -5,7 +5,10 @@
 
 use crate::driver::ecam::Ecam;
 use crate::driver::interrupts::{Intx, Line};
-use crate::pci::{Address, Bar, Claim, Header, bar_properties, claims, kept_bars, scan, size_bars};
+use crate::pci::{
+    Address, Bar, Claim, Header, bar_properties, bridges, claims, enable_acs, kept_bars, scan,
+    size_bars,
+};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -38,18 +41,25 @@ pub struct Function {
     pub intx: RefCell<Option<Intx>>,
 }
 
+/// The DMA of the host bridge's buses: the `BTI` resource of their
+/// requester IDs, and whether an IOMMU isolates DMA, as the host
+/// bridge's `dma_isolated` property says.
+pub struct Dma {
+    pub bti_resource: Result<OwnedHandle, Status>,
+    pub isolated: bool,
+}
+
 /// The host bridge's buses: their configuration space, segment, the
-/// device manager, the driver's directory, the `BTI` resource of their
-/// requester IDs, the `MSI` resource once one was needed, the INTx
-/// lines in use by global system interrupt, the executor, and the
-/// functions found, by the ID of their device, with whether they have
-/// all been added.
+/// device manager, the driver's directory, their DMA, the `MSI` resource
+/// once one was needed, the INTx lines in use by global system
+/// interrupt, the executor, and the functions found, by the ID of their
+/// device, with whether they have all been added.
 pub struct Bus {
     pub ecam: Ecam,
     pub segment: u16,
     pub manager: DeviceManagerAsyncClient,
     pub directory: DirectoryAsyncClient,
-    pub bti_resource: Result<OwnedHandle, Status>,
+    pub dma: Dma,
     pub msi_resource: RefCell<Option<OwnedHandle>>,
     pub lines: RefCell<BTreeMap<u32, Rc<Line>>>,
     pub reactor: Reactor,
@@ -65,7 +75,7 @@ impl Bus {
         segment: u16,
         manager: DeviceManagerAsyncClient,
         directory: DirectoryAsyncClient,
-        bti_resource: Result<OwnedHandle, Status>,
+        dma: Dma,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Bus {
@@ -75,7 +85,7 @@ impl Bus {
             reactor,
             manager,
             directory,
-            bti_resource,
+            dma,
             msi_resource: RefCell::new(None),
             lines: RefCell::new(BTreeMap::new()),
             spawner,
@@ -124,6 +134,20 @@ pub fn requester_id(segment: u16, at: Address) -> u64 {
 /// hardware IDs. A BAR without a resource has `ACCESS_DENIED`.
 pub async fn enumerate(bus: Rc<Bus>) {
     let ecam = &bus.ecam;
+    // With DMA isolated, requests between the devices below one switch go
+    // up to the IOMMU, before any function is added (MIKSPEC-0026.R31).
+    if bus.dma.isolated {
+        let mut config = ecam;
+        let ports = bridges(&ecam, ecam.bus_start(), ecam.bus_end());
+        let enabled = ports
+            .into_iter()
+            .filter_map(|at| enable_acs(&mut config, at))
+            .count();
+        mikros_rt::log!(
+            Info,
+            "pci-bus: enabled access control services on {enabled} ports"
+        );
+    }
     // Whether a memory BAR gets its pages depends on the BARs of every
     // other function, so all are sized first. A function that the device
     // manager keeps for this restarted driver has a driver that may be
@@ -184,7 +208,7 @@ pub async fn enumerate(bus: Rc<Bus>) {
             };
             bars.push((bar, claimed));
         }
-        let bti = match &bus.bti_resource {
+        let bti = match &bus.dma.bti_resource {
             Ok(resource) => bti_create(resource, requester_id(bus.segment, at)),
             Err(status) => Err(*status),
         };

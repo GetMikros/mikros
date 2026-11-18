@@ -520,3 +520,53 @@ fn sizes_again_unless_the_bar_properties_fit() {
         assert_eq!(kept_bars(&fake, f, &properties), None, "{properties:?}");
     }
 }
+
+#[test]
+fn enables_access_control_on_root_and_downstream_ports() {
+    let mut fake = Fake::default();
+    // A port with the PCI Express capability at 0x40 of `port_type`, and,
+    // with `acs`, an ACS extended capability at 0x140 that offers those
+    // controls, behind another extended capability at 0x100.
+    let port = |fake: &mut Fake, at: Address, port_type: u16, acs: Option<u16>| {
+        let f = fake.add(at, &VIRTIO_BLOCK, 1);
+        let mut put = |offset: usize, bytes: &[u8]| {
+            f.space[offset..offset + bytes.len()].copy_from_slice(bytes);
+        };
+        put(usize::from(STATUS), &(1u16 << 4).to_le_bytes());
+        put(usize::from(CAPABILITIES), &[0x40]);
+        put(0x40, &[CAP_PCIE, 0x00]);
+        put(0x42, &(port_type << 4 | 2).to_le_bytes());
+        if let Some(offered) = acs {
+            put(0x100, &(0x0001u32 | 1 << 16 | 0x140 << 20).to_le_bytes());
+            put(0x140, &(0x000Du32 | 1 << 16).to_le_bytes());
+            put(0x144, &offered.to_le_bytes());
+        }
+    };
+    let root = at(0, 1, 0);
+    let downstream = at(2, 0, 0);
+    let upstream = at(1, 0, 0);
+    let without = at(0, 2, 0);
+    let partial = at(0, 3, 0);
+    port(&mut fake, root, 4, Some(0x7F));
+    port(&mut fake, downstream, 6, Some(0x7F));
+    port(&mut fake, upstream, 5, Some(0x7F));
+    port(&mut fake, without, 4, None);
+    port(&mut fake, partial, 4, Some(1 << 0 | 1 << 2));
+    let control = |fake: &Fake, at: Address| fake.read(at, 0x146, 2) as u16;
+    assert_eq!(
+        bridges(&fake, 0, 2),
+        [root, without, partial, upstream, downstream]
+    );
+    assert_eq!(enable_acs(&mut fake, root), Some(ACS_WANTED));
+    assert_eq!(control(&fake, root), ACS_WANTED);
+    assert_eq!(enable_acs(&mut fake, downstream), Some(ACS_WANTED));
+    // Only what the capability offers, and nothing on other ports.
+    assert_eq!(enable_acs(&mut fake, partial), Some(1 << 0 | 1 << 2));
+    assert_eq!(control(&fake, partial), 1 << 0 | 1 << 2);
+    assert_eq!(enable_acs(&mut fake, upstream), None);
+    assert_eq!(control(&fake, upstream), 0);
+    assert_eq!(enable_acs(&mut fake, without), None);
+    // Endpoints are not bridges.
+    fake.add(at(0, 4, 0), &VIRTIO_BLOCK, 0);
+    assert!(!bridges(&fake, 0, 2).contains(&at(0, 4, 0)));
+}

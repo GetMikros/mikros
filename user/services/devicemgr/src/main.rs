@@ -207,7 +207,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         add_boot_framebuffer(&mut devices, header);
     }
     let hosts = match &mcfg {
-        Some(mcfg) => add_host_bridges(&mut devices, &root, mcfg),
+        Some(mcfg) => add_host_bridges(&mut devices, &root, mcfg, dma_isolated),
         None => {
             mikros_rt::log!(Warning, "device-manager: no MCFG table, so no PCI");
             Vec::new()
@@ -346,12 +346,15 @@ async fn connect<P>(directory: &DirectoryAsyncClient, protocol: &str) -> Option<
 }
 
 /// Adds a `platform:pci-host-ecam` root device for each entry of `mcfg`,
-/// with a shared `MMIO` resource from `root` for its buses' range, and
-/// returns the segment, first and last bus, and device ID of each.
+/// with a shared `MMIO` resource from `root` for its buses' range and the
+/// property `dma_isolated` telling whether an IOMMU isolates DMA
+/// (MIKSPEC-0025.R75), and returns the segment, first and last bus, and
+/// device ID of each.
 fn add_host_bridges(
     devices: &mut Devices,
     root: &OwnedHandle,
     mcfg: &[u8],
+    dma_isolated: bool,
 ) -> Vec<(u16, u8, u8, u64)> {
     let mut added = Vec::new();
     for ecam in acpi::ecams(mcfg) {
@@ -383,6 +386,7 @@ fn add_host_bridges(
             property("bus_start", format!("{}", ecam.bus_start)),
             property("bus_end", format!("{}", ecam.bus_end)),
             property("ecam_base", format!("{:#x}", ecam.base)),
+            property("dma_isolated", format!("{dma_isolated}")),
         ];
         let id = devices.add(
             format!("pci-host-{}", ecam.segment),

@@ -18,7 +18,7 @@ mod device;
 mod ecam;
 mod interrupts;
 mod reset;
-use crate::driver::bus::{Bus, KIND_BTI, KIND_MMIO};
+use crate::driver::bus::{Bus, Dma, KIND_BTI, KIND_MMIO};
 use crate::driver::ecam::Ecam;
 use alloc::rc::Rc;
 use mikros_rt::exec::Executor;
@@ -202,12 +202,20 @@ async fn start(
         Ok(Err(status)) => Err(status),
         Err(_) => Err(Status::PeerClosed),
     };
+    let isolated = request
+        .device
+        .properties
+        .iter()
+        .any(|p| p.key == "dma_isolated" && p.value == "true");
     Ok(Bus::new(
         ecam,
         segment,
         manager,
         directory,
-        bti,
+        Dma {
+            bti_resource: bti,
+            isolated,
+        },
         reactor.clone(),
         spawner.clone(),
     ))

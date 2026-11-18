@@ -156,6 +156,18 @@ impl Header {
 /// `bus_end`: every device of each bus, and every function of a device
 /// whose function 0 has the multi-function bit set.
 pub fn scan(config: &impl Config, bus_start: u8, bus_end: u8) -> Vec<Address> {
+    with_layout(config, bus_start, bus_end, 0)
+}
+
+/// The functions with a type 1 header, PCI-to-PCI bridges, on the buses
+/// from `bus_start` to `bus_end`, found as `scan` finds those with a
+/// type 0 header.
+pub fn bridges(config: &impl Config, bus_start: u8, bus_end: u8) -> Vec<Address> {
+    with_layout(config, bus_start, bus_end, 1)
+}
+
+/// The functions whose header has `wanted` as its layout.
+fn with_layout(config: &impl Config, bus_start: u8, bus_end: u8, wanted: u8) -> Vec<Address> {
     let mut found = Vec::new();
     for bus in bus_start..=bus_end {
         for device in 0..32 {
@@ -181,7 +193,7 @@ pub fn scan(config: &impl Config, bus_start: u8, bus_end: u8) -> Vec<Address> {
                 };
                 let present = config.read(at, VENDOR_ID, 2) as u16 != NO_VENDOR;
                 let layout = config.read(at, HEADER_TYPE, 1) as u8 & HEADER_LAYOUT;
-                if present && layout == 0 {
+                if present && layout == wanted {
                     found.push(at);
                 }
             }
@@ -447,6 +459,64 @@ pub fn capabilities(config: &impl Config, at: Address) -> Vec<(u8, u16)> {
         next = config.read(at, next + 1, 1) as u16 & 0xFC;
     }
     found
+}
+
+/// The PCI Express capability's Device/Port Type field of root ports and
+/// of the downstream ports of switches.
+const PORT_ROOT: u32 = 4;
+const PORT_DOWNSTREAM: u32 = 6;
+/// The ID of the Access Control Services extended capability, and the
+/// offsets of its capability and control registers.
+const EXT_ACS: u32 = 0x000D;
+const ACS_CAPABILITY: u16 = 4;
+const ACS_CONTROL: u16 = 6;
+/// The ACS controls that `enable_acs` sets: Source Validation, P2P
+/// Request Redirect, P2P Completion Redirect and Upstream Forwarding.
+pub const ACS_WANTED: u16 = 1 << 0 | 1 << 2 | 1 << 3 | 1 << 4;
+/// Where extended capabilities start, and how many are followed.
+const EXTENDED: u16 = 0x100;
+const EXTENDED_MAX: usize = 96;
+
+/// The offset of the extended capability `id` of the function at `at`,
+/// if it has one. A list that loops, or points below the extended space,
+/// is followed no further.
+fn extended_capability(config: &impl Config, at: Address, id: u32) -> Option<u16> {
+    let mut next = EXTENDED;
+    for _ in 0..EXTENDED_MAX {
+        let header = config.read(at, next, 4);
+        if header == 0 || header == u32::MAX {
+            return None;
+        }
+        if header & 0xFFFF == id {
+            return Some(next);
+        }
+        let after = (header >> 20) as u16 & 0xFFC;
+        if after < EXTENDED || after <= next {
+            return None;
+        }
+        next = after;
+    }
+    None
+}
+
+/// Sets on the bridge at `at`, when it is a root port or a switch
+/// downstream port with an Access Control Services capability, the
+/// controls of `ACS_WANTED` that its capability register reports, and
+/// returns them; None for any other function (MIKSPEC-0026.R31).
+pub fn enable_acs(config: &mut impl Config, at: Address) -> Option<u16> {
+    let (_, pcie) = capabilities(config, at)
+        .into_iter()
+        .find(|&(id, _)| id == CAP_PCIE)?;
+    let port = (config.read(at, pcie + 2, 2) >> 4) & 0xF;
+    if port != PORT_ROOT && port != PORT_DOWNSTREAM {
+        return None;
+    }
+    let acs = extended_capability(config, at, EXT_ACS)?;
+    let offered = config.read(at, acs + ACS_CAPABILITY, 2) as u16;
+    let enabled = offered & ACS_WANTED;
+    let control = config.read(at, acs + ACS_CONTROL, 2) as u16;
+    config.write(at, acs + ACS_CONTROL, 2, u32::from(control | enabled));
+    Some(enabled)
 }
 
 /// The registers of the MSI and MSI-X capabilities of the function at
