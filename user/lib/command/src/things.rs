@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::interfaces::mikros::driver::{DevicesClient, VolumesClient};
 use mikros_rt::interfaces::mikros::packages::InstallerClient;
-use mikros_rt::interfaces::mikros::permissions::BrokerClient;
+use mikros_rt::interfaces::mikros::permissions::{AppNumbersClient, BrokerClient};
 use mikros_rt::interfaces::mikros::service::ServicesClient;
 use mikros_rt::interfaces::mikros::session::AccountsClient;
 
@@ -19,6 +19,7 @@ const SERVICES: &str = "mikros.service.Services";
 const ACCOUNTS: &str = "mikros.session.Accounts";
 const INSTALLER: &str = "mikros.packages.Installer";
 const BROKER: &str = "mikros.permissions.Broker";
+const APP_NUMBERS: &str = "mikros.permissions.AppNumbers";
 const VOLUMES: &str = "device.volumes";
 const DEVICES: &str = "mikros.driver.Devices";
 /// How long each page may take, so that completion stays within msh's
@@ -39,6 +40,14 @@ pub enum Thing {
 }
 
 impl Directory {
+    /// The app ID of the app number `number`, which access control
+    /// lists hold, when the broker knows it.
+    pub fn app_id(&self, number: u32) -> Option<String> {
+        let client = AppNumbersClient::new(self.connect(APP_NUMBERS).ok()?);
+        let deadline = now().saturating_add(PAGE_TIME);
+        client.app_id(number, deadline).ok()?.ok().map(|r| r.app_id)
+    }
+
     /// The names of every thing of kind `thing`.
     pub fn names(&self, thing: Thing) -> Vec<String> {
         let deadline = now().saturating_add(4 * PAGE_TIME);
