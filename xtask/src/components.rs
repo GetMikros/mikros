@@ -9,7 +9,10 @@
 //!   `service.yaml` there; a `driver` goes to
 //!   `system/drivers/system.driver.<name>/<name>` with its `driver.yaml`;
 //!   a `test`, a system test, which only test images hold, goes to
-//!   `system/bin/tests/<name>`.
+//!   `system/bin/tests/<name>`; a `utility`, a command that replaces one
+//!   of the uutils port, goes to `system/utilities/<name>` beside the
+//!   port, without its completion file, until the switch
+//!   (MIKSPEC-0098.R43).
 //! - `image`: `boot` for the boot image, which the system image holds
 //!   as well, `system` for the system image only, or `tests` for test
 //!   images only.
@@ -40,6 +43,7 @@ pub enum Role {
     Driver,
     Program,
     Test,
+    Utility,
 }
 
 /// The image that holds a component.
@@ -97,6 +101,7 @@ impl Component {
             (None, Role::Core) => format!("system/{name}"),
             (None, Role::Test) => format!("system/bin/tests/{name}"),
             (None, Role::Program) => format!("system/bin/{name}"),
+            (None, Role::Utility) => format!("system/utilities/{name}"),
         };
         let mut members = vec![(at, program.to_path_buf())];
         let manifest = match (self.role, &self.manifest) {
@@ -108,16 +113,22 @@ impl Component {
                 format!("{}/service.yaml", service_dir(name)),
                 self.manifest_source(kind, file),
             )),
-            (Role::Program, Some(file)) => Some((
+            (Role::Program | Role::Utility, Some(file)) => Some((
                 format!("system/programs/{file}"),
                 self.manifest_source(kind, file),
             )),
             (Role::Service, None) => bail!("the service {name} names no manifest"),
-            (Role::Core | Role::Program | Role::Test, None) => None,
+            (Role::Core | Role::Program | Role::Test | Role::Utility, None) => None,
             (Role::Core | Role::Test, Some(_)) => bail!("{name} cannot have a manifest"),
         };
         members.extend(manifest);
-        if let Some(file) = &self.completions {
+        // A utility's declarations would describe the port's command of
+        // the same name, which `PATH` finds until the switch.
+        if let Some(file) = self
+            .completions
+            .as_ref()
+            .filter(|_| self.role != Role::Utility)
+        {
             members.push((
                 format!("system/share/msh/completions/{name}.msh"),
                 self.dir.join(file),
@@ -264,6 +275,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             Some("driver") => Role::Driver,
             Some("program") => Role::Program,
             Some("test") => Role::Test,
+            Some("utility") => Role::Utility,
             Some(other) => bail!("{name}: unknown kind `{other}`"),
         };
         let image = match text("image")?.as_deref() {
@@ -329,9 +341,10 @@ mod tests {
             package("msh", serde_json::json!({"kind": "program", "image": "system"})),
             { "name": "mikros-yaml", "manifest_path": "/r/user/lib/yaml/Cargo.toml", "metadata": null },
             package("devices", serde_json::json!({"kind": "program", "image": "system", "completions": "devices.msh"})),
+            package("ls", serde_json::json!({"kind": "utility", "image": "system", "completions": "ls.msh"})),
         ]});
         let components = parse(&metadata).unwrap();
-        assert_eq!(components.len(), 5);
+        assert_eq!(components.len(), 6);
         let members = |i: usize| -> Vec<String> {
             components[i]
                 .members(Kind::Debug, Path::new("/bin"))
@@ -363,6 +376,8 @@ mod tests {
                 "system/share/msh/completions/devices.msh"
             ]
         );
+        // Beside the port, and without declarations, until the switch.
+        assert_eq!(members(5), ["system/utilities/ls"]);
         assert_eq!(components[3].runtime, Runtime::Std);
         assert_eq!(components[0].runtime, Runtime::Rt);
     }
