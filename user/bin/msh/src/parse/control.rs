@@ -350,17 +350,21 @@ impl Parser<'_> {
         self.param_type().map(Some)
     }
 
-    /// `name(…)` or `name sub(…)`, after `extern`: the items in the
-    /// parentheses, separated by commas, each with a description in
-    /// double quotes after it if it has one.
+    /// `name(…)`, or `name sub(…)` with any number of subcommands, after
+    /// `extern`: the items in the parentheses, separated by commas, each
+    /// with a description in double quotes after it if it has one, and
+    /// then perhaps the word `complete`.
     fn extern_(&mut self) -> Result<Extern> {
         let mut declared = Extern {
             command: self.name()?,
             ..Extern::default()
         };
         self.skip_spaces();
-        if self.peek() != Some('(') {
-            declared.subcommand = Some(self.name()?);
+        while self.peek() != Some('(') {
+            if self.peek().is_none() {
+                return Err(self.incomplete("`(` is missing"));
+            }
+            declared.subcommands.push(self.name()?);
             self.skip_spaces();
         }
         self.expect('(', "`(`")?;
@@ -370,12 +374,17 @@ impl Parser<'_> {
                 None => return Err(self.incomplete("`)` is missing")),
                 Some(')') => {
                     self.pos += 1;
+                    self.skip_spaces();
+                    if self.at_keyword("complete") {
+                        self.pos += "complete".len();
+                        declared.complete = true;
+                    }
                     return Ok(declared);
                 }
                 Some(',') => self.pos += 1,
                 _ if self.looking_at("--") => {
                     self.pos += 2;
-                    let name = self.name()?;
+                    let long = self.name()?;
                     let short = match self.peek() {
                         Some('(') => {
                             self.pos += 1;
@@ -388,8 +397,19 @@ impl Parser<'_> {
                     };
                     let kind = self.item_type()?;
                     declared.options.push(Declared {
-                        name,
+                        long: Some(long),
                         short,
+                        kind,
+                        description: self.description()?,
+                    });
+                }
+                Some('-') => {
+                    self.pos += 1;
+                    let short = self.name()?;
+                    let kind = self.item_type()?;
+                    declared.options.push(Declared {
+                        long: None,
+                        short: Some(short),
                         kind,
                         description: self.description()?,
                     });

@@ -5,8 +5,11 @@
 //! when it is not. Other words are arguments, mint green, and
 //! underlined when they name a file or folder that exists; one written
 //! as a path, from `/`, `~/`, `./` or `../`, that names nothing and that
-//! no entry of its folder starts as is crimson, as is the argument of
-//! `cd` that is no folder and that no folder starts as. Strings are
+//! no entry of its folder starts as is crimson, as is one in a declared
+//! `folder`, `file` or `path` position that is nothing of its kind and
+//! that no entry of its kind starts as, such as the argument of `cd`
+//! that is no folder. Colours never run anything: they take only the
+//! declarations and what msh lists itself. Strings are
 //! orange, variables teal, operators mint green, `|`, `;`, `&` and
 //! redirections green, comments dark grey, and a closing bracket that
 //! closes nothing crimson. Those are the defaults of `$msh_colors`, a
@@ -399,7 +402,7 @@ impl Reader<'_> {
             } else if matches!(style, Style::Command | Style::Error) {
                 self.commands.push(bare.clone());
                 self.arguments = Some(Arguments {
-                    declared: self.sources.declaration(&bare, None),
+                    declared: self.sources.declaration(&bare, &[]),
                     name: bare.clone(),
                     first: true,
                     position: 0,
@@ -489,7 +492,9 @@ impl Reader<'_> {
     fn argument_type(&mut self, word: &str) -> Option<ParamType> {
         let arguments = self.arguments.as_mut()?;
         if std::mem::take(&mut arguments.first)
-            && let Some(declared) = self.sources.declaration(&arguments.name, Some(word))
+            && let Some(declared) = self
+                .sources
+                .declaration(&arguments.name, &[word.to_owned()])
         {
             arguments.declared = Some(declared);
             return None;
@@ -598,7 +603,9 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Param;
+    use crate::ast::{Extern, Param};
+    use crate::eval::declarations::Declarations;
+    use std::rc::Rc;
 
     struct Fake;
 
@@ -626,24 +633,19 @@ mod tests {
         fn params(&self, _: &str) -> Option<Vec<Param>> {
             None
         }
-        fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
-            let declared = format!(
-                "{}\nextern pick(target: file, ...rest: path)\nextern git push(--repo: folder)",
-                crate::eval::builtins::DECLARATIONS
-            );
-            crate::parse::parse(&declared)
-                .unwrap()
-                .statements
-                .into_iter()
-                .find_map(|s| match s.kind {
-                    crate::ast::StatementKind::Extern(e)
-                        if e.command == name && e.subcommand.as_deref() == sub =>
-                    {
-                        Some(Rc::new(e))
-                    }
-                    _ => None,
-                })
+        fn declaration(&self, name: &str, path: &[String]) -> Option<Rc<Extern>> {
+            declarations().get(name, path)
         }
+        fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
+            declarations().subcommands(name, path)
+        }
+    }
+
+    fn declarations() -> Declarations {
+        Declarations::parse(&format!(
+            "{}\nextern pick(target: file, ...rest: path)\nextern git push(--repo: folder)",
+            crate::eval::builtins::DECLARATIONS
+        ))
     }
 
     /// One letter for each byte's style.
@@ -765,6 +767,10 @@ mod tests {
         assert_eq!(
             shown("extern git push(--force: bool)"),
             "cccccc.aaa.aaaa.aaaaaaaa.aaaa."
+        );
+        assert_eq!(
+            shown("extern git push(-f: bool) complete"),
+            "cccccc.aaa.aaaa.aaa.aaaa..aaaaaaaa"
         );
     }
 

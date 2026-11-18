@@ -270,17 +270,18 @@ fn reads_extern_declarations() {
         panic!()
     };
     assert_eq!(
-        (e.command.as_str(), e.subcommand.as_deref()),
-        ("git", Some("push"))
+        (e.command.as_str(), e.subcommands.as_slice()),
+        ("git", ["push".to_string()].as_slice())
     );
+    assert!(!e.complete);
     let remote = &e.positional[0];
     assert!(remote.optional && !remote.rest);
     assert_eq!(remote.description.as_deref(), Some("where to"));
     assert!(e.positional[1].rest);
     let force = &e.options[0];
     assert_eq!(
-        (force.name.as_str(), force.short.as_deref()),
-        ("force", Some("f"))
+        (force.long.as_deref(), force.short.as_deref()),
+        (Some("force"), Some("f"))
     );
     assert_eq!(
         (force.kind.clone(), force.description.as_deref()),
@@ -298,6 +299,87 @@ fn reads_extern_declarations() {
         "`:` and a type is expected here"
     );
     assert!(failure("extern ls(--all: bool").incomplete);
+}
+
+#[test]
+fn reads_nested_subcommands_short_options_and_complete() {
+    let StatementKind::Extern(e) =
+        one("extern git remote add(name: string, -f: bool \"fetch\", --tags(-t): bool) complete")
+    else {
+        panic!()
+    };
+    assert_eq!(e.subcommands, ["remote", "add"]);
+    assert!(e.complete);
+    let fetch = &e.options[0];
+    assert_eq!(
+        (fetch.long.as_deref(), fetch.short.as_deref()),
+        (None, Some("f"))
+    );
+    assert_eq!(fetch.description.as_deref(), Some("fetch"));
+    assert_eq!(e.option("-f"), Some(fetch));
+    assert!(e.option("--f").is_none());
+    assert_eq!(e.option("-t").and_then(|o| o.long.as_deref()), Some("tags"));
+    // A short option takes a value unless it is a `bool`.
+    let StatementKind::Extern(e) = one("extern logs(-n: int, -f: bool)") else {
+        panic!()
+    };
+    assert_eq!(e.option_value("-n"), Some(&ParamType::Int));
+    assert_eq!(e.option_value("-f"), None);
+    // Empty parentheses, `complete` alone, and deep subcommands.
+    let StatementKind::Extern(e) = one("extern tool a b c d() complete") else {
+        panic!()
+    };
+    assert_eq!(e.subcommands, ["a", "b", "c", "d"]);
+    assert!(e.complete && e.options.is_empty() && e.positional.is_empty());
+    // `complete` is a word of its own, and only one may follow.
+    assert!(
+        failure("extern ls() completely")
+            .message
+            .contains("statement ends here")
+    );
+    assert!(
+        failure("extern ls() complete x")
+            .message
+            .contains("statement ends here")
+    );
+    assert!(failure("extern git push").incomplete);
+}
+
+#[test]
+fn reads_the_forms_of_completion_files() {
+    // The forms that completion files in the tree use.
+    let block = crate::parse::parse(
+        "# What `accounts` takes.\n\
+         extern accounts(\n    \
+         call?: [add delete password kind full-name] \"how to change a user\",\n    \
+         ...rest: string \"the user's name, and what to set\",\n    \
+         --admin: bool \"with add: make an administrator\",\n    \
+         --full-name: string \"with add: the full name\"\n\
+         )\n\
+         extern sudo(\n    command: command \"the command to run\",\n    \
+         ...arguments: string,\n    --help: bool\n)\n\
+         extern tool(\n    --json: bool \"write JSON\",\n    \
+         --color: [auto always never] \"colour the output\"\n) complete\n\
+         extern tool stop(\n    name: string \"the service\",\n    \
+         --force(-f): bool \"do it anyway\"\n) complete\n\
+         extern tool list() complete\n\
+         extern list(\n    ...path: path \"what to list\",\n    -l: bool \"long lines\",\n    \
+         -n: int \"at most count\"\n) complete\n",
+    )
+    .unwrap();
+    let declared: Vec<Extern> = block
+        .statements
+        .into_iter()
+        .filter_map(|s| match s.kind {
+            StatementKind::Extern(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(declared.len(), 6);
+    assert!(!declared[0].complete && !declared[1].complete);
+    assert!(declared[2..].iter().all(|e| e.complete));
+    assert_eq!(declared[3].subcommands, ["stop"]);
+    assert_eq!(declared[5].options[1].short.as_deref(), Some("n"));
 }
 
 #[test]

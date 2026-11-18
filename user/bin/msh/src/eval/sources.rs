@@ -69,12 +69,12 @@ impl<S: System> Shell<S> {
 }
 
 impl<S: System> Sources for Shell<S> {
-    fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
-        Shell::declaration(self, name, sub)
+    fn declaration(&self, name: &str, path: &[String]) -> Option<Rc<Extern>> {
+        Shell::declaration(self, name, path)
     }
 
-    fn subcommands(&self, name: &str) -> Vec<String> {
-        Shell::subcommands(self, name)
+    fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
+        Shell::subcommands(self, name, path)
     }
 
     fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
@@ -150,12 +150,12 @@ impl<S: System> Sources for Shell<S> {
 pub struct WithoutWaiting<'a, S: System>(&'a Shell<S>);
 
 impl<S: System> Sources for WithoutWaiting<'_, S> {
-    fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
-        self.0.declaration(name, sub)
+    fn declaration(&self, name: &str, path: &[String]) -> Option<Rc<Extern>> {
+        self.0.declaration(name, path)
     }
 
-    fn subcommands(&self, name: &str) -> Vec<String> {
-        self.0.subcommands(name)
+    fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
+        self.0.subcommands(name, path)
     }
 
     fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {

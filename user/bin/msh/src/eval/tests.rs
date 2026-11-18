@@ -224,21 +224,26 @@ fn keeps_the_last_declaration_of_each_command() {
         "extern ls(--long: bool)\nextern ls(--all: bool)\nextern git push(--force: bool)",
     )
     .unwrap();
-    let ls = s.declaration("ls", None).unwrap();
-    assert_eq!(ls.options[0].name, "all");
-    assert!(s.declaration("git", None).is_none());
+    let ls = s.declaration("ls", &[]).unwrap();
+    assert_eq!(ls.options[0].long.as_deref(), Some("all"));
+    // A command declared only through a subcommand takes nothing itself.
+    let git = s.declaration("git", &[]).unwrap();
+    assert!(git.options.is_empty() && git.positional.is_empty());
+    assert!(s.declaration("tig", &[]).is_none());
     assert_eq!(
-        s.declaration("git", Some("push")).unwrap().options[0].name,
-        "force"
+        s.declaration("git", &["push".into()]).unwrap().options[0]
+            .long
+            .as_deref(),
+        Some("force")
     );
 }
 
 #[test]
 fn declares_built_ins_and_runs_declarations_files_once() {
     let mut s = shell();
-    let cd = s.declaration("cd", None).unwrap();
+    let cd = s.declaration("cd", &[]).unwrap();
     assert_eq!(cd.positional[0].kind, ParamType::Folder);
-    assert!(s.declaration("kill", None).is_some() && s.declaration("print", None).is_some());
+    assert!(s.declaration("kill", &[]).is_some() && s.declaration("print", &[]).is_some());
     s.system.files.insert(
         "/home/ada/.msh/completions/git.msh".into(),
         "extern git push(--force: bool)\nprint noise".into(),
@@ -255,9 +260,9 @@ fn declares_built_ins_and_runs_declarations_files_once() {
     s.load_declarations("tool");
     // The user's file is taken instead of the system's, and what it
     // writes is dropped.
-    assert!(s.declaration("git", Some("push")).is_some());
-    assert!(s.declaration("git", Some("pull")).is_none());
-    assert!(s.declaration("tool", None).is_some());
+    assert!(s.declaration("git", &["push".into()]).is_some());
+    assert!(s.declaration("git", &["pull".into()]).is_none());
+    assert!(s.declaration("tool", &[]).is_some());
     assert!(s.system.output.is_empty());
     // A file is run once.
     s.system.files.insert(
@@ -266,8 +271,10 @@ fn declares_built_ins_and_runs_declarations_files_once() {
     );
     s.load_declarations("git");
     assert_eq!(
-        s.declaration("git", Some("push")).unwrap().options[0].name,
-        "force"
+        s.declaration("git", &["push".into()]).unwrap().options[0]
+            .long
+            .as_deref(),
+        Some("force")
     );
     // The built-ins take the long options they declare.
     assert_eq!(run(&mut s, "print --n a; print -n b").unwrap(), "ab");
@@ -290,11 +297,11 @@ fn checks_and_declares_the_types_of_function_arguments() {
     );
     let mut s = shell();
     run(&mut s, &format!("{f}fn plain(a) {{ print $a }}")).unwrap();
-    let declared = s.declaration("inc", None).unwrap();
+    let declared = s.declaration("inc", &[]).unwrap();
     assert_eq!(declared.positional[0].kind, ParamType::Int);
     assert_eq!(declared.options[1].kind, ParamType::Bool);
     // A function without types declares nothing.
-    assert!(s.declaration("plain", None).is_none());
+    assert!(s.declaration("plain", &[]).is_none());
 }
 
 #[test]

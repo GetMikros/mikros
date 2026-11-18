@@ -61,7 +61,7 @@ pub enum StatementKind {
     /// `delete $name`, `delete env.NAME`, or with a path, as in
     /// `delete $env.PATH.1`.
     Delete(Variable),
-    /// `extern name(…)` or `extern name sub(…)`.
+    /// `extern name(…)`, or `extern name sub(…)` and deeper.
     Extern(Extern),
 }
 
@@ -70,9 +70,14 @@ pub enum StatementKind {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Extern {
     pub command: String,
-    pub subcommand: Option<String>,
+    /// The subcommands below the command, outermost first, whose
+    /// arguments these are; none for the command's own.
+    pub subcommands: Vec<String>,
     pub positional: Vec<Positional>,
     pub options: Vec<Declared>,
+    /// Written with `complete` after the parentheses: the program
+    /// gives the candidates for its arguments itself.
+    pub complete: bool,
 }
 
 impl Extern {
@@ -81,8 +86,8 @@ impl Extern {
     pub fn option(&self, word: &str) -> Option<&Declared> {
         let word = word.split('=').next().unwrap_or(word);
         self.options.iter().find(|o| match word.strip_prefix("--") {
-            Some(name) => o.name == name,
-            None => o.short.as_deref() == word.strip_prefix('-'),
+            Some(name) => o.long.as_deref() == Some(name),
+            None => o.short.is_some() && o.short.as_deref() == word.strip_prefix('-'),
         })
     }
 
@@ -116,14 +121,24 @@ pub struct Positional {
     pub description: Option<String>,
 }
 
-/// An option that `extern` declares: `--name`, and `-x` when `short`.
+/// An option that `extern` declares: `--long`, `-short`, or both, as
+/// `--long(-short)`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Declared {
-    pub name: String,
+    pub long: Option<String>,
     pub short: Option<String>,
     /// `bool` for an option that takes no value.
     pub kind: ParamType,
     pub description: Option<String>,
+}
+
+impl Declared {
+    /// The forms the option is typed in: `--long`, then `-short`.
+    pub fn forms(&self) -> Vec<String> {
+        let long = self.long.iter().map(|l| format!("--{l}"));
+        long.chain(self.short.iter().map(|s| format!("-{s}")))
+            .collect()
+    }
 }
 
 /// How an assignment changes its target.
@@ -382,7 +397,7 @@ impl Function {
         let kind = |key: &str| self.type_of(key).cloned().unwrap_or(ParamType::Any);
         Some(Extern {
             command: self.name.clone(),
-            subcommand: None,
+            subcommands: Vec::new(),
             positional: self
                 .arguments
                 .iter()
@@ -398,7 +413,7 @@ impl Function {
                 .flags
                 .iter()
                 .map(|(n, _)| Declared {
-                    name: n.clone(),
+                    long: Some(n.clone()),
                     short: None,
                     kind: match self.bool_flag(n) {
                         true => ParamType::Bool,
@@ -407,6 +422,7 @@ impl Function {
                     description: None,
                 })
                 .collect(),
+            complete: false,
         })
     }
 }

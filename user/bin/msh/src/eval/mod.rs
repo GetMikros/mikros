@@ -3,6 +3,7 @@
 
 pub mod builtins;
 pub mod command;
+pub mod declarations;
 pub mod glob;
 pub mod listings;
 pub mod params;
@@ -88,9 +89,9 @@ pub struct Shell<S: System> {
     pub history: Vec<crate::edit::history::Entry>,
     /// The folder listings kept for completion and suggestions.
     listings: listings::Listings,
-    /// What commands take, as `extern` declared it last, by the name of
-    /// the command and that of its subcommand.
-    declarations: BTreeMap<(String, Option<String>), Rc<Extern>>,
+    /// What commands and their subcommands take, as `extern` declared
+    /// it last.
+    declarations: declarations::Declarations,
     /// The commands whose declarations files were looked for.
     looked_up: std::collections::HashSet<String>,
 }
@@ -128,18 +129,11 @@ impl<S: System> Shell<S> {
             inherited: Vec::new(),
             history: Vec::new(),
             listings: listings::Listings::default(),
-            declarations: BTreeMap::new(),
+            declarations: declarations::Declarations::parse(builtins::DECLARATIONS),
             looked_up: Default::default(),
         };
         shell.set_global("status", Value::Int(0));
         shell.set_global("args", Value::List(Vec::new()));
-        let declared =
-            crate::parse::parse(builtins::DECLARATIONS).expect("the built-ins' declarations");
-        for statement in declared.statements {
-            if let StatementKind::Extern(e) = statement.kind {
-                shell.declare(e);
-            }
-        }
         shell
     }
 
@@ -174,13 +168,6 @@ impl<S: System> Shell<S> {
         }
     }
 
-    /// Keeps `declared`, in place of what was declared before for its
-    /// command or subcommand.
-    fn declare(&mut self, declared: Extern) {
-        let key = (declared.command.clone(), declared.subcommand.clone());
-        self.declarations.insert(key, Rc::new(declared));
-    }
-
     /// Runs the declarations file of the command `name`, the first time
     /// it is asked for: `~/.msh/completions/<name>.msh`, or else
     /// `/system/share/msh/completions/<name>.msh`. As it runs while a line
@@ -210,25 +197,22 @@ impl<S: System> Shell<S> {
         (self.line, self.command) = (line, command);
     }
 
-    /// What the command `name`, or its subcommand `sub`, takes, as
-    /// `extern` declared it last.
-    pub fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
-        let key = (name.to_owned(), sub.map(str::to_owned));
-        if let Some(declared) = self.declarations.get(&key) {
-            return Some(declared.clone());
+    /// What the command `name`, or the subcommands `path` below it,
+    /// takes, as `extern` declared it last, with the options declared
+    /// above it.
+    pub fn declaration(&self, name: &str, path: &[String]) -> Option<Rc<Extern>> {
+        if let Some(declared) = self.declarations.get(name, path) {
+            return Some(declared);
         }
         // A function with types is declared by them.
-        let f = self.functions.get(name).filter(|_| sub.is_none())?;
+        let f = self.functions.get(name).filter(|_| path.is_empty())?;
         f.declaration().map(Rc::new)
     }
 
-    /// The subcommands declared for the command `name`.
-    pub fn subcommands(&self, name: &str) -> Vec<String> {
-        self.declarations
-            .keys()
-            .filter(|(command, _)| command == name)
-            .filter_map(|(_, sub)| sub.clone())
-            .collect()
+    /// The subcommands declared right below the subcommands `path` of the
+    /// command `name`.
+    pub fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
+        self.declarations.subcommands(name, path)
     }
 
     /// The value of the variable `name`, when it is set.
@@ -630,7 +614,7 @@ impl<S: System> Shell<S> {
                 Ok(Value::Null)
             }
             StatementKind::Extern(declared) => {
-                self.declare(declared.clone());
+                self.declarations.declare(declared.clone());
                 Ok(Value::Null)
             }
             StatementKind::Delete(target) => {

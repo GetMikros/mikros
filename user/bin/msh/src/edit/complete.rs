@@ -4,11 +4,13 @@
 //! function, a built-in command or a program of `$env.PATH`, or a file
 //! when it holds a `/`. A word that starts with `$` is a variable, and
 //! one that starts with `-` an option that the command declares: a
-//! function's flags, a script's `param` options, or a built-in
-//! command's own. The value of a script's `path` option, and any other
-//! word, is a file. A file or command name that would not stay one word
-//! is put on the line quoted, and a word that starts with a quote is
-//! completed inside it, which is closed once the name is complete.
+//! function's flags, a script's `param` options, a built-in command's
+//! own, or those that `extern` declares for the command and the
+//! subcommands its words name. Other words take what their declared
+//! type gives, and files where nothing is declared. A file or command
+//! name that would not stay one word is put on the line quoted, and a
+//! word that starts with a quote is completed inside it, which is closed
+//! once the name is complete.
 
 use crate::ast::{Extern, Param, ParamType};
 use std::rc::Rc;
@@ -52,13 +54,14 @@ pub trait Sources {
     fn current_folder(&self) -> Option<String> {
         None
     }
-    /// What the command `name`, or its subcommand `sub`, takes, as it
-    /// was declared.
-    fn declaration(&self, _name: &str, _sub: Option<&str>) -> Option<Rc<Extern>> {
+    /// What the command `name`, or the subcommands `path` below it,
+    /// takes, as it was declared, with the options declared above it.
+    fn declaration(&self, _name: &str, _path: &[String]) -> Option<Rc<Extern>> {
         None
     }
-    /// The subcommands declared for the command `name`.
-    fn subcommands(&self, _name: &str) -> Vec<String> {
+    /// The subcommands declared right below the subcommands `path` of
+    /// the command `name`.
+    fn subcommands(&self, _name: &str, _path: &[String]) -> Vec<String> {
         Vec::new()
     }
 }
@@ -281,7 +284,7 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
     } else {
         let command = &words[first..index];
         let subcommands = match index == first + 1 {
-            true => sources.subcommands(&command[0].1),
+            true => sources.subcommands(&command[0].1, &[]),
             false => Vec::new(),
         };
         let kind = match declared(command, sources) {
@@ -312,11 +315,11 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
 fn declared(command: &[(usize, String)], sources: &dyn Sources) -> Option<(Rc<Extern>, usize)> {
     let name = &command.first()?.1;
     if let Some((_, sub)) = command.get(1)
-        && let Some(declared) = sources.declaration(name, Some(sub))
+        && let Some(declared) = sources.declaration(name, std::slice::from_ref(sub))
     {
         return Some((declared, 2));
     }
-    sources.declaration(name, None).map(|d| (d, 1))
+    sources.declaration(name, &[]).map(|d| (d, 1))
 }
 
 /// The options of `declared` that start as `word` does, long and short,
@@ -324,9 +327,7 @@ fn declared(command: &[(usize, String)], sources: &dyn Sources) -> Option<(Rc<Ex
 fn declared_options(word: &str, declared: &Extern) -> Vec<Candidate> {
     let mut found = Vec::new();
     for option in &declared.options {
-        let forms = std::iter::once(format!("--{}", option.name))
-            .chain(option.short.iter().map(|s| format!("-{s}")));
-        for text in forms.filter(|t| t.starts_with(word)) {
+        for text in option.forms().into_iter().filter(|t| t.starts_with(word)) {
             found.push(candidate(
                 text.clone(),
                 text,
@@ -593,6 +594,7 @@ fn option_type(command: &[(usize, String)], sources: &dyn Sources) -> Option<Par
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval::declarations::Declarations;
     use crate::parse::parse;
 
     struct Fake;
@@ -605,31 +607,12 @@ extern print(--n(-n): bool, ...values: any)
 extern pick(choice: [red green], target: file, run: command)
 "#;
 
-    fn declared() -> Vec<Extern> {
-        parse(DECLARED)
-            .unwrap()
-            .statements
-            .into_iter()
-            .filter_map(|s| match s.kind {
-                crate::ast::StatementKind::Extern(e) => Some(e),
-                _ => None,
-            })
-            .collect()
-    }
-
     impl Sources for Fake {
-        fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
-            declared()
-                .into_iter()
-                .find(|e| e.command == name && e.subcommand.as_deref() == sub)
-                .map(Rc::new)
+        fn declaration(&self, name: &str, path: &[String]) -> Option<Rc<Extern>> {
+            Declarations::parse(DECLARED).get(name, path)
         }
-        fn subcommands(&self, name: &str) -> Vec<String> {
-            declared()
-                .into_iter()
-                .filter(|e| e.command == name)
-                .filter_map(|e| e.subcommand)
-                .collect()
+        fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
+            Declarations::parse(DECLARED).subcommands(name, path)
         }
         fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
             let entries: &[(&str, bool)] = match folder {
