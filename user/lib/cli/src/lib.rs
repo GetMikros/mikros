@@ -7,13 +7,16 @@
 extern crate alloc;
 
 pub mod colour;
+pub mod complete;
 pub mod size;
 pub mod spec;
+mod start;
 pub mod time;
 mod usage;
 
 pub use colour::{Paint, Role};
 pub use spec::{Kind, Operand, Opt, Parsed, Run, Spec};
+pub use start::{complain, start};
 
 use alloc::format;
 use alloc::string::String;
