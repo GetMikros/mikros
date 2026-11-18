@@ -1,0 +1,30 @@
+# What `pkg` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern pkg(
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
+extern pkg install(
+    ...file: file "the package files",
+    --dependency: bool "mark the packages as installed only for others",
+    --dev: bool "keep the headers of libraries, for building against them"
+) complete
+extern pkg add(
+    id: app "the ID of the installed package",
+    component-id: string "the ID of the component"
+) complete
+extern pkg remove(
+    id: app "the ID of the installed package",
+    --keep-data: bool "keep the users' data of a removed app"
+) complete
+extern pkg list(
+    --json: bool "write the list as a JSON array of objects"
+) complete
+extern pkg info(
+    package: file "a package file, or the ID of an installed package"
+) complete
+extern pkg pack(
+    folder: folder "the folder to pack",
+    -o: file "write the package to this file",
+    --sysroot: folder "find needed libraries in this sysroot, on the build machine"
+) complete

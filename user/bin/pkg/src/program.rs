@@ -5,7 +5,7 @@
 use crate::order::order;
 use crate::request::{self, COMMAND, Request};
 use crate::show::{self, Row};
-use mikros_cli::{FAILURE, INVALID, SUCCESS};
+use mikros_cli::{FAILURE, INVALID, Paint, Run, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_mika::manifest::Manifest;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
@@ -23,8 +23,8 @@ const FOREVER: i64 = i64::MAX;
 const COMMANDS: &str = "/system/commands";
 const LIBRARIES: &str = "/libraries";
 
-fn fail(code: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
+fn fail(run: &Run, code: u8, message: &str) -> ExitCode {
+    complain(&COMMAND, run, message);
     ExitCode::from(code)
 }
 
@@ -123,6 +123,7 @@ fn install(
     files: &[String],
     dependency: bool,
     dev: bool,
+    paint: Paint,
 ) -> Result<(), String> {
     let mut packages = Vec::new();
     for file in files {
@@ -156,10 +157,10 @@ fn install(
                 .unwrap_or_default();
             print!(
                 "{}",
-                show::update_warnings(&manifest.id, &old.version, &version)
+                show::update_warnings(&manifest.id, &old.version, &version, paint)
             );
         }
-        print!("{}", show::describe(manifest));
+        print!("{}", show::describe(manifest, paint));
         if let Some(driver) = driver_of(file, manifest) {
             print!("{}", show::describe_driver(&driver));
         }
@@ -173,7 +174,7 @@ fn install(
             let path = &component.path;
             println!("component {path} of {}", manifest.id);
             if let Some(m) = component_of(file, path) {
-                print!("{}", show::describe(&m));
+                print!("{}", show::describe(&m, paint));
             }
             if !component.optional {
                 println!("installed with it");
@@ -214,28 +215,27 @@ fn install(
 }
 
 pub fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let request = request::read(arguments);
-    match &request {
-        Request::Help => {
-            print!("{}", COMMAND.help());
-            return ExitCode::from(SUCCESS);
-        }
-        Request::Invalid(reason) => return fail(INVALID, reason),
-        // On Mikros, the needed libraries' versions are those installed
-        // for every user or for this one (MIKSPEC-0101.R29).
-        Request::Pack {
-            folder,
-            out,
-            sysroot,
-        } => {
-            let libraries = match sysroot {
-                Some(sysroot) => Path::new(sysroot).join("libraries"),
-                None => Path::new(LIBRARIES).to_path_buf(),
-            };
-            return ExitCode::from(crate::pack::run(folder, out.as_deref(), &libraries));
-        }
-        _ => {}
+    let run = start(&COMMAND, &mikros_command::list);
+    let fail = |code: u8, message: &str| fail(&run, code, message);
+    let paint = Paint::stdout(&run);
+    let request = match request::read(&run) {
+        Ok(request) => request,
+        Err(reason) => return fail(INVALID, &reason),
+    };
+    // On Mikros, the needed libraries' versions are those installed for
+    // every user or for this one (MIKSPEC-0101.R29).
+    if let Request::Pack {
+        folder,
+        out,
+        sysroot,
+    } = &request
+    {
+        let libraries = match sysroot {
+            Some(sysroot) => Path::new(sysroot).join("libraries"),
+            None => Path::new(LIBRARIES).to_path_buf(),
+        };
+        let code = crate::pack::run(folder, out.as_deref(), &libraries, Paint::stderr(&run));
+        return ExitCode::from(code);
     }
     let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
         return fail(FAILURE, "cannot reach the service directory");
@@ -249,7 +249,7 @@ pub fn main() -> ExitCode {
             files,
             dependency,
             dev,
-        } => install(&installer, &files, dependency, dev),
+        } => install(&installer, &files, dependency, dev, paint),
         Request::Add { id, component } => status(
             &component,
             installer
@@ -281,11 +281,11 @@ pub fn main() -> ExitCode {
                 .collect();
             match json {
                 true => print!("{}", show::json(&rows)),
-                false => print!("{}", show::table(&rows)),
+                false => print!("{}", show::table(&rows, paint)),
             }
         }),
-        Request::Info(target) => info(&installer, &target),
-        _ => Ok(()),
+        Request::Info(target) => info(&installer, &target, paint),
+        Request::Pack { .. } => Ok(()),
     };
     match done {
         Ok(()) => ExitCode::from(SUCCESS),
@@ -295,7 +295,7 @@ pub fn main() -> ExitCode {
 
 /// Shows the package in the file `target`, or the installed package of
 /// that ID.
-fn info(installer: &InstallerClient, target: &str) -> Result<(), String> {
+fn info(installer: &InstallerClient, target: &str, paint: Paint) -> Result<(), String> {
     if Path::new(target).is_file() {
         let manifest = match installer.inspect(connection(target)?, FOREVER) {
             Ok(Ok(r)) => r.manifest,
@@ -304,7 +304,7 @@ fn info(installer: &InstallerClient, target: &str) -> Result<(), String> {
         };
         let manifest =
             Manifest::parse(&manifest).map_err(|e| format!("{target}: {} {}", e.key, e.why))?;
-        print!("{}", show::describe(&manifest));
+        print!("{}", show::describe(&manifest, paint));
         return Ok(());
     }
     let all = installed(installer)?;

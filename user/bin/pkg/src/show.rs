@@ -1,7 +1,7 @@
 //! What pkg writes: the list of installed packages in aligned columns or
 //! as JSON, and what a package is and installs.
 
-use mikros_cli::json_string;
+use mikros_cli::{Paint, Role, json_string};
 use mikros_mika::manifest::{Kind, Manifest};
 
 /// An installed package, as `List` gives it.
@@ -17,34 +17,67 @@ fn place(global: bool) -> &'static str {
     if global { "global" } else { "local" }
 }
 
-/// The list: a header `ID  VERSION  KIND  WHERE` and one line per
-/// package, the columns as wide as their widest cell.
-pub fn table(rows: &[Row]) -> String {
-    let cells: Vec<[&str; 4]> = std::iter::once(["ID", "VERSION", "KIND", "WHERE"])
-        .chain(
-            rows.iter()
-                .map(|r| [r.id.as_str(), &r.version, &r.kind, place(r.global)]),
-        )
+/// The list: a header `ID  VERSION  KIND  WHERE` in the secondary
+/// colour and one line per package, the columns as wide as their widest
+/// cell.
+pub fn table(rows: &[Row], paint: Paint) -> String {
+    let rows: Vec<Vec<Cell>> = rows
+        .iter()
+        .map(|r| {
+            vec![
+                (r.id.clone(), None),
+                (r.version.clone(), None),
+                (r.kind.clone(), None),
+                (place(r.global).into(), None),
+            ]
+        })
         .collect();
-    let mut widths = [0usize; 4];
-    for row in &cells {
-        for (w, cell) in widths.iter_mut().zip(row) {
-            *w = (*w).max(cell.len());
-        }
-    }
+    columns(
+        &["ID", "VERSION", "KIND", "WHERE"],
+        &rows,
+        &[false; 4],
+        paint,
+    )
+}
+
+/// A cell of a table: its text, and the role it is coloured in.
+type Cell = (String, Option<Role>);
+
+/// The header and `rows` in columns two spaces apart, the header in the
+/// secondary colour, each column as wide as its widest text without
+/// colours, aligned to the right where `right` says, the last one not
+/// padded.
+fn columns(header: &[&str], rows: &[Vec<Cell>], right: &[bool], paint: Paint) -> String {
+    let header: Vec<Cell> = header
+        .iter()
+        .map(|h| (h.to_string(), Some(Role::Secondary)))
+        .collect();
+    let all: Vec<&Vec<Cell>> = std::iter::once(&header).chain(rows).collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|c| {
+            all.iter()
+                .map(|r| r[c].0.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
     let mut text = String::new();
-    for row in &cells {
-        let line = format!(
-            "{:w0$}  {:w1$}  {:w2$}  {}",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2]
-        );
-        text.push_str(line.trim_end());
+    for row in all {
+        for (c, (cell, role)) in row.iter().enumerate() {
+            let pad = " ".repeat(widths[c] - cell.chars().count());
+            let shown = match role {
+                Some(role) => paint.paint(*role, cell),
+                None => cell.clone(),
+            };
+            if c > 0 {
+                text.push_str("  ");
+            }
+            match (right[c], c + 1 == row.len()) {
+                (true, _) => text.push_str(&(pad + &shown)),
+                (false, true) => text.push_str(&shown),
+                (false, false) => text.push_str(&(shown + &pad)),
+            }
+        }
         text.push('\n');
     }
     text
@@ -77,8 +110,9 @@ pub fn kind_name(kind: Option<Kind>) -> &'static str {
 
 /// A package's name, ID, version, description and kind, where it is
 /// installed, and what it installs: its program, commands, services, which run only when it is
-/// installed for every user, components and driver.
-pub fn describe(m: &Manifest) -> String {
+/// installed for every user, components and driver; the description
+/// coloured as free text.
+pub fn describe(m: &Manifest, paint: Paint) -> String {
     let mut text = String::new();
     let name = m.name.as_deref().unwrap_or(&m.id);
     let version = m
@@ -88,7 +122,7 @@ pub fn describe(m: &Manifest) -> String {
         .unwrap_or_default();
     text.push_str(&format!("{name} ({}) {version}\n", m.id));
     if let Some(description) = &m.description {
-        text.push_str(&format!("  {description}\n"));
+        text.push_str(&format!("  {}\n", paint.paint(Role::String, description)));
     }
     text.push_str(&format!("  kind: {}\n", kind_name(m.kind)));
     // Where it goes, which its manifest alone names (MIKSPEC-0101.R57).
@@ -152,10 +186,12 @@ pub fn describe_driver(driver: &mikros_manifest::Driver) -> String {
 }
 
 /// The warnings that installing `version` over the installed `installed`
-/// of `id` gives (MIKSPEC-0101.R23).
-pub fn update_warnings(id: &str, installed: &str, version: &str) -> String {
+/// of `id` gives (MIKSPEC-0101.R23), each after `warning:` in the
+/// warning colour.
+pub fn update_warnings(id: &str, installed: &str, version: &str, paint: Paint) -> String {
+    let warning = paint.paint(Role::Warning, "warning:");
     let mut text = format!(
-        "warning: {id} {installed} is installed; this file cannot be checked to come from the same developer\n"
+        "{warning} {id} {installed} is installed; this file cannot be checked to come from the same developer\n"
     );
     let older = match (
         mikros_mika::version::Version::parse(version),
@@ -166,7 +202,7 @@ pub fn update_warnings(id: &str, installed: &str, version: &str) -> String {
     };
     if older {
         text.push_str(&format!(
-            "warning: {version} is older than the installed {installed}\n"
+            "{warning} {version} is older than the installed {installed}\n"
         ));
     }
     text
@@ -192,7 +228,7 @@ mod tests {
             row("org.x.lib", "10.0.0", "library", false),
         ];
         assert_eq!(
-            table(&rows),
+            table(&rows, Paint::never()),
             "ID                  VERSION  KIND     WHERE\n\
              org.example.editor  1.2.0    app      global\n\
              org.x.lib           10.0.0   library  local\n"
@@ -201,7 +237,13 @@ mod tests {
             json(&rows[..1]),
             "[{\"id\":\"org.example.editor\",\"version\":\"1.2.0\",\"kind\":\"app\",\"where\":\"global\"}]\n"
         );
-        assert_eq!(table(&[]), "ID  VERSION  KIND  WHERE\n");
+        assert_eq!(table(&[], Paint::never()), "ID  VERSION  KIND  WHERE\n");
+        let on = Paint::new(Some("always"), false, None);
+        assert_eq!(
+            table(&rows, on).lines().nth(2),
+            Some("org.x.lib           10.0.0   library  local")
+        );
+        assert!(table(&rows, on).starts_with("\x1b[90mID\x1b[0m                  \x1b[90mVERSION"));
     }
 
     #[test]
@@ -211,23 +253,28 @@ mod tests {
               description: Edits.\nexecutable: bin/editor\nservices:\n  index: s.yaml\n",
         )
         .unwrap();
-        let text = describe(&m);
+        let text = describe(&m, Paint::never());
         assert!(text.starts_with(
             "Editor (org.example.editor) 1.0.0\n  Edits.\n  kind: app\n  \
              installed: globally, for every user\n"
         ));
         let mut local = m.clone();
         local.global = false;
-        assert!(describe(&local).contains("\n  installed: locally, for this user\n"));
+        assert!(
+            describe(&local, Paint::never()).contains("\n  installed: locally, for this user\n")
+        );
         assert!(text.contains(
             "service: org.example.editor.index, which runs when installed for every user"
         ));
-        let same = update_warnings("org.x.y", "1.0.0", "1.0.0");
+        let same = update_warnings("org.x.y", "1.0.0", "1.0.0", Paint::never());
         assert_eq!(same.lines().count(), 1);
         assert!(same.starts_with(
             "warning: org.x.y 1.0.0 is installed; this file cannot be checked to come from the same developer"
         ));
-        let older = update_warnings("org.x.y", "2.0.0", "1.9.0");
+        let on = Paint::new(Some("always"), false, None);
+        assert!(describe(&m, on).contains("\n  \x1b[38;2;255;134;26mEdits.\x1b[0m\n"));
+        assert!(update_warnings("a", "1", "1", on).starts_with("\x1b[33mwarning:\x1b[0m a 1 "));
+        let older = update_warnings("org.x.y", "2.0.0", "1.9.0", Paint::never());
         assert!(older.ends_with("warning: 1.9.0 is older than the installed 2.0.0\n"));
     }
 

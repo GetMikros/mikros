@@ -23,25 +23,25 @@ fn main() -> std::process::ExitCode {
 /// versions taken from the toolchain's sysroot (MIKSPEC-0101.R52).
 #[cfg(not(target_os = "mikros"))]
 fn main() -> std::process::ExitCode {
-    use request::Request;
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let code = match request::read(arguments) {
-        Request::Pack {
+    use mikros_cli::{Paint, complain, start};
+    use request::{COMMAND, Request};
+    let run = start(&COMMAND, &|_, _| Vec::new());
+    let invalid = |message: &str| {
+        complain(&COMMAND, &run, message);
+        mikros_cli::INVALID
+    };
+    let code = match request::read(&run) {
+        Ok(Request::Pack {
             folder,
             out,
             sysroot: Some(sysroot),
-        } => {
+        }) => {
             let libraries = std::path::Path::new(&sysroot).join("libraries");
-            pack::run(&folder, out.as_deref(), &libraries)
+            pack::run(&folder, out.as_deref(), &libraries, Paint::stderr(&run))
         }
-        Request::Pack { .. } => {
-            eprintln!("pkg: pack needs --sysroot on the build machine");
-            mikros_cli::INVALID
-        }
-        _ => {
-            eprintln!("pkg: only pack runs on the build machine");
-            mikros_cli::INVALID
-        }
+        Ok(Request::Pack { .. }) => invalid("pack needs --sysroot on the build machine"),
+        Ok(_) => invalid("only pack runs on the build machine"),
+        Err(reason) => invalid(&reason),
     };
     std::process::ExitCode::from(code)
 }

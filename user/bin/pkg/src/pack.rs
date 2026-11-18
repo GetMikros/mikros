@@ -4,6 +4,7 @@
 //! (MIKSPEC-0101.R52), and the library packages that its programs and
 //! libraries need added to its `needs` (MIKSPEC-0101.R29).
 
+use mikros_cli::{Paint, Role};
 use mikros_mika::elf;
 use mikros_mika::format::{Builder, MANIFEST, checksum_text};
 use mikros_mika::manifest::Manifest;
@@ -245,13 +246,15 @@ pub fn version_in(libraries: &Path, id: &str) -> Option<String> {
 
 /// Packs `folder` into `out`, or `<id>-<version>.mika`, taking the
 /// versions of needed library packages from the folder `libraries`, and
-/// prints the file's name and the warnings; the exit code.
-pub fn run(folder: &str, out: Option<&str>, libraries: &Path) -> u8 {
+/// prints the file's name and the warnings, these and errors to standard
+/// error coloured by `paint`; the exit code.
+pub fn run(folder: &str, out: Option<&str>, libraries: &Path, paint: Paint) -> u8 {
+    let complain = |message: &str| eprintln!("pkg: {}", paint.paint(Role::Error, message));
     let versions = |id: &str| version_in(libraries, id);
     let (bytes, manifest, warnings) = match pack(Path::new(folder), &versions) {
         Ok(packed) => packed,
         Err(why) => {
-            eprintln!("pkg: {why}");
+            complain(&why);
             return mikros_cli::FAILURE;
         }
     };
@@ -263,7 +266,7 @@ pub fn run(folder: &str, out: Option<&str>, libraries: &Path) -> u8 {
         .map(String::from)
         .unwrap_or(format!("{}-{version}.mika", manifest.id));
     if let Err(e) = fs::write(&out, bytes) {
-        eprintln!("pkg: {out}: {e}");
+        complain(&format!("{out}: {e}"));
         return mikros_cli::FAILURE;
     }
     println!("{out}");

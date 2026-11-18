@@ -20,6 +20,7 @@ mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 kind = "program"
 image = "system"
 manifest = "system.pkg.yaml"
+completions = "pkg.msh"
 
 # The parts that only run on Mikros are left out of the host's tests.
 [lints.rust]

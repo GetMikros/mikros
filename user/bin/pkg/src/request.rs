@@ -1,32 +1,79 @@
-//! What pkg is asked to do (MIKSPEC-0101.R73).
+//! What pkg takes, and what it is asked to do (MIKSPEC-0101.R73).
 
-use mikros_cli::{Arguments, Command, value};
+use mikros_cli::{Kind, Operand, Opt, Run, Spec};
 
-pub const COMMAND: Command = Command {
-    name: "pkg",
-    operands: "install <file>...|add <id> <component-id>|remove <id>|list|info <file|id>|pack <folder>",
-    most: usize::MAX,
-    about: "Installs, removes, lists, shows and makes .mika packages.",
-    options: &[
-        (
-            "--dependency",
-            "mark the packages as installed only for others",
-        ),
-        (
-            "--dev",
-            "keep the headers of libraries, for building against them",
-        ),
-        ("--keep-data", "keep the users' data of a removed app"),
-        ("--json", "write the list as a JSON array of objects"),
+/// An installed package's ID.
+const ID: Operand = Operand::one("id", Kind::App, "the ID of the installed package");
+
+pub static COMMAND: Spec = Spec {
+    subcommands: &[
+        Spec {
+            operands: &[Operand::some("file", Kind::File, "the package files")],
+            options: &[
+                Opt::long(
+                    "dependency",
+                    "mark the packages as installed only for others",
+                ),
+                Opt::long(
+                    "dev",
+                    "keep the headers of libraries, for building against them",
+                ),
+            ],
+            ..Spec::new(
+                "install",
+                "Installs packages, each after those it needs, asking first.",
+            )
+        },
+        Spec {
+            operands: &[
+                ID,
+                Operand::one("component-id", Kind::Text, "the ID of the component"),
+            ],
+            ..Spec::new(
+                "add",
+                "Installs an optional component of an installed package that was left out.",
+            )
+        },
+        Spec {
+            operands: &[ID],
+            options: &[Opt::long(
+                "keep-data",
+                "keep the users' data of a removed app",
+            )],
+            ..Spec::new("remove", "Removes an installed package.")
+        },
+        Spec {
+            options: &[Opt::long(
+                "json",
+                "write the list as a JSON array of objects",
+            )],
+            ..Spec::new("list", "Lists the installed packages.")
+        },
+        Spec {
+            operands: &[Operand::one(
+                "package",
+                Kind::File,
+                "a package file, or the ID of an installed package",
+            )],
+            ..Spec::new("info", "Shows what a package is and what it installs.")
+        },
+        Spec {
+            operands: &[Operand::one("folder", Kind::Folder, "the folder to pack")],
+            options: &[
+                Opt::short('o', "write the package to this file").takes("file", Kind::File),
+                Opt::long(
+                    "sysroot",
+                    "find needed libraries in this sysroot, on the build machine",
+                )
+                .takes("path", Kind::Folder),
+            ],
+            ..Spec::new("pack", "Makes a package from a folder.")
+        },
     ],
-    values: &[
-        ("-o", "file", "write the package to this file"),
-        (
-            "--sysroot",
-            "path",
-            "find needed libraries in this sysroot, on the build machine",
-        ),
-    ],
+    ..Spec::new(
+        "pkg",
+        "Installs, removes, lists, shows and makes .mika packages.",
+    )
 };
 
 #[derive(Debug, PartialEq)]
@@ -54,147 +101,103 @@ pub enum Request {
         out: Option<String>,
         sysroot: Option<String>,
     },
-    Help,
-    Invalid(String),
 }
 
-pub fn read(arguments: Vec<String>) -> Request {
-    let (options, values, mut operands) = match COMMAND.parse(arguments) {
-        Arguments::Run {
-            options,
-            values,
-            operands,
-        } => (options, values, operands),
-        Arguments::Help => return Request::Help,
-        Arguments::Invalid(reason) => return Request::Invalid(reason),
-    };
-    if operands.is_empty() {
-        return Request::Invalid("a subcommand is missing".into());
-    }
-    let subcommand = operands.remove(0);
-    // The options that each subcommand takes.
-    let allowed: &[&str] = match subcommand.as_str() {
-        "install" => &["--dependency", "--dev"],
-        "add" => &[],
-        "remove" => &["--keep-data"],
-        "list" => &["--json"],
-        "info" | "pack" => &[],
-        other => return Request::Invalid(format!("unknown subcommand {other}")),
-    };
-    if let Some(option) = options.iter().find(|o| !allowed.contains(o)) {
-        return Request::Invalid(format!("{option} does not go with {subcommand}"));
-    }
-    let out = value(&values, "-o").map(String::from);
-    if out.is_some() && subcommand != "pack" {
-        return Request::Invalid(format!("-o does not go with {subcommand}"));
-    }
-    let sysroot = value(&values, "--sysroot").map(String::from);
-    if sysroot.is_some() && subcommand != "pack" {
-        return Request::Invalid(format!("--sysroot does not go with {subcommand}"));
-    }
-    let one = |what: &str| match operands.len() {
-        1 => Ok(operands[0].clone()),
-        0 => Err(Request::Invalid(format!("{subcommand} needs {what}"))),
-        _ => Err(Request::Invalid(format!("{subcommand} takes one {what}"))),
-    };
-    match subcommand.as_str() {
-        "install" => {
-            if operands.is_empty() {
-                return Request::Invalid("install needs a package file".into());
-            }
-            Request::Install {
-                files: operands,
-                dependency: options.contains(&"--dependency"),
-                dev: options.contains(&"--dev"),
-            }
-        }
-        "add" => match &operands[..] {
-            [id, component] => Request::Add {
-                id: id.clone(),
-                component: component.clone(),
-            },
-            _ => Request::Invalid("add takes a package ID and a component's ID".into()),
+/// What `run` asks, or why its arguments are invalid.
+pub fn read(run: &Run) -> Result<Request, String> {
+    let operands = &run.operands;
+    let one = || operands[0].clone();
+    Ok(match run.subcommand() {
+        None => return Err("a subcommand is missing".into()),
+        Some("install") => Request::Install {
+            files: operands.clone(),
+            dependency: run.has("--dependency"),
+            dev: run.has("--dev"),
         },
-        "remove" => match one("a package ID") {
-            Ok(id) => Request::Remove {
-                id,
-                keep_data: options.contains(&"--keep-data"),
-            },
-            Err(e) => e,
+        Some("add") => Request::Add {
+            id: one(),
+            component: operands[1].clone(),
         },
-        "list" if operands.is_empty() => Request::List {
-            json: options.contains(&"--json"),
+        Some("remove") => Request::Remove {
+            id: one(),
+            keep_data: run.has("--keep-data"),
         },
-        "list" => Request::Invalid("list takes no operands".into()),
-        "info" => match one("a package file or ID") {
-            Ok(target) => Request::Info(target),
-            Err(e) => e,
+        Some("list") => Request::List {
+            json: run.has("--json"),
         },
-        _ => match one("a folder") {
-            Ok(folder) => Request::Pack {
-                folder,
-                out,
-                sysroot,
-            },
-            Err(e) => e,
+        Some("info") => Request::Info(one()),
+        Some(_) => Request::Pack {
+            folder: one(),
+            out: run.value("-o").map(String::from),
+            sysroot: run.value("--sysroot").map(String::from),
         },
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mikros_cli::Parsed;
 
-    fn r(args: &[&str]) -> Request {
-        read(args.iter().map(|a| a.to_string()).collect())
+    fn r(args: &[&str]) -> Result<Request, String> {
+        match COMMAND.parse(args.iter().map(|a| a.to_string())) {
+            Parsed::Run(run) => read(&run),
+            Parsed::Invalid(reason) => Err(reason),
+            Parsed::Help(path) => Err(format!("help for {path:?}")),
+        }
     }
 
     #[test]
     fn reads_each_subcommand() {
         assert_eq!(
             r(&["install", "a.mika", "b.mika", "--dependency", "--dev"]),
-            Request::Install {
+            Ok(Request::Install {
                 files: vec!["a.mika".into(), "b.mika".into()],
                 dependency: true,
                 dev: true
-            }
+            })
         );
         assert_eq!(
             r(&["add", "org.example.x", "org.example.x.part"]),
-            Request::Add {
+            Ok(Request::Add {
                 id: "org.example.x".into(),
                 component: "org.example.x.part".into(),
-            }
+            })
         );
         assert_eq!(
             r(&["remove", "org.example.x", "--keep-data"]),
-            Request::Remove {
+            Ok(Request::Remove {
                 id: "org.example.x".into(),
                 keep_data: true
-            }
+            })
         );
-        assert_eq!(r(&["list", "--json"]), Request::List { json: true });
+        assert_eq!(r(&["list", "--json"]), Ok(Request::List { json: true }));
         assert_eq!(
             r(&["info", "org.example.x"]),
-            Request::Info("org.example.x".into())
+            Ok(Request::Info("org.example.x".into()))
         );
         assert_eq!(
             r(&["pack", "dir", "-o", "x.mika"]),
-            Request::Pack {
+            Ok(Request::Pack {
                 folder: "dir".into(),
                 out: Some("x.mika".into()),
                 sysroot: None,
-            }
+            })
         );
         assert_eq!(
             r(&["pack", "dir", "--sysroot", "/build/sysroot"]),
-            Request::Pack {
+            Ok(Request::Pack {
                 folder: "dir".into(),
                 out: None,
                 sysroot: Some("/build/sysroot".into()),
-            }
+            })
         );
-        assert_eq!(r(&["--help"]), Request::Help);
+        assert_eq!(
+            r(&["pack", "dir", "-ox.mika"])
+                .map(|p| matches!(p, Request::Pack { out: Some(_), .. })),
+            Ok(true)
+        );
+        assert_eq!(r(&["--help"]), Err("help for []".into()));
     }
 
     #[test]
@@ -216,7 +219,13 @@ mod tests {
             &["add", "a", "b", "c"],
             &["add", "a", "b", "--json"],
         ] {
-            assert!(matches!(r(args), Request::Invalid(_)), "{args:?}");
+            assert!(r(args).is_err(), "{args:?}");
         }
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/pkg.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
     }
 }
