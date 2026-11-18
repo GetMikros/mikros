@@ -38,6 +38,10 @@ pub const AE_LIMIT: Status = 0x0010;
 pub const AE_TIME: Status = 0x0011;
 pub const AE_BAD_PARAMETER: Status = 0x1001;
 
+/// The status that refused a resource: the device manager's, or the
+/// kernel's.
+pub type Refused = mikros_rt::interfaces::mikros::base::Status;
+
 /// What the operating system layer needs of the ACPI server.
 pub trait Host: Sync {
     /// The physical address of the RSDP.
@@ -45,8 +49,14 @@ pub trait Host: Sync {
 
     /// A resource of `kind` for `size` bytes or ports from `base`, shared
     /// with other drivers or not, from the device manager's
-    /// `RequestResource`: None when it was refused.
-    fn request(&self, kind: u32, base: u64, size: u64, shared: bool) -> Option<OwnedHandle>;
+    /// `RequestResource`: the status that refused it otherwise.
+    fn request(
+        &self,
+        kind: u32,
+        base: u64,
+        size: u64,
+        shared: bool,
+    ) -> Result<OwnedHandle, Refused>;
 }
 
 /// The server's host, which `install` sets once.

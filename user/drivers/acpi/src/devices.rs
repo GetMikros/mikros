@@ -133,8 +133,16 @@ fn add_one(
             Kind::Memory => KIND_MMIO,
             Kind::Irq => KIND_IRQ,
         };
-        // A refused resource is logged by the host and left out.
-        granted.extend(host.request(kind, r.base, r.size, true));
+        // A refused resource is logged and left out.
+        match host.request(kind, r.base, r.size, true) {
+            Ok(resource) => granted.push(resource),
+            Err(status) => mikros_rt::log!(
+                Warning,
+                "acpi: resource {kind} at {:#x}, {:#x} long: {status:?}",
+                r.base,
+                r.size
+            ),
+        }
     }
     let mut properties = vec![Property {
         key: "path".into(),

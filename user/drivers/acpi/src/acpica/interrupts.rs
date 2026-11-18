@@ -129,8 +129,15 @@ extern "C" fn AcpiOsInstallInterruptHandler(
 
 fn install(sci: Sci, handler: Handler, context: *mut c_void) -> Status {
     let gsi = u64::from(sci.gsi);
-    let Some(resource) = crate::acpica::host().request(KIND_IRQ, gsi, 1, false) else {
-        return AE_ERROR;
+    let resource = match crate::acpica::host().request(KIND_IRQ, gsi, 1, false) {
+        Ok(resource) => resource,
+        Err(status) => {
+            mikros_rt::log!(
+                Warning,
+                "acpi: resource {KIND_IRQ} at {gsi:#x}, 0x1 long: {status:?}"
+            );
+            return AE_ERROR;
+        }
     };
     let mut interrupt = 0;
     // SAFETY: the out pointer is valid for the call.

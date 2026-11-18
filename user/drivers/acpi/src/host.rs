@@ -2,7 +2,7 @@
 //! of the `rsdp` property, and the device manager's resources, which any
 //! of the layer's threads may ask for.
 
-use crate::acpica::Locked;
+use crate::acpica::{Locked, Refused};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::driver::{DeviceManager, DeviceManagerClient};
 
@@ -32,20 +32,21 @@ impl crate::acpica::Host for Host {
         self.rsdp
     }
 
-    fn request(&self, kind: u32, base: u64, size: u64, shared: bool) -> Option<OwnedHandle> {
+    fn request(
+        &self,
+        kind: u32,
+        base: u64,
+        size: u64,
+        shared: bool,
+    ) -> Result<OwnedHandle, Refused> {
         let granted = self
             .manager()
             .request_resource(kind, base, size, shared, FOREVER);
         match granted {
-            Ok(Ok(granted)) => Some(granted.resource),
-            Ok(Err(status)) => {
-                mikros_rt::log!(
-                    Warning,
-                    "acpi: resource {kind} at {base:#x}, {size:#x} long: {status:?}"
-                );
-                None
-            }
-            Err(_) => None,
+            Ok(Ok(granted)) => Ok(granted.resource),
+            Ok(Err(status)) => Err(status),
+            // The device manager could not be asked.
+            Err(_) => Err(Refused::PeerClosed),
         }
     }
 }

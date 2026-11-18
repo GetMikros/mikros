@@ -4,10 +4,11 @@
 //! objects mapped uncached. A mapping that covers a later request is used
 //! for it too, so that tables mapped again and again cost one request.
 //! Memory inside one of the firmware memory resources kept at shutdown
-//! is mapped through that resource, without a request.
+//! is mapped through that resource, without a request. A range that the
+//! device manager refused is not asked for again.
 
 use crate::acpica::sync::Locked;
-use crate::acpica::{AE_BAD_PARAMETER, AE_NO_MEMORY, AE_OK, Status};
+use crate::acpica::{AE_BAD_PARAMETER, AE_NO_MEMORY, AE_OK, Refused, Status};
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -39,6 +40,10 @@ struct Mapping {
 }
 
 static MAPPINGS: Locked<Vec<Mapping>> = Locked::new(Vec::new());
+
+/// The first page and the size of each range that the device manager
+/// refused, with its status.
+static REFUSED: Locked<Vec<(u64, u64, Refused)>> = Locked::new(Vec::new());
 
 /// The firmware memory resources kept for the rest of the run, with their
 /// base and size.
@@ -91,34 +96,50 @@ fn firmware_resource(start: u64, end: u64) -> Option<u32> {
 }
 
 /// Maps the `len` bytes at the physical address `physical`, and gives
-/// their address: None when the device manager or the kernel refused.
-pub fn map(physical: u64, len: u64) -> Option<u64> {
+/// their address: the status that refused them otherwise, and whether
+/// the device manager refused them in this call.
+fn get(physical: u64, len: u64) -> Result<u64, (Refused, bool)> {
     let start = physical & !(PAGE - 1);
     let end = physical
-        .checked_add(len.max(1))?
-        .checked_next_multiple_of(PAGE)?;
+        .checked_add(len.max(1))
+        .and_then(|end| end.checked_next_multiple_of(PAGE))
+        .ok_or((Refused::OutOfRange, false))?;
     let mut mappings = MAPPINGS.lock();
     if let Some(m) = mappings
         .iter_mut()
         .find(|m| m.start <= start && end <= m.start + m.len)
     {
         m.users += 1;
-        return Some(m.at + (physical - m.start));
+        return Ok(m.at + (physical - m.start));
     }
     let size = end - start;
     let (resource, raw) = match firmware_resource(start, end) {
         Some(raw) => (None, raw),
         None => {
-            let resource = crate::acpica::host().request(KIND_MMIO, start, size, true)?;
-            let raw = resource.raw();
-            (Some(resource), raw)
+            let mut refused = REFUSED.lock();
+            if let Some(&(_, _, status)) = refused
+                .iter()
+                .find(|&&(first, n, _)| first == start && n == size)
+            {
+                return Err((status, false));
+            }
+            match crate::acpica::host().request(KIND_MMIO, start, size, true) {
+                Ok(resource) => {
+                    let raw = resource.raw();
+                    (Some(resource), raw)
+                }
+                Err(status) => {
+                    refused.push((start, size, status));
+                    return Err((status, true));
+                }
+            }
         }
     };
     let mut mem = 0;
     // SAFETY: the out pointer is valid for the call.
     let created = unsafe { sys::mem_create_physical(raw, start, size, UNCACHED_DEVICE, &mut mem) };
     if created != mikros_rt::OK {
-        return None;
+        return Err((Refused::from_raw(created as i32), false));
     }
     // SAFETY: the kernel just created the handle for us.
     let mem = unsafe { OwnedHandle::from_raw(mem) };
@@ -136,7 +157,7 @@ pub fn map(physical: u64, len: u64) -> Option<u64> {
         )
     };
     if mapped != mikros_rt::OK {
-        return None;
+        return Err((Refused::from_raw(mapped as i32), false));
     }
     mappings.push(Mapping {
         start,
@@ -146,7 +167,25 @@ pub fn map(physical: u64, len: u64) -> Option<u64> {
         _resource: resource,
         _mem: mem,
     });
-    Some(at + (physical - start))
+    Ok(at + (physical - start))
+}
+
+/// Maps the `len` bytes at the physical address `physical`, and gives
+/// their address: None when the device manager or the kernel refused,
+/// which is logged when the device manager refused them first.
+pub fn map(physical: u64, len: u64) -> Option<u64> {
+    match get(physical, len) {
+        Ok(at) => Some(at),
+        Err((status, refused)) => {
+            if refused {
+                mikros_rt::log!(
+                    Warning,
+                    "acpi: resource {KIND_MMIO} at {physical:#x}, {len:#x} long: {status:?}"
+                );
+            }
+            None
+        }
+    }
 }
 
 /// Gives back a `map` of the address `at`, unmapping its pages when
