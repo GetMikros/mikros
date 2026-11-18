@@ -276,6 +276,7 @@ pub fn start(info: &BootInfo) {
         loaded.boot_image.size,
         cmdline,
         crate::boot::memory_map(info),
+        crate::arch::dma_isolated(),
     );
     let clock_page = clock_page().unwrap_or_else(|e| panic!("no memory for the clock page: {e:?}"));
     let entry = |object: Arc<dyn Object>, kind| Entry {

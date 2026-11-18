@@ -339,6 +339,10 @@ interface! {
     /// `out`, a page long, and returns how many bytes it wrote.
     [] fn clock_page_header(out: &mut [u8]) -> usize;
 
+    /// Whether an IOMMU isolates DMA. `platform_setup` decides it, and it
+    /// does not change afterwards.
+    [] fn dma_isolated() -> bool;
+
     /// Keeps the running `thread`, which waits in a system call, suspended
     /// while it is to be suspended, with the registers it entered the call
     /// with available to the debugger. Returns whether it was suspended.

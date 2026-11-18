@@ -256,6 +256,10 @@ impl Arch for Mock {
         0
     }
 
+    fn dma_isolated() -> bool {
+        false
+    }
+
     fn thread_stay_suspended(_thread: &alloc::sync::Arc<crate::sched::Thread>) -> bool {
         false
     }

@@ -268,6 +268,10 @@ impl Arch for X86 {
         header.len()
     }
 
+    fn dma_isolated() -> bool {
+        crate::iommu::isolated()
+    }
+
     fn thread_stay_suspended(thread: &Arc<kernel_core::sched::Thread>) -> bool {
         crate::syscall::stay_suspended(thread)
     }

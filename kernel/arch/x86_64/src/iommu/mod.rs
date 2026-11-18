@@ -495,6 +495,12 @@ pub fn domains(
     }
 }
 
+/// Whether DMA is isolated: `init` enabled the IOMMUs. Nothing turns
+/// them off again.
+pub fn isolated() -> bool {
+    IOMMU.lock().is_some()
+}
+
 /// Whether DMA is isolated and the device `rid` is behind none of the
 /// units, so that pins for it cannot take effect.
 pub fn unknown(rid: u64) -> bool {
