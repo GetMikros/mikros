@@ -2,23 +2,52 @@
 //! line per service in aligned columns, a JSON array, or why a call on a
 //! service failed.
 
-use mikros_cli::{Arguments, Command, json_string};
+use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
 
-pub const COMMAND: Command = Command {
-    name: "services",
-    operands: "[start|stop|restart|enable|disable <name>]",
-    most: 2,
-    about: "Lists the services with their state, process ID, restarts and whether\n\
-            they are enabled, or, once an administrator allowed it, starts, stops,\n\
-            restarts, enables or disables one.",
-    options: &[
-        ("--json", "write the services as a JSON array of objects"),
-        (
-            "--now",
-            "with enable or disable, also start or stop the service",
-        ),
+/// The operand of a call on a service.
+const NAME: &[Operand] = &[Operand::one("name", Kind::Service, "the service")];
+/// `--now`, of enabling and of disabling.
+const START_NOW: &[Opt] = &[Opt::long("now", "also start the service")];
+const STOP_NOW: &[Opt] = &[Opt::long("now", "also stop the service")];
+
+pub static COMMAND: Spec = Spec {
+    options: &[Opt::long(
+        "json",
+        "write the services as a JSON array of objects",
+    )],
+    subcommands: &[
+        Spec {
+            operands: NAME,
+            ..Spec::new("start", "Starts a service.")
+        },
+        Spec {
+            operands: NAME,
+            ..Spec::new("stop", "Stops a service.")
+        },
+        Spec {
+            operands: NAME,
+            ..Spec::new("restart", "Restarts a service.")
+        },
+        Spec {
+            operands: NAME,
+            options: START_NOW,
+            ..Spec::new("enable", "Enables a service, so that it starts at boot.")
+        },
+        Spec {
+            operands: NAME,
+            options: STOP_NOW,
+            ..Spec::new(
+                "disable",
+                "Disables a service, so that it does not start at boot.",
+            )
+        },
     ],
-    values: &[],
+    ..Spec::new(
+        "services",
+        "Lists the services with their state, process ID, restarts and whether\n\
+         they are enabled, or, once an administrator allowed it, starts, stops,\n\
+         restarts, enables or disables one.",
+    )
 };
 
 /// A call on a service.
@@ -42,41 +71,24 @@ pub enum Call {
 pub enum Request {
     List { json: bool },
     Call(Call, String),
-    Help,
-    Invalid(String),
 }
 
-pub fn read(arguments: Vec<String>) -> Request {
-    let (options, mut operands) = match COMMAND.parse(arguments) {
-        Arguments::Run {
-            options, operands, ..
-        } => (options, operands),
-        Arguments::Help => return Request::Help,
-        Arguments::Invalid(reason) => return Request::Invalid(reason),
-    };
-    let json = options.contains(&"--json");
-    let now = options.contains(&"--now");
-    if operands.is_empty() {
-        if now {
-            return Request::Invalid("--now goes only with enable or disable".into());
+/// What `run` asks.
+pub fn read(run: &Run) -> Request {
+    let now = run.has("--now");
+    let call = match run.subcommand() {
+        None => {
+            return Request::List {
+                json: run.has("--json"),
+            };
         }
-        return Request::List { json };
-    }
-    let call = match operands[0].as_str() {
-        "start" => Call::Start,
-        "stop" => Call::Stop,
-        "restart" => Call::Restart,
-        "enable" => Call::Enable { now },
-        "disable" => Call::Disable { now },
-        other => return Request::Invalid(format!("unknown subcommand {other}")),
+        Some("start") => Call::Start,
+        Some("stop") => Call::Stop,
+        Some("restart") => Call::Restart,
+        Some("enable") => Call::Enable { now },
+        Some(_) => Call::Disable { now },
     };
-    if now && !matches!(call, Call::Enable { .. } | Call::Disable { .. }) {
-        return Request::Invalid("--now goes only with enable or disable".into());
-    }
-    match operands.len() {
-        2 => Request::Call(call, operands.swap_remove(1)),
-        _ => Request::Invalid(format!("{} needs the name of a service", operands[0])),
-    }
+    Request::Call(call, run.operands[0].clone())
 }
 
 /// A service, as services shows it.
@@ -93,49 +105,83 @@ pub struct Service {
     pub enabled: bool,
 }
 
+/// The colour of a state: running ones as running, restarting ones as a
+/// warning and failed ones as failed.
+fn state_role(state: &str) -> Option<Role> {
+    match state {
+        "running" => Some(Role::Ok),
+        "restarting" => Some(Role::Warning),
+        "failed" => Some(Role::Error),
+        _ => None,
+    }
+}
+
 /// The header and lines of `services`: the name and state aligned to
 /// the left, the process ID, or `-` when there is none, and the restarts
 /// to the right, and `yes` or `no` for whether it is enabled.
-pub fn text(services: &[Service]) -> String {
+pub fn text(services: &[Service], paint: Paint) -> String {
     let header = ["NAME", "STATE", "PID", "RESTARTS", "ENABLED"];
-    let mut rows = vec![header.map(String::from)];
-    rows.extend(services.iter().map(|s| {
-        let pid = match s.pid {
-            0 => "-".into(),
-            pid => pid.to_string(),
-        };
-        let enabled = if s.enabled { "yes" } else { "no" };
-        [
-            s.name.clone(),
-            s.state.clone(),
-            pid,
-            s.restarts.to_string(),
-            enabled.into(),
-        ]
-    }));
-    let width = |column: usize| {
-        rows.iter()
-            .map(|r| r[column].chars().count())
-            .max()
-            .unwrap_or(0)
-    };
-    let widths = [width(0), width(1), width(2)];
-    rows.iter()
-        .map(|r| {
-            format!(
-                "{:<w0$}  {:<w1$}  {:>w2$}  {:>w3$}  {}\n",
-                r[0],
-                r[1],
-                r[2],
-                r[3],
-                r[4],
-                w0 = widths[0],
-                w1 = widths[1],
-                w2 = widths[2],
-                w3 = header[3].len(),
-            )
+    let rows: Vec<Vec<Cell>> = services
+        .iter()
+        .map(|s| {
+            let pid = match s.pid {
+                0 => ("-".into(), Some(Role::Secondary)),
+                pid => (pid.to_string(), Some(Role::Number)),
+            };
+            let enabled = if s.enabled { "yes" } else { "no" };
+            vec![
+                (s.name.clone(), None),
+                (s.state.clone(), state_role(&s.state)),
+                pid,
+                (s.restarts.to_string(), Some(Role::Number)),
+                (enabled.into(), None),
+            ]
         })
-        .collect()
+        .collect();
+    columns(&header, &rows, &[false, false, true, true, false], paint)
+}
+
+/// A cell of a table: its text, and the role it is coloured in.
+type Cell = (String, Option<Role>);
+
+/// The header and `rows` in columns two spaces apart, the header in the
+/// secondary colour, each column as wide as its widest text without
+/// colours, aligned to the right where `right` says, the last one not
+/// padded.
+fn columns(header: &[&str], rows: &[Vec<Cell>], right: &[bool], paint: Paint) -> String {
+    let header: Vec<Cell> = header
+        .iter()
+        .map(|h| (h.to_string(), Some(Role::Secondary)))
+        .collect();
+    let all: Vec<&Vec<Cell>> = std::iter::once(&header).chain(rows).collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|c| {
+            all.iter()
+                .map(|r| r[c].0.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut text = String::new();
+    for row in all {
+        for (c, (cell, role)) in row.iter().enumerate() {
+            let pad = " ".repeat(widths[c] - cell.chars().count());
+            let shown = match role {
+                Some(role) => paint.paint(*role, cell),
+                None => cell.clone(),
+            };
+            if c > 0 {
+                text.push_str("  ");
+            }
+            match (right[c], c + 1 == row.len()) {
+                (true, _) => text.push_str(&(pad + &shown)),
+                (false, true) => text.push_str(&shown),
+                (false, false) => text.push_str(&(shown + &pad)),
+            }
+        }
+        text.push('\n');
+    }
+    text
 }
 
 /// `services` as a JSON array of objects with the members `name`,
@@ -190,9 +236,14 @@ pub fn failure(name: &str, status: &str, state: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mikros_cli::Parsed;
 
-    fn read_args(arguments: &[&str]) -> Request {
-        read(arguments.iter().map(|a| a.to_string()).collect())
+    fn read_args(arguments: &[&str]) -> Result<Request, String> {
+        match COMMAND.parse(arguments.iter().map(|a| a.to_string())) {
+            Parsed::Run(run) => Ok(read(&run)),
+            Parsed::Invalid(reason) => Err(reason),
+            Parsed::Help(path) => Err(format!("help for {path:?}")),
+        }
     }
 
     fn service(name: &str, state: &str, pid: u32, restarts: u32) -> Service {
@@ -209,47 +260,43 @@ mod tests {
 
     #[test]
     fn reads_a_list_or_a_call() {
-        assert_eq!(read_args(&[]), Request::List { json: false });
-        assert_eq!(read_args(&["--json"]), Request::List { json: true });
-        assert_eq!(
-            read_args(&["stop", "termsvc"]),
-            Request::Call(Call::Stop, "termsvc".into())
-        );
+        let call = |call, name: &str| Ok(Request::Call(call, name.into()));
+        assert_eq!(read_args(&[]), Ok(Request::List { json: false }));
+        assert_eq!(read_args(&["--json"]), Ok(Request::List { json: true }));
+        assert_eq!(read_args(&["stop", "termsvc"]), call(Call::Stop, "termsvc"));
         assert_eq!(
             read_args(&["restart", "--", "-odd"]),
-            Request::Call(Call::Restart, "-odd".into())
+            call(Call::Restart, "-odd")
         );
-        assert_eq!(
-            read_args(&["start", "a"]),
-            Request::Call(Call::Start, "a".into())
-        );
+        assert_eq!(read_args(&["start", "a"]), call(Call::Start, "a"));
         assert_eq!(
             read_args(&["enable", "--now", "a"]),
-            Request::Call(Call::Enable { now: true }, "a".into())
+            call(Call::Enable { now: true }, "a")
         );
         assert_eq!(
             read_args(&["disable", "a"]),
-            Request::Call(Call::Disable { now: false }, "a".into())
+            call(Call::Disable { now: false }, "a")
         );
-        assert_eq!(read_args(&["--help", "stop"]), Request::Help);
+        assert_eq!(
+            read_args(&["--help", "stop"]),
+            Err("help for [\"stop\"]".into())
+        );
     }
 
     #[test]
     fn refuses_bad_subcommands_and_operands() {
-        let invalid = |reason: &str| Request::Invalid(reason.into());
-        assert_eq!(read_args(&["list"]), invalid("unknown subcommand list"));
-        assert_eq!(
-            read_args(&["stop"]),
-            invalid("stop needs the name of a service")
-        );
+        let invalid = |reason: &str| Err(reason.into());
+        assert_eq!(read_args(&["list"]), invalid("unexpected argument list"));
+        assert_eq!(read_args(&["stop"]), invalid("missing operand <name>"));
         assert_eq!(
             read_args(&["stop", "a", "b"]),
             invalid("unexpected argument b")
         );
         assert_eq!(
             read_args(&["stop", "--now", "a"]),
-            invalid("--now goes only with enable or disable")
+            invalid("unknown option --now")
         );
+        assert_eq!(read_args(&["--now"]), invalid("unknown option --now"));
     }
 
     #[test]
@@ -262,12 +309,47 @@ mod tests {
             },
         ];
         assert_eq!(
-            text(&services),
+            text(&services, Paint::never()),
             "NAME        STATE        PID  RESTARTS  ENABLED\n\
              accountsvc  running       21         0  yes\n\
              termsvc     not_started    -        12  no\n"
         );
-        assert_eq!(text(&[]), "NAME  STATE  PID  RESTARTS  ENABLED\n");
+        assert_eq!(
+            text(&[], Paint::never()),
+            "NAME  STATE  PID  RESTARTS  ENABLED\n"
+        );
+    }
+
+    #[test]
+    fn colours_by_role_and_keeps_the_columns() {
+        let on = Paint::new(Some("always"), false, None);
+        let services = [service("a", "failed", 0, 3), service("bb", "running", 7, 0)];
+        let paint = |sgr: &str, t: &str| format!("\x1b[{sgr}m{t}\x1b[0m");
+        let grey = |t| paint("90", t);
+        let number = |t| paint("38;2;21;193;160", t);
+        let expected = [
+            format!(
+                "{}  {}    {}  {}  {}",
+                grey("NAME"),
+                grey("STATE"),
+                grey("PID"),
+                grey("RESTARTS"),
+                grey("ENABLED")
+            ),
+            format!(
+                "a     {}     {}         {}  yes",
+                paint("38;2;231;76;60", "failed"),
+                grey("-"),
+                number("3")
+            ),
+            format!(
+                "bb    {}    {}         {}  yes",
+                paint("38;2;17;209;22", "running"),
+                number("7"),
+                number("0")
+            ),
+        ];
+        assert_eq!(text(&services, on), expected.join("\n") + "\n");
     }
 
     #[test]
@@ -297,5 +379,11 @@ mod tests {
         assert_eq!(failure("a", "bad_state", Some("running")), "a: running");
         assert_eq!(failure("a", "bad_state", None), "a: bad_state");
         assert_eq!(failure("a", "internal", Some("failed")), "a: internal");
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/services.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
     }
 }

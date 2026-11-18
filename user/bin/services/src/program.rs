@@ -4,7 +4,7 @@
 //! is the caller's own (MIKSPEC-0036.R52).
 
 use crate::listing::{self, COMMAND, Call, Request, Service};
-use mikros_cli::{FAILURE, INVALID, SUCCESS};
+use mikros_cli::{FAILURE, Paint, Run, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{ServiceControlClient, ServicesClient};
@@ -16,38 +16,33 @@ const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
 const FOREVER: i64 = i64::MAX;
 
 pub fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let request = match listing::read(arguments) {
-        Request::Help => return write(&COMMAND.help()),
-        Request::Invalid(reason) => return fail(INVALID, &reason),
-        request => request,
-    };
+    let run = start(&COMMAND, &mikros_command::list);
+    let fail = |message: &str| fail(&run, message);
     let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
-        return fail(FAILURE, "cannot reach the service directory");
+        return fail("cannot reach the service directory");
     };
-    match request {
+    match listing::read(&run) {
         Request::List { json } => {
             let services = match list(&directory) {
                 Ok(services) => services,
-                Err(why) => return fail(FAILURE, &why),
+                Err(why) => return fail(&why),
             };
             match json {
                 true => write(&listing::json(&services)),
-                false => write(&listing::text(&services)),
+                false => write(&listing::text(&services, Paint::stdout(&run))),
             }
         }
         Request::Call(call, name) => {
             let control = match directory.connect_unless_denied(SERVICE_CONTROL) {
                 Ok(Some(client)) => ServiceControlClient::new(client),
-                Ok(None) => return fail(FAILURE, "not authorized"),
-                Err(why) => return fail(FAILURE, &why),
+                Ok(None) => return fail("not authorized"),
+                Err(why) => return fail(&why),
             };
             match call_on(&directory, &control, call, &name) {
                 Ok(()) => ExitCode::from(SUCCESS),
-                Err(why) => fail(FAILURE, &why),
+                Err(why) => fail(&why),
             }
         }
-        Request::Help | Request::Invalid(_) => unreachable!("answered above"),
     }
 }
 
@@ -135,8 +130,9 @@ fn write(text: &str) -> ExitCode {
     }
 }
 
-/// Writes the error `message` to standard error and gives `status`.
-fn fail(status: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
-    ExitCode::from(status)
+/// Writes the error `message` to standard error and gives the status of
+/// a failure.
+fn fail(run: &Run, message: &str) -> ExitCode {
+    complain(&COMMAND, run, message);
+    ExitCode::from(FAILURE)
 }

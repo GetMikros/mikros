@@ -1,7 +1,24 @@
-# What `services` takes, for msh's completion and colours.
+# What `services` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
 extern services(
-    call?: [start stop restart] "start, stop or restart a service",
-    name?: string "the name of the service",
-    --json: bool "write the services as JSON",
-    --help: bool "show how to use services"
-)
+    --json: bool "write the services as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
+extern services start(
+    name: service "the service"
+) complete
+extern services stop(
+    name: service "the service"
+) complete
+extern services restart(
+    name: service "the service"
+) complete
+extern services enable(
+    name: service "the service",
+    --now: bool "also start the service"
+) complete
+extern services disable(
+    name: service "the service",
+    --now: bool "also stop the service"
+) complete
