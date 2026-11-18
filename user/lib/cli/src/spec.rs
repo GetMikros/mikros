@@ -225,6 +225,9 @@ pub struct Spec {
     /// Whether `--help` that does not fit the terminal goes through
     /// less: for every command but less itself.
     pub pages_help: bool,
+    /// Which arguments that start with `-` are operands all the same,
+    /// such as chmod's `-w`; none when absent.
+    pub dash_operand: Option<fn(&str) -> bool>,
 }
 
 impl Spec {
@@ -238,6 +241,7 @@ impl Spec {
             subcommands: &[],
             stops: false,
             pages_help: true,
+            dash_operand: None,
         }
     }
 }
@@ -360,7 +364,8 @@ impl Spec {
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let here = self.below(&path);
-            if ended || argument == "-" || !argument.starts_with('-') {
+            let operand_anyway = here.dash_operand.is_some_and(|is| is(&argument));
+            if ended || argument == "-" || !argument.starts_with('-') || operand_anyway {
                 let sub = here.subcommands.iter().find(|s| s.name == argument);
                 match sub {
                     Some(sub) if operands.is_empty() && !ended => path.push(sub.name),
@@ -574,6 +579,24 @@ mod tests {
             Parsed::Help(vec!["stop"])
         );
         assert_eq!(run(&TOOL, &[]).subcommand(), None);
+    }
+
+    static MODE: Spec = Spec {
+        operands: &[Operand::some("arg", Kind::Text, "modes and paths")],
+        options: &[Opt::short('R', "recursively")],
+        dash_operand: Some(|a| a.chars().skip(1).all(|c| "rwx".contains(c))),
+        ..Spec::new("mode", "Sets modes.")
+    };
+
+    #[test]
+    fn takes_operands_that_look_like_options() {
+        let r = run(&MODE, &["-R", "-w", "f"]);
+        assert!(r.has("-R"));
+        assert_eq!(r.operands, ["-w", "f"]);
+        assert_eq!(
+            parse(&MODE, &["-q", "f"]),
+            Parsed::Invalid("unknown option -q".into())
+        );
     }
 
     #[test]
