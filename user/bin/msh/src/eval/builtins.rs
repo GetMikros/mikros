@@ -1,6 +1,6 @@
 //! Built-in commands: `cd`, `pwd`, `exit`, `print`, `source`, `env`,
-//! `jobs`, `fg`, `bg`, `kill`, `exec` and `history`, and those of
-//! `text`.
+//! `jobs`, `fg`, `bg`, `kill`, `exec`, `history`, `alias` and `unalias`,
+//! and those of `text`.
 
 use super::{Flow, Shell, Stream, System};
 use crate::ast::Block;
@@ -13,8 +13,9 @@ pub enum Arg {
     Block(Block),
 }
 
-const BUILTINS: [&str; 12] = [
+const BUILTINS: [&str; 14] = [
     "cd", "pwd", "exit", "print", "source", "env", "jobs", "fg", "bg", "kill", "exec", "history",
+    "alias", "unalias",
 ];
 
 /// The signals `kill` knows by name, with their numbers.
@@ -266,6 +267,8 @@ pub fn run<S: System>(
             }
             Ok(Value::Null)
         }
+        "alias" => shell.alias(&values),
+        "unalias" => shell.unalias(&values),
         _ => unreachable!("not a built-in command"),
     }
 }

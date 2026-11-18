@@ -289,6 +289,11 @@ fn quoted(name: &str, open: Option<char>, done: bool) -> String {
     text
 }
 
+/// `text` as a word on the line: quoted when it would not stay one.
+pub fn as_word(text: &str) -> String {
+    quoted(text, None, true)
+}
+
 /// `path` with each run of `/` as one, which names the same file.
 pub fn collapsed(path: &str) -> String {
     let mut out = String::with_capacity(path.len());

@@ -1,11 +1,13 @@
 //! msh, the Mikros shell, installed as /system/bin/msh. Without arguments
 //! it runs interactively when its standard input is a terminal: it
-//! defines `$msh_colors`, the colours of the line, and runs `~/.mshrc`
-//! when that exists, then reads lines at a prompt, keeping
-//! them in `~/.msh_history`. Otherwise it runs a script: the file named
-//! by its first argument, the text after `-c`, or its standard input.
-//! The language is that of the rest of the crate; this module gives it
-//! its system and reports the errors that nothing caught.
+//! defines `$msh_colors`, the colours of the line, and the default
+//! aliases, and runs `~/.mshrc` when that exists, then reads lines at a
+//! prompt, keeping them in `~/.msh_history`, with the aliases at the
+//! start of their commands replaced. Otherwise it runs a script: the
+//! file named by its first argument, the text after `-c`, or its
+//! standard input. The language is that of the rest of the crate; this
+//! module gives it its system and reports the errors that nothing
+//! caught.
 
 mod os;
 mod sys;
@@ -384,6 +386,7 @@ fn interactive() -> i64 {
         Wake::start(&mut shell);
     }
     shell.set_global("msh_colors", highlight::default_colors());
+    shell.define_default_aliases();
     let home = home(&shell);
     if let Some(rc) = home.as_ref().map(|h| format!("{h}/.mshrc"))
         && let Ok(text) = std::fs::read_to_string(&rc)
@@ -416,7 +419,7 @@ fn interactive() -> i64 {
             continue;
         }
         remember(&mut shell, entry, history.as_deref());
-        let block = match parse(entry) {
+        let mut block = match parse(entry) {
             Ok(block) => block,
             Err(e) => {
                 eprintln!("msh: {}", e.message);
@@ -424,6 +427,7 @@ fn interactive() -> i64 {
                 continue;
             }
         };
+        shell.expand_aliases(&mut block);
         match shell.top(&block) {
             Ok(()) | Err(Flow::Return(_)) => {}
             Err(Flow::Exit(status)) => return status,

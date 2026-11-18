@@ -1,6 +1,7 @@
 //! Running msh's syntax tree: statements, expressions, variables and the
 //! environment, with the system behind the `System` trait.
 
+mod aliases;
 pub mod builtins;
 mod candidates;
 pub mod command;
@@ -95,6 +96,8 @@ pub struct Shell<S: System> {
     declarations: declarations::Declarations,
     /// The commands whose declarations files were looked for.
     looked_up: std::collections::HashSet<String>,
+    /// The aliases, by name, with the words each stands for.
+    aliases: BTreeMap<String, Vec<String>>,
     /// While completion runs a pipeline: when it must have ended.
     deadline: Option<std::time::Instant>,
     /// The candidates of the `from cached` types run for the line being
@@ -140,6 +143,7 @@ impl<S: System> Shell<S> {
             listings: listings::Listings::default(),
             declarations: declarations::Declarations::parse(builtins::DECLARATIONS),
             looked_up: Default::default(),
+            aliases: BTreeMap::new(),
             deadline: None,
             cached: BTreeMap::new(),
             things: Default::default(),

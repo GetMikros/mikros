@@ -1039,3 +1039,109 @@ fn completes_from_the_shell_on_tab() {
     assert!(texts(complete("pick g", 6, &s)).is_empty());
     assert_eq!(s.system.runs.len(), runs);
 }
+
+/// Runs `source` as a line typed at the prompt, with its aliases
+/// replaced, and gives what it wrote, or its error.
+fn typed(shell: &mut Shell<Fake>, source: &str) -> Result<String, Flow> {
+    let mut block = parse(source).unwrap_or_else(|e| panic!("{source:?}: {e}"));
+    shell.expand_aliases(&mut block);
+    let before = shell.system.output.len();
+    shell.top(&block)?;
+    Ok(String::from_utf8_lossy(&shell.system.output[before..]).into_owned())
+}
+
+fn message(result: Result<String, Flow>) -> String {
+    match result {
+        Err(Flow::Error(f)) => f.message,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn defines_prints_lists_and_removes_aliases() {
+    let mut s = shell();
+    run(&mut s, "alias e = echo hi 'a b'").unwrap();
+    assert_eq!(run(&mut s, "alias e").unwrap(), "e = echo hi 'a b'\n");
+    run(&mut s, "alias c = cat; alias c = shout").unwrap();
+    assert_eq!(
+        run(&mut s, "alias").unwrap(),
+        "c = shout\ne = echo hi 'a b'\n"
+    );
+    run(&mut s, "unalias c").unwrap();
+    assert_eq!(run(&mut s, "alias").unwrap(), "e = echo hi 'a b'\n");
+    assert_eq!(message(run(&mut s, "alias c")), "`c` is no alias");
+    assert_eq!(message(run(&mut s, "unalias c")), "`c` is no alias");
+    assert_eq!(
+        message(run(&mut s, "unalias")),
+        "`unalias` takes the name of an alias"
+    );
+    assert_eq!(
+        message(run(&mut s, "alias x =")),
+        "an alias stands for one word at least"
+    );
+    assert_eq!(
+        message(run(&mut s, "alias x y")),
+        "`alias` takes `name = words…`, a name, or nothing"
+    );
+    // sudo cannot be one, however it is asked for.
+    assert_eq!(
+        message(run(&mut s, "alias sudo = echo fake")),
+        "sudo cannot be an alias"
+    );
+    assert_eq!(
+        message(run(&mut s, "let a = 'alias'; run $a sudo = echo")),
+        "sudo cannot be an alias"
+    );
+    assert_eq!(message(run(&mut s, "alias sudo")), "`sudo` is no alias");
+}
+
+#[test]
+fn replaces_the_first_word_of_typed_commands_once() {
+    let mut s = shell();
+    run(
+        &mut s,
+        "alias echo = echo -n; alias greet = echo hello; alias up = shout",
+    )
+    .unwrap();
+    assert_eq!(typed(&mut s, "greet ada").unwrap(), "hello ada\n");
+    // The words of an alias are not replaced again.
+    assert_eq!(typed(&mut s, "echo x").unwrap(), "-n x\n");
+    // In each command of the line, but only its first word, as written.
+    assert_eq!(typed(&mut s, "greet a | up").unwrap(), "HELLO A\n");
+    assert_eq!(typed(&mut s, "echo greet").unwrap(), "-n greet\n");
+    assert_eq!(typed(&mut s, "if true { greet b }").unwrap(), "hello b\n");
+    assert_eq!(typed(&mut s, "print (greet c)").unwrap(), "hello c\n");
+    assert_eq!(
+        typed(&mut s, "let v = greet d; print $v").unwrap(),
+        "hello d\n"
+    );
+    assert_eq!(
+        typed(&mut s, "A=1 greet e").unwrap(),
+        "hello e\n",
+        "after NAME=value words"
+    );
+    assert_eq!(message(typed(&mut s, "gr'eet' x")), "command not found");
+    assert_eq!(message(typed(&mut s, "run greet x")), "command not found");
+    // Never in scripts, sourced files or functions.
+    assert_eq!(message(run(&mut s, "greet x")), "command not found");
+    s.system.files.insert("/g.msh".into(), "greet x".into());
+    assert_eq!(message(typed(&mut s, "source /g.msh")), "command not found");
+    typed(&mut s, "fn f() { greet x }").unwrap();
+    assert_eq!(message(typed(&mut s, "f")), "command not found");
+}
+
+#[test]
+fn defines_the_default_aliases_which_may_change() {
+    let mut s = shell();
+    let ls: Behaviour = |args, _| (0, format!("{}\n", args.join(" ")).into_bytes());
+    s.system.programs.insert("/bin/ls".into(), ls);
+    s.define_default_aliases();
+    assert_eq!(run(&mut s, "alias").unwrap(), "la = ls -la\nls = ls -l\n");
+    // `ls` runs the program `ls`, not the alias again.
+    assert_eq!(typed(&mut s, "ls").unwrap(), "ls -l\n");
+    assert_eq!(typed(&mut s, "la /tmp").unwrap(), "ls -la /tmp\n");
+    assert_eq!(run(&mut s, "ls").unwrap(), "ls\n");
+    run(&mut s, "unalias la; alias ls = ls -a").unwrap();
+    assert_eq!(typed(&mut s, "ls").unwrap(), "ls -a\n");
+    assert_eq!(message(typed(&mut s, "la")), "command not found");
+}
