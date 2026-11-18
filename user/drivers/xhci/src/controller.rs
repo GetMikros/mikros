@@ -18,7 +18,7 @@ use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
 use mikros_rt::sys;
-use mikros_storage::{Contiguous, MS, Mmio, PAGE, PciBus, Unconfirmed, now};
+use mikros_storage::{Contiguous, MS, Mark, Mmio, PAGE, PciBus, Unconfirmed, now};
 
 /// Completion codes.
 pub const CODE_SUCCESS: u8 = 1;
@@ -67,8 +67,11 @@ pub struct Controller {
     changed: RefCell<BTreeSet<u8>>,
     port_changes: Waiters,
     _interrupts: RefCell<Vec<OwnedHandle>>,
-    /// Pages for the data of control and interrupt transfers.
-    pages: RefCell<Vec<Contiguous>>,
+    /// Pages for the data of control and interrupt transfers, each with a
+    /// mark of the resets when it was last lent, and the physical address
+    /// of each page lent, with its mark.
+    pages: RefCell<Vec<(Contiguous, Mark)>>,
+    lent: RefCell<Vec<(u64, Mark)>>,
     /// The controller resets that the endpoints did not confirm by
     /// stopping, after which class drivers' buffers pinned before are
     /// closed into the quarantine rather than unpinned.
@@ -143,6 +146,7 @@ impl Controller {
             port_changes: Waiters::default(),
             _interrupts: RefCell::new(Vec::new()),
             pages: RefCell::new(Vec::new()),
+            lent: RefCell::new(Vec::new()),
             unconfirmed: Unconfirmed::default(),
             manager: RefCell::new(None),
         });
@@ -157,20 +161,39 @@ impl Controller {
         Contiguous::new(&self.dma, &self.bti, self.process, size, self.below_4g)
     }
 
-    /// A zeroed page for the data of a transfer.
+    /// A zeroed page for the data of a transfer. A page of the pool that
+    /// was lent before a reset that an endpoint did not confirm by
+    /// stopping, which the controller may still reach, is dropped, which
+    /// leaves it in the quarantine (MIKSPEC-0080.R7), rather than reused.
     pub fn page(&self) -> Result<Contiguous, Status> {
-        match self.pages.borrow_mut().pop() {
-            Some(page) => {
-                page.zero();
-                Ok(page)
+        let page = loop {
+            match self.pages.borrow_mut().pop() {
+                Some((page, mark)) if mark.passed() => drop(page),
+                Some((page, _)) => {
+                    page.zero();
+                    break page;
+                }
+                None => break self.memory(PAGE)?,
             }
-            None => self.memory(PAGE),
-        }
+        };
+        let mark = self.unconfirmed.mark();
+        self.lent.borrow_mut().push((page.physical(0), mark));
+        Ok(page)
     }
 
-    /// Gives back a page from `page`.
+    /// Gives back a page from `page`, to the pool unless a reset that an
+    /// endpoint did not confirm came since it was lent.
     pub fn give_page(&self, page: Contiguous) {
-        self.pages.borrow_mut().push(page);
+        let mark = {
+            let mut lent = self.lent.borrow_mut();
+            match lent.iter().position(|(at, _)| *at == page.physical(0)) {
+                Some(i) => lent.swap_remove(i).1,
+                None => self.unconfirmed.mark(),
+            }
+        };
+        if !mark.passed() {
+            self.pages.borrow_mut().push((page, mark));
+        }
     }
 
     /// A transfer ring of `segments` pages.

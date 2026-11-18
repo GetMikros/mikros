@@ -4,6 +4,7 @@
 
 use crate::ata::Ata;
 use crate::ata::timeouts::{Action, Timeouts};
+use crate::driver::disk::Memory;
 use crate::driver::hba::{TimedOut, wait};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -12,10 +13,8 @@ use core::future::poll_fn;
 use core::sync::atomic::{Ordering, fence};
 use core::task::{Poll, Waker};
 use mikros_rt::exec::Reactor;
-use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
-use mikros_rt::sys;
 use mikros_storage::{Contiguous, MS, Mmio, Unconfirmed, now};
 
 /// The port registers, from the port's base.
@@ -105,7 +104,10 @@ pub struct Port {
     pub number: u32,
     hba: Rc<Mmio>,
     base: u64,
-    memory: Contiguous,
+    /// Where DMA memory comes from, and the port's command list, received
+    /// FISes and command tables, which `renew_tables` replaces.
+    memory: Rc<Memory>,
+    tables: RefCell<Contiguous>,
     /// The resets that the port did not confirm by stopping, after which
     /// the memory pinned for its disk before is not reused.
     pub unconfirmed: Unconfirmed,
@@ -116,28 +118,16 @@ pub struct Port {
 }
 
 impl Port {
-    /// Port `number` of the HBA, with `slots` command slots and memory
-    /// from the `DMA` resource `dma`, below 4 GiB when `below_4g` is true.
-    pub fn new(
-        number: u32,
-        hba: Rc<Mmio>,
-        slots: u32,
-        dma: &OwnedHandle,
-        bti: &OwnedHandle,
-        process: sys::Handle,
-        below_4g: bool,
-    ) -> Result<Port, Status> {
-        let size = TABLES + TABLE_SIZE * u64::from(slots);
-        let memory = Contiguous::new(dma, bti, process, size, below_4g)?;
-        for slot in 0..u64::from(slots) {
-            let header = COMMAND_LIST + 32 * slot;
-            memory.write64(header + 8, memory.physical(TABLES + TABLE_SIZE * slot));
-        }
+    /// Port `number` of the HBA, with `slots` command slots and DMA
+    /// memory from `memory`.
+    pub fn new(number: u32, hba: Rc<Mmio>, slots: u32, memory: Rc<Memory>) -> Result<Port, Status> {
+        let tables = tables(&memory, slots)?;
         Ok(Port {
             number,
             hba,
             base: 0x100 + 0x80 * u64::from(number),
             memory,
+            tables: RefCell::new(tables),
             unconfirmed: Unconfirmed::default(),
             slots,
             depth: Cell::new(1),
@@ -159,6 +149,38 @@ impl Port {
         self.hba.read32(self.base + register)
     }
 
+    /// Moves the port to new memory for its command list, received FISes
+    /// and command tables, after a reset that it did not confirm by
+    /// stopping, with the headers and tables of the commands copied, so
+    /// that outstanding ones can be issued again. The old memory, which
+    /// the HBA may still reach, is dropped, which leaves it in the
+    /// quarantine (MIKSPEC-0080.R7) rather than reused. Without new
+    /// memory, the old is kept and that is logged.
+    fn renew_tables(&self) {
+        let fresh = match tables(&self.memory, self.slots) {
+            Ok(fresh) => fresh,
+            Err(status) => {
+                mikros_rt::log!(
+                    Error,
+                    "ahci: port {} keeps its command tables after its reset: {status:?}",
+                    self.number
+                );
+                return;
+            }
+        };
+        let old = self.tables.replace(fresh);
+        let fresh = self.tables.borrow();
+        for slot in 0..u64::from(self.slots) {
+            let header = COMMAND_LIST + 32 * slot;
+            fresh.write32(header, old.read32(header));
+            fresh.write32(header + 4, old.read32(header + 4));
+            let table = TABLES + TABLE_SIZE * slot;
+            for at in (table..table + TABLE_SIZE).step_by(4) {
+                fresh.write32(at, old.read32(at));
+            }
+        }
+    }
+
     fn write(&self, register: u64, value: u32) {
         self.hba.write32(self.base + register, value);
     }
@@ -169,10 +191,10 @@ impl Port {
     /// enables FIS reception and its interrupts.
     pub async fn set_up(&self, reactor: &Reactor, spin_up: bool) -> Result<(), TimedOut> {
         self.stop(reactor).await?;
-        let (list, fis) = (
-            self.memory.physical(COMMAND_LIST),
-            self.memory.physical(RECEIVED_FIS),
-        );
+        let (list, fis) = {
+            let tables = self.tables.borrow();
+            (tables.physical(COMMAND_LIST), tables.physical(RECEIVED_FIS))
+        };
         self.hba.write64(self.base + CLB, list);
         self.hba.write64(self.base + FB, fis);
         self.write(SERR, u32::MAX);
@@ -304,7 +326,7 @@ impl Port {
 
     /// Writes the command header and table of `slot`.
     fn fill(&self, slot: u32, ata: Ata, data: &[(u64, u32)], write: bool, queued: bool) {
-        let m = &self.memory;
+        let m = &*self.tables.borrow();
         let header = COMMAND_LIST + 32 * u64::from(slot);
         // The FIS is 5 dwords.
         let dw0 = 5 | u32::from(write) << 6 | (data.len() as u32) << 16;
@@ -466,6 +488,7 @@ impl Port {
             );
             self.unconfirmed.note();
             let _ = manager.request_reset().await;
+            self.renew_tables();
         }
         let sctl = self.read(SCTL) & !0xF;
         self.write(SCTL, sctl | 1);
@@ -522,4 +545,16 @@ enum Recovery {
 /// at most `LINK_LIMIT`.
 pub async fn wait_for_links(ports: &[Port], reactor: &Reactor) {
     let _ = wait(reactor, LINK_LIMIT, || ports.iter().all(Port::linked)).await;
+}
+
+/// New memory from `memory` for a port's command list, received FISes and
+/// the command tables of its `slots` slots, each command header pointing
+/// at its table.
+fn tables(memory: &Memory, slots: u32) -> Result<Contiguous, Status> {
+    let tables = memory.contiguous(TABLES + TABLE_SIZE * u64::from(slots))?;
+    for slot in 0..u64::from(slots) {
+        let header = COMMAND_LIST + 32 * slot;
+        tables.write64(header + 8, tables.physical(TABLES + TABLE_SIZE * slot));
+    }
+    Ok(tables)
 }

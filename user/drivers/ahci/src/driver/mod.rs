@@ -218,15 +218,7 @@ async fn start(
     });
     let mut ports = Vec::new();
     for number in crate::driver::hba::ports(&mmio) {
-        let port = Port::new(
-            number,
-            mmio.clone(),
-            caps.slots,
-            &memory.dma,
-            &memory.bti,
-            process,
-            memory.below_4g,
-        )?;
+        let port = Port::new(number, mmio.clone(), caps.slots, memory.clone())?;
         port.set_up(reactor, caps.staggered_spin_up)
             .await
             .map_err(|_| Status::Internal)?;
