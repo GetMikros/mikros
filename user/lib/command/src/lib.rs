@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+pub mod node;
 mod things;
 
 pub use things::Thing;

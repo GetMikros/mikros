@@ -88,6 +88,26 @@ impl Spec {
     }
 }
 
+/// For a command's tests: whether its completion file at `path` holds
+/// what its tables declare, as `Err` with what it should hold otherwise.
+/// With the environment variable `MIKROS_BLESS` set to 1, writes the
+/// file instead.
+pub fn declared(spec: &'static Spec, path: &std::path::Path) -> Result<(), String> {
+    let wanted = spec.declaration();
+    if std::env::var("MIKROS_BLESS").is_ok_and(|v| v == "1") {
+        return std::fs::write(path, &wanted)
+            .map_err(|e| format!("writing {}: {e}", path.display()));
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) if text == wanted => Ok(()),
+        Ok(_) => Err(format!(
+            "{} differs from the tables; MIKROS_BLESS=1 rewrites it:\n{wanted}",
+            path.display()
+        )),
+        Err(e) => Err(format!("reading {}: {e}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::spec::{Kind, Operand, Opt, Spec};

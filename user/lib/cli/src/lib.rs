@@ -17,6 +17,7 @@ mod usage;
 pub use colour::{Paint, Role};
 pub use spec::{Kind, Operand, Opt, Parsed, Run, Spec};
 pub use start::{complain, start};
+pub use usage::declared;
 
 use alloc::format;
 use alloc::string::String;
