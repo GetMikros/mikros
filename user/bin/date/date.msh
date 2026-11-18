@@ -1,0 +1,15 @@
+# What `date` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern date(
+    format?: string "+ and the format to write the time in, with the conversions of strftime",
+    --utc(-u): bool "write and read times in UTC",
+    --date(-d): string "write this time instead of now",
+    --reference(-r): file "write the modified time of this file",
+    --set(-s): string "set the system time to this time",
+    --iso-8601(-I): [date seconds] "write ISO 8601: the date, the default, or with seconds",
+    --rfc-email(-R): bool "write RFC 5322, as e-mail dates",
+    --rfc-3339: [date seconds] "write RFC 3339: the date, or with seconds",
+    --json: bool "write an object with utc, local and zone",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
