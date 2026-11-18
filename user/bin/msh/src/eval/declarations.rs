@@ -1,5 +1,7 @@
 //! What `extern` declared, by command and subcommands: the last
-//! declaration of each wins.
+//! declaration of each wins, and the options declared for a command or
+//! subcommand also apply to the subcommands below it, unless one of
+//! those declares an option of the same name.
 
 use crate::ast::{Extern, StatementKind};
 use std::collections::BTreeMap;
@@ -41,21 +43,44 @@ impl Declarations {
     }
 
     /// What the command `name`, or the subcommands `path` below it,
-    /// takes, as declared last for it. A subcommand that only has
-    /// subcommands of its own declared takes nothing; `None` when nothing
-    /// is declared for `path` or below it.
+    /// takes: what was declared last for it, with the options declared
+    /// above it that it does not declare by the same name, the nearest
+    /// first. A subcommand that only has subcommands of its own declared
+    /// takes those options alone; `None` when nothing is declared for
+    /// `path` or below it.
     pub fn get(&self, name: &str, path: &[String]) -> Option<Rc<Extern>> {
         if !self.known(name, path) {
             return None;
         }
         let exact = self.declared.get(&(name.to_owned(), path.to_vec()));
-        Some(exact.cloned().unwrap_or_else(|| {
-            Rc::new(Extern {
+        let above: Vec<&Rc<Extern>> = (0..path.len())
+            .rev()
+            .filter_map(|depth| {
+                self.declared
+                    .get(&(name.to_owned(), path[..depth].to_vec()))
+            })
+            .collect();
+        if let Some(exact) = exact
+            && above.is_empty()
+        {
+            return Some(exact.clone());
+        }
+        let mut found = match exact {
+            Some(exact) => (**exact).clone(),
+            None => Extern {
                 command: name.to_owned(),
                 subcommands: path.to_vec(),
                 ..Extern::default()
-            })
-        }))
+            },
+        };
+        for declared in above {
+            for option in &declared.options {
+                if !found.options.iter().any(|o| o.same_name(option)) {
+                    found.options.push(option.clone());
+                }
+            }
+        }
+        Some(Rc::new(found))
     }
 
     /// The subcommands declared right below the subcommands `path` of the
@@ -97,6 +122,30 @@ mod tests {
         assert_eq!(add.positional[0].label, "url");
         assert!(d.get("tig", &[]).is_none());
         assert!(d.get("git", &path(&["push"])).is_none());
+    }
+
+    #[test]
+    fn applies_options_to_the_subcommands_below_unless_they_declare_them() {
+        let d = Declarations::parse(
+            "extern git(--verbose(-v): bool \"say more\", -C: folder, --git-dir: folder)\n\
+             extern git remote(--verbose: string)\n\
+             extern git remote add(-f: bool, --git-dir: string)",
+        );
+        let remote = d.get("git", &path(&["remote"])).unwrap();
+        // `--verbose` is the remote's own, without the `-v` of git's.
+        assert_eq!(forms(&remote), ["--verbose", "-C", "--git-dir"]);
+        assert_eq!(remote.option("--verbose").unwrap().kind.written(), "string");
+        assert!(remote.option("-v").is_none());
+        let add = d.get("git", &path(&["remote", "add"])).unwrap();
+        assert_eq!(forms(&add), ["-f", "--git-dir", "--verbose", "-C"]);
+        // The nearest declaration of a name wins.
+        assert_eq!(add.option("--git-dir").unwrap().kind.written(), "string");
+        assert_eq!(add.option("--verbose").unwrap().kind.written(), "string");
+        assert_eq!(add.option("-C").unwrap().kind.written(), "folder");
+        // A subcommand declared only through those below it takes the
+        // options above it.
+        let d = Declarations::parse("extern git(--x: bool)\nextern git remote add()");
+        assert_eq!(forms(&d.get("git", &path(&["remote"])).unwrap()), ["--x"]);
     }
 
     #[test]

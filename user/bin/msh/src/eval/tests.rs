@@ -802,3 +802,22 @@ fn sudo_always_runs_usr_bin_sudo_and_cannot_be_redefined() {
     }
     assert_eq!(run(&mut s, "sudo ls").unwrap(), "real ls");
 }
+
+#[test]
+fn applies_declared_options_to_subcommands_below() {
+    let mut s = shell();
+    run(
+        &mut s,
+        "extern git(--verbose(-v): bool, -C: folder)\nextern git remote add(-f: bool, -C: string)",
+    )
+    .unwrap();
+    let path = ["remote".to_string(), "add".to_string()];
+    let add = s.declaration("git", &path).unwrap();
+    let forms: Vec<String> = add.options.iter().flat_map(|o| o.forms()).collect();
+    assert_eq!(forms, ["-f", "-C", "--verbose", "-v"]);
+    assert_eq!(add.option("-C").unwrap().kind, ParamType::String);
+    assert_eq!(s.subcommands("git", &[]), ["remote"]);
+    assert_eq!(s.subcommands("git", &path[..1]), ["add"]);
+    // Declarations change nothing that runs.
+    assert_eq!(run(&mut s, "echo -C x").unwrap(), "-C x\n");
+}

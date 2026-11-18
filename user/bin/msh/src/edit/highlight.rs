@@ -17,11 +17,10 @@
 //! reads each time it draws the line, so that the colours can be
 //! changed there or at the prompt.
 
-use super::complete::Sources;
-use crate::ast::{Extern, ParamType};
+use super::complete::{Sources, Taken, Walk};
+use crate::ast::ParamType;
 use crate::value::Value;
 use std::collections::HashSet;
-use std::rc::Rc;
 
 /// How a part of the line is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,17 +225,6 @@ fn reader<'a>(line: &'a str, sources: &'a dyn Sources) -> Reader<'a> {
     reader
 }
 
-/// Where the arguments of a declared command are.
-struct Arguments {
-    name: String,
-    declared: Option<Rc<Extern>>,
-    /// Whether the next word may name a subcommand.
-    first: bool,
-    position: usize,
-    /// The type of the value that the option before takes.
-    option_value: Option<ParamType>,
-}
-
 struct Reader<'a> {
     line: &'a str,
     /// The byte being read.
@@ -250,8 +238,8 @@ struct Reader<'a> {
     /// Whether the next word is the target of `>`, `>>` or `2>`, which
     /// need not exist.
     target: bool,
-    /// The arguments of the command read, when it is declared.
-    arguments: Option<Arguments>,
+    /// The arguments of the command read.
+    arguments: Option<Walk>,
     /// Whether the statement read is an `extern` declaration, whose words
     /// are no commands.
     declaring: bool,
@@ -387,7 +375,7 @@ impl Reader<'_> {
         // not looked up.
         let typed = self.line[start..end].to_owned();
         let looked_up = !quoted && super::complete::expanded(&typed, self.sources).is_some();
-        let kind = match command || target || !looked_up {
+        let kind = match command || target {
             true => None,
             false => self.argument_type(&typed),
         };
@@ -401,13 +389,7 @@ impl Reader<'_> {
                 self.arguments = None;
             } else if matches!(style, Style::Command | Style::Error) {
                 self.commands.push(bare.clone());
-                self.arguments = Some(Arguments {
-                    declared: self.sources.declaration(&bare, &[]),
-                    name: bare.clone(),
-                    first: true,
-                    position: 0,
-                    option_value: None,
-                });
+                self.arguments = Some(Walk::new(&bare, self.sources));
             }
             style
         } else if !looked_up || never_missing(&typed) {
@@ -490,25 +472,11 @@ impl Reader<'_> {
     /// its position or the option before it gives it; a word that names a
     /// declared subcommand turns to that subcommand's declaration.
     fn argument_type(&mut self, word: &str) -> Option<ParamType> {
-        let arguments = self.arguments.as_mut()?;
-        if std::mem::take(&mut arguments.first)
-            && let Some(declared) = self
-                .sources
-                .declaration(&arguments.name, &[word.to_owned()])
-        {
-            arguments.declared = Some(declared);
-            return None;
+        let sources = self.sources;
+        match self.arguments.as_mut()?.take(word, sources) {
+            Taken::Value(kind) => kind,
+            Taken::Subcommand | Taken::Option => None,
         }
-        let declared = arguments.declared.as_ref()?;
-        if let Some(kind) = arguments.option_value.take() {
-            return Some(kind);
-        }
-        if word.starts_with('-') && word != "-" {
-            arguments.option_value = declared.option_value(word).cloned();
-            return None;
-        }
-        arguments.position += 1;
-        declared.positional_type(arguments.position - 1).cloned()
     }
 
     /// Whether an entry of the folder of `path`, one that `fits` by
@@ -643,7 +611,8 @@ mod tests {
 
     fn declarations() -> Declarations {
         Declarations::parse(&format!(
-            "{}\nextern pick(target: file, ...rest: path)\nextern git push(--repo: folder)",
+            "{}\nextern pick(target: file, ...rest: path)\nextern git push(--repo: folder)\n\
+             extern vcs(-C: folder)\nextern vcs remote add(dest: folder, -f: file)",
             crate::eval::builtins::DECLARATIONS
         ))
     }
@@ -743,6 +712,29 @@ mod tests {
         // A path that an entry still completes is no error yet.
         assert_eq!(shown("cat ./no ./sr /u ./zz"), "ccc.aaaa.aaaa.aa.EEEE");
         assert_eq!(shown("cd sr; cd no"), "cc.aa|.cc.EE");
+    }
+
+    #[test]
+    fn colours_positions_of_nested_subcommands_and_short_options() {
+        // `-C` is declared above the subcommands, and applies to them.
+        assert_eq!(
+            shown("vcs -C nope remote add src"),
+            "EEE.aa.EEEE.aaaaaa.aaa.ppp"
+        );
+        assert_eq!(
+            shown("vcs remote add notes.txt"),
+            "EEE.aaaaaa.aaa.EEEEEEEEE"
+        );
+        assert_eq!(shown("vcs remote add -f src"), "EEE.aaaaaa.aaa.aa.EEE");
+        assert_eq!(
+            shown("vcs remote add -C nope -f notes.txt"),
+            "EEE.aaaaaa.aaa.aa.EEEE.aa.ppppppppp"
+        );
+        // Quoted words take their positions too: the file is past them.
+        assert_eq!(
+            shown("vcs remote add 'x' notes.txt"),
+            "EEE.aaaaaa.aaa.sss.ppppppppp"
+        );
     }
 
     #[test]

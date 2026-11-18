@@ -133,6 +133,17 @@ pub struct Declared {
 }
 
 impl Declared {
+    /// Whether `other` declares the option of the same name: the same
+    /// long form, or, for two that have only a short form, the same
+    /// short one.
+    pub fn same_name(&self, other: &Declared) -> bool {
+        match (&self.long, &other.long) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self.short == other.short,
+            _ => false,
+        }
+    }
+
     /// The forms the option is typed in: `--long`, then `-short`.
     pub fn forms(&self) -> Vec<String> {
         let long = self.long.iter().map(|l| format!("--{l}"));

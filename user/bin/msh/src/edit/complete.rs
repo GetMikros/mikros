@@ -66,6 +66,102 @@ pub trait Sources {
     }
 }
 
+/// What an argument of a declared command is, as `Walk` reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Taken {
+    /// It names a subcommand, whose declaration the arguments after it
+    /// take.
+    Subcommand,
+    /// An option, `--name` or `-x`.
+    Option,
+    /// A value, of the declared type if one is declared for it.
+    Value(Option<ParamType>),
+}
+
+/// The arguments of a command, read one by one as its declaration and
+/// those of its subcommands take them: a word that is no option, before
+/// any positional argument of the command or subcommand read, names a
+/// subcommand when one of that name is declared below it; an option that
+/// takes a value takes the next word.
+pub struct Walk {
+    name: String,
+    path: Vec<String>,
+    declared: Option<Rc<Extern>>,
+    /// The positional arguments taken since the last subcommand.
+    position: usize,
+    /// The type of the value that the option before takes.
+    option_value: Option<ParamType>,
+}
+
+impl Walk {
+    /// The walk of the arguments of the command `name`.
+    pub fn new(name: &str, sources: &dyn Sources) -> Walk {
+        Walk {
+            name: name.to_owned(),
+            path: Vec::new(),
+            declared: sources.declaration(name, &[]),
+            position: 0,
+            option_value: None,
+        }
+    }
+
+    /// The declaration that the arguments read so far reach.
+    pub fn declared(&self) -> Option<&Rc<Extern>> {
+        self.declared.as_ref()
+    }
+
+    /// Takes the argument `word`.
+    pub fn take(&mut self, word: &str, sources: &dyn Sources) -> Taken {
+        if let Some(kind) = self.option_value.take() {
+            return Taken::Value(Some(kind));
+        }
+        if word.starts_with('-') && word != "-" {
+            self.option_value = self
+                .declared
+                .as_ref()
+                .and_then(|d| d.option_value(word).cloned());
+            return Taken::Option;
+        }
+        if self.position == 0 {
+            let mut path = self.path.clone();
+            path.push(word.to_owned());
+            if sources
+                .subcommands(&self.name, &self.path)
+                .iter()
+                .any(|s| s == word)
+                && let Some(declared) = sources.declaration(&self.name, &path)
+            {
+                self.path = path;
+                self.declared = Some(declared);
+                return Taken::Subcommand;
+            }
+        }
+        self.position += 1;
+        let declared = self.declared.as_ref();
+        Taken::Value(declared.and_then(|d| d.positional_type(self.position - 1).cloned()))
+    }
+
+    /// The type of the next word, by the option before it or its
+    /// position; `None` past what is declared.
+    pub fn next_type(&self) -> Option<ParamType> {
+        if let Some(kind) = &self.option_value {
+            return Some(kind.clone());
+        }
+        self.declared
+            .as_ref()?
+            .positional_type(self.position)
+            .cloned()
+    }
+
+    /// The subcommands that the next word may name.
+    pub fn subcommands(&self, sources: &dyn Sources) -> Vec<String> {
+        match self.position == 0 && self.option_value.is_none() {
+            true => sources.subcommands(&self.name, &self.path),
+            false => Vec::new(),
+        }
+    }
+}
+
 /// The options of built-in commands that their declarations cannot
 /// give, with what they do.
 const BUILTIN_OPTIONS: [(&str, &str, &str); 11] = [
@@ -274,52 +370,42 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
         quote_names(commands(&word, sources), open)
     } else if index == first {
         files(&word, raw, sources, open)
-    } else if word.starts_with('-') {
-        let command = &words[first..index];
-        let mut found = options(&word, command, sources);
-        if let Some((declared, _)) = declared(command, sources) {
-            found.extend(declared_options(&word, &declared));
-        }
-        found
     } else {
         let command = &words[first..index];
-        let subcommands = match index == first + 1 {
-            true => sources.subcommands(&command[0].1, &[]),
-            false => Vec::new(),
-        };
-        let kind = match declared(command, sources) {
-            Some((declared, skip)) => value_type(&declared, &command[skip..]),
-            None => option_type(command, sources),
-        };
-        let mut found: Vec<Candidate> = subcommands
-            .into_iter()
-            .filter(|s| s.starts_with(&word))
-            .map(|s| candidate(s.clone(), s, Some("subcommand"), true))
-            .collect();
-        match (kind, found.is_empty()) {
-            (Some(kind), _) => found.extend(by_type(&kind, &word, raw, sources, open)),
-            // Subcommands are offered without files.
-            (None, true) => found = files(&word, raw, sources, open),
-            (None, false) => {}
+        let mut walk = Walk::new(&command[0].1, sources);
+        for (_, arg) in &command[1..] {
+            walk.take(arg, sources);
         }
-        found
+        let declared = walk.declared().cloned();
+        if word.starts_with('-') {
+            let mut found = options(&word, command, sources);
+            if let Some(declared) = &declared {
+                found.extend(declared_options(&word, declared));
+            }
+            found
+        } else {
+            let kind = match &declared {
+                Some(_) => walk.next_type(),
+                None => option_type(command, sources),
+            };
+            let mut found: Vec<Candidate> = walk
+                .subcommands(sources)
+                .into_iter()
+                .filter(|s| s.starts_with(&word))
+                .map(|s| candidate(s.clone(), s, Some("subcommand"), true))
+                .collect();
+            match (kind, found.is_empty()) {
+                (Some(kind), _) => found.extend(by_type(&kind, &word, raw, sources, open)),
+                // Subcommands are offered without files.
+                (None, true) => found = files(&word, raw, sources, open),
+                (None, false) => {}
+            }
+            found
+        }
     };
     candidates.sort_by(|a, b| a.text.cmp(&b.text));
     candidates.dedup_by(|a, b| a.text == b.text);
     Completion { start, candidates }
-}
-
-/// The declaration of the command whose words are `command`, its
-/// subcommand's when the second word is one, with how many words name
-/// it.
-fn declared(command: &[(usize, String)], sources: &dyn Sources) -> Option<(Rc<Extern>, usize)> {
-    let name = &command.first()?.1;
-    if let Some((_, sub)) = command.get(1)
-        && let Some(declared) = sources.declaration(name, std::slice::from_ref(sub))
-    {
-        return Some((declared, 2));
-    }
-    sources.declaration(name, &[]).map(|d| (d, 1))
 }
 
 /// The options of `declared` that start as `word` does, long and short,
@@ -337,28 +423,6 @@ fn declared_options(word: &str, declared: &Extern) -> Vec<Candidate> {
         }
     }
     found
-}
-
-/// The type of the value that follows the arguments `args` of a declared
-/// command: that of the option before it when that takes a value, and
-/// otherwise that of its position, or of the rest; `None` past them.
-fn value_type(declared: &Extern, args: &[(usize, String)]) -> Option<ParamType> {
-    let mut position = 0;
-    let mut option_value = None;
-    for (_, arg) in args {
-        if option_value.take().is_some() {
-            continue;
-        }
-        if arg.starts_with('-') && arg != "-" {
-            option_value = declared.option_value(arg).cloned();
-            continue;
-        }
-        position += 1;
-    }
-    if option_value.is_some() {
-        return option_value;
-    }
-    declared.positional_type(position).cloned()
 }
 
 /// The candidates for a value of type `kind`: only folders for a
@@ -605,6 +669,8 @@ extern git push(remote?: [origin upstream], ...refs: string, --force(-f): bool "
 extern cd(folder?: folder)
 extern print(--n(-n): bool, ...values: any)
 extern pick(choice: [red green], target: file, run: command)
+extern vcs(--verbose(-v): bool "say more", -C: folder "where to run")
+extern vcs remote add(name: string, url: string, -f: bool "fetch it")
 "#;
 
     impl Sources for Fake {
@@ -749,6 +815,25 @@ extern pick(choice: [red green], target: file, run: command)
         assert_eq!(texts("pick red notes.txt ca"), ["cat"]);
         // Past what is declared, files.
         assert_eq!(texts("pick red notes.txt cat n"), ["notes.txt"]);
+    }
+
+    #[test]
+    fn completes_subcommands_at_any_depth_with_the_options_above() {
+        assert_eq!(texts("vcs "), ["remote"]);
+        assert_eq!(texts("vcs remote "), ["add"]);
+        // A subcommand may follow options, and options their values.
+        assert_eq!(texts("vcs -v remote a"), ["add"]);
+        assert_eq!(texts("vcs -C src remote a"), ["add"]);
+        // Its own options, and those of the command above it.
+        assert_eq!(texts("vcs remote add -"), ["--verbose", "-C", "-f", "-v"]);
+        let c = complete("vcs remote add -f", 17, &Fake);
+        assert_eq!(c.candidates[0].description.as_deref(), Some("fetch it"));
+        // The value of an option that has only a short form.
+        assert_eq!(texts("vcs -C "), ["src/"]);
+        assert_eq!(texts("vcs remote add -C "), ["src/"]);
+        // A positional argument is no subcommand, and after one none is.
+        assert!(texts("vcs remote add origin ").is_empty());
+        assert_eq!(texts("vcs x a"), Vec::<String>::new());
     }
 
     #[test]
