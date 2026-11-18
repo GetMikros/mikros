@@ -1,0 +1,14 @@
+# What `ln` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern ln(
+    ...target: path "what to link to, then the link's name or the folder for the links",
+    --symbolic(-s): bool "create symbolic links, not hard links",
+    --force(-f): bool "remove names that exist",
+    --no-dereference(-n): bool "treat a name that is a link to a folder as a file",
+    --relative(-r): bool "with -s, make targets relative to the link's folder",
+    --target-directory(-t): folder "create the links in this folder",
+    --no-target-directory(-T): bool "treat the last operand as the link's name, never as a folder",
+    --verbose(-v): bool "name each link created",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
