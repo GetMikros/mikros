@@ -1,25 +1,26 @@
 //! The shell as the source of what Tab completes: its functions with
 //! their flags, its variables and environment, the programs of
-//! `$env.PATH`, folders, the options that scripts declare, and the names
-//! of the system's things. Folders are listed through the listings the
-//! shell keeps between keys, and the system's things once for each line.
+//! `$env.PATH`, folders, the options that scripts declare, the names of
+//! the system's things, and what completion runs. Folders are listed
+//! through the listings the shell keeps between keys, and the system's
+//! things once for each line.
 
 use super::listings::Disk;
 use super::{Shell, System};
 use crate::ast::{Extern, Param, StatementKind, Thing};
-use crate::edit::complete::{Sources, collapsed};
+use crate::edit::complete::{Request, Sources, collapsed};
 use crate::value::{Value, scalar_text};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 impl<S: System> Shell<S> {
-    /// Lists folders and the system's things anew for the next line,
-    /// keeping the programs of `PATH`, which are listed again once their
-    /// folder changes.
+    /// Lists folders and the system's things anew for the next line, and
+    /// runs `from cached` types anew, keeping the programs of `PATH`,
+    /// which are listed again once their folder changes.
     pub fn new_line(&mut self) {
         self.listings.forget_entries();
-        self.things.borrow_mut().clear();
+        self.forget_candidates();
     }
 
     /// Starts the thread that reads folders on `disk` for suggestions,
@@ -87,6 +88,10 @@ impl<S: System> Sources for Shell<S> {
         let names = self.system.things(thing);
         self.things.borrow_mut().insert(thing, names.clone());
         names
+    }
+
+    fn run(&mut self, request: &Request) -> Vec<String> {
+        self.completion_lines(request)
     }
 
     fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {

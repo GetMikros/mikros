@@ -58,6 +58,9 @@ impl<S: System> Shell<S> {
             found.push(self.find(command)?);
         }
         if p.background {
+            if self.deadline.is_some() {
+                return Err(self.fail("completion runs nothing in the background".into()));
+            }
             if !found.iter().all(|f| matches!(f, Found::Program(_))) {
                 return Err(self.fail("only programs run in the background".into()));
             }
@@ -74,6 +77,7 @@ impl<S: System> Shell<S> {
                 input: Input::Inherit,
                 capture: false,
                 background: true,
+                deadline: None,
             };
             self.system.run(run).map_err(|e| self.fail(e))?;
             return Ok(Value::Null);
@@ -140,6 +144,8 @@ impl<S: System> Shell<S> {
         failure: &mut Option<super::Failure>,
     ) -> Result<Carry, Flow> {
         let input = match carry {
+            // Completion's programs read nothing.
+            Carry::Nothing if self.deadline.is_some() => Input::Bytes(Vec::new()),
             Carry::Nothing => Input::Inherit,
             Carry::Value(v) => Input::Bytes(program_text(&v).into_bytes()),
             Carry::Bytes(b) => Input::Bytes(b),
@@ -152,6 +158,7 @@ impl<S: System> Shell<S> {
             input,
             capture: capture || gathered,
             background: false,
+            deadline: self.deadline,
         };
         let Ran { ended, output } = self.system.run(run).map_err(|e| self.fail(e))?;
         if let Some(f) = self.ended(&names, &ended) {

@@ -2,8 +2,10 @@
 //! std, programs started with `std::process::Command` and joined by
 //! pipes, and, in an interactive shell, each pipeline in a process group
 //! of its own, in the terminal's foreground unless it runs in the
-//! background. The names of the system's things come from their
-//! services, through `mikros-command`.
+//! background. What completion runs goes in a process group of its own
+//! that never has the terminal, and is killed at its deadline. The names
+//! of the system's things come from their services, through
+//! `mikros-command`.
 
 use crate::ast::{RedirectionKind, Thing};
 use crate::eval::glob::Folders;
@@ -16,7 +18,12 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
+
+/// Why a run of completion failed when it reached its deadline.
+const TOO_LONG: &str = "took longer than completion allows";
 
 /// How each process of a started pipeline ended, in order, once it did.
 struct Started {
@@ -83,17 +90,19 @@ impl Os {
         }
     }
 
-    /// Starts `program` with standard input `stdin` and output `stdout`,
-    /// the shell's for `None`, and its redirections, in process group
-    /// `group`, or in a new one for 0, and gives its process ID.
+    /// Starts `program` with standard input `stdin`, output `stdout` and
+    /// error `stderr`, the shell's for `None`, and its redirections, in
+    /// process group `group`, or in a new one for 0, and gives its
+    /// process ID.
     fn start(
         &self,
         program: &Program,
         stdin: Option<OwnedFd>,
         stdout: Option<OwnedFd>,
+        stderr: Option<OwnedFd>,
         group: i32,
     ) -> Result<i32, String> {
-        let mut ends = [stdin, stdout, None];
+        let mut ends = [stdin, stdout, stderr];
         for (kind, target) in &program.redirections {
             let opened = |file: io::Result<File>| match file {
                 Ok(file) => Ok(Some(OwnedFd::from(file))),
@@ -133,6 +142,92 @@ impl Os {
             let _ = sys::set_group(pid, if group == 0 { pid } else { group });
         }
         Ok(pid)
+    }
+
+    /// Runs `run` for completion until `deadline`: its programs read its
+    /// input, or nothing, in a process group of their own that never has
+    /// the terminal and in no job, and what they write to their error
+    /// stream is dropped. Once the deadline passes they are killed, and
+    /// the run fails.
+    fn run_until(&mut self, run: Run, deadline: Instant) -> Result<Ran, String> {
+        let bytes = match run.input {
+            Input::Bytes(bytes) => bytes,
+            Input::Inherit => Vec::new(),
+        };
+        let (reader, writer) = pipe()?;
+        thread::spawn(move || {
+            let _ = File::from(writer).write_all(&bytes);
+        });
+        let (errors, errors_writer) = pipe()?;
+        thread::spawn(move || {
+            let _ = io::copy(&mut File::from(errors), &mut io::sink());
+        });
+        let mut input = Some(reader);
+        let mut output = None;
+        let mut pids: Vec<i32> = Vec::new();
+        let count = run.programs.len();
+        for (i, program) in run.programs.iter().enumerate() {
+            let stdin = input.take();
+            let started = pipe().and_then(|(reader, writer)| {
+                let stderr = errors_writer.try_clone().map_err(|e| reason(&e))?;
+                match i + 1 < count {
+                    true => input = Some(reader),
+                    false => output = Some(reader),
+                }
+                let group = pids.first().copied().unwrap_or(0);
+                self.start(program, stdin, Some(writer), Some(stderr), group)
+            });
+            match started {
+                Ok(pid) => {
+                    let group = pids.first().copied().unwrap_or(pid);
+                    let _ = sys::set_group(pid, group);
+                    pids.push(pid);
+                }
+                Err(e) => {
+                    let ended = vec![None; pids.len()];
+                    kill_all(&pids, &ended);
+                    return Err(e);
+                }
+            }
+        }
+        drop(errors_writer);
+        let (sender, receiver) = mpsc::channel();
+        if let Some(fd) = output {
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = File::from(fd).read_to_end(&mut bytes);
+                let _ = sender.send(bytes);
+            });
+        }
+        let mut ended: Vec<Option<Ended>> = vec![None; pids.len()];
+        while ended.iter().any(Option::is_none) {
+            if Instant::now() >= deadline {
+                kill_all(&pids, &ended);
+                return Err(TOO_LONG.into());
+            }
+            for (at, &pid) in pids.iter().enumerate() {
+                if ended[at].is_some() {
+                    continue;
+                }
+                match sys::wait(pid, false) {
+                    Ok(Some((_, Change::Exited(code)))) => ended[at] = Some(Ended::Exited(code)),
+                    Ok(Some((_, Change::Signaled(signal)))) => {
+                        ended[at] = Some(Ended::Signaled(signal))
+                    }
+                    Ok(Some((_, Change::Stopped(_)))) | Ok(None) => {}
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    // It was waited for already: it cannot be followed.
+                    Err(_) => ended[at] = Some(Ended::Signaled(sys::SIGKILL)),
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        let output = receiver.recv_timeout(left).map_err(|_| TOO_LONG)?;
+        Ok(Ran {
+            ended: ended.into_iter().flatten().collect(),
+            output,
+        })
     }
 
     /// Records that process `pid` changed as `change`.
@@ -256,6 +351,21 @@ impl Os {
     }
 }
 
+/// Kills the processes `pids` of a run of completion that have not
+/// `ended`, with the rest of their group while its leader is not waited
+/// for, and waits for them.
+fn kill_all(pids: &[i32], ended: &[Option<Ended>]) {
+    if let (Some(&leader), Some(None)) = (pids.first(), ended.first()) {
+        let _ = sys::send(-leader, sys::SIGKILL);
+    }
+    for (&pid, ended) in pids.iter().zip(ended) {
+        if ended.is_none() {
+            let _ = sys::send(pid, sys::SIGKILL);
+            let _ = sys::wait(pid, true);
+        }
+    }
+}
+
 /// The names in the folder at `path`, each with whether it is a folder.
 fn read_entries(path: &str) -> Option<Vec<(String, bool)>> {
     let mut entries = Vec::new();
@@ -337,6 +447,9 @@ impl System for Os {
     }
 
     fn run(&mut self, run: Run) -> Result<Ran, String> {
+        if let Some(deadline) = run.deadline {
+            return self.run_until(run, deadline);
+        }
         let mut input = None;
         let mut feeder = None;
         if let Input::Bytes(bytes) = run.input {
@@ -362,7 +475,7 @@ impl System for Os {
                 None
             };
             let group = pids.first().copied().unwrap_or(0);
-            match self.start(program, stdin, stdout, group) {
+            match self.start(program, stdin, stdout, None, group) {
                 Ok(pid) => pids.push(pid),
                 Err(e) => {
                     for &pid in &pids {

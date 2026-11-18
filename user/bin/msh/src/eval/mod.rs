@@ -2,6 +2,7 @@
 //! environment, with the system behind the `System` trait.
 
 pub mod builtins;
+mod candidates;
 pub mod command;
 pub mod declarations;
 pub mod glob;
@@ -94,6 +95,11 @@ pub struct Shell<S: System> {
     declarations: declarations::Declarations,
     /// The commands whose declarations files were looked for.
     looked_up: std::collections::HashSet<String>,
+    /// While completion runs a pipeline: when it must have ended.
+    deadline: Option<std::time::Instant>,
+    /// The candidates of the `from cached` types run for the line being
+    /// edited, by the text of their pipelines.
+    cached: BTreeMap<String, Vec<String>>,
     /// The names of the system's things listed for the line being
     /// edited.
     things: std::cell::RefCell<BTreeMap<Thing, Vec<String>>>,
@@ -134,6 +140,8 @@ impl<S: System> Shell<S> {
             listings: listings::Listings::default(),
             declarations: declarations::Declarations::parse(builtins::DECLARATIONS),
             looked_up: Default::default(),
+            deadline: None,
+            cached: BTreeMap::new(),
             things: Default::default(),
         };
         shell.set_global("status", Value::Int(0));
@@ -500,10 +508,13 @@ impl<S: System> Shell<S> {
         }
     }
 
-    /// Writes to the shell's output, or the running function's.
+    /// Writes to the shell's output, or the running function's. While
+    /// completion runs a pipeline, which has no terminal, what goes to
+    /// the error stream is dropped.
     pub fn write(&mut self, stream: Stream, bytes: &[u8]) {
         match (stream, self.captures.last_mut()) {
             (Stream::Output, Some(capture)) => capture.extend_from_slice(bytes),
+            (Stream::Error, _) if self.deadline.is_some() => {}
             _ => self.system.write(stream, bytes),
         }
     }
@@ -511,6 +522,7 @@ impl<S: System> Shell<S> {
     fn statement(&mut self, statement: &Statement) -> Result<Value, Flow> {
         self.line = statement.line;
         self.command.clear();
+        self.in_time()?;
         match &statement.kind {
             StatementKind::Let { name, value } => {
                 let value = self.eval(value)?;
@@ -538,6 +550,7 @@ impl<S: System> Shell<S> {
             }
             StatementKind::While { condition, body } => {
                 while self.condition(condition)? {
+                    self.in_time()?;
                     self.scoped(false, |s| s.block(body))?;
                 }
                 Ok(Value::Null)
@@ -552,6 +565,7 @@ impl<S: System> Shell<S> {
                     }
                 };
                 for item in items {
+                    self.in_time()?;
                     self.scoped(false, |s| {
                         s.define(name, item);
                         s.block(body)

@@ -40,7 +40,6 @@ fn signal(name: &str) -> Option<i32> {
     SIGNALS.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
 }
 
-/// The names of the built-in commands, `run` among them.
 /// What the built-in commands take, declared as `extern` declares it.
 pub const DECLARATIONS: &str = r#"
 extern cd(folder?: folder "the folder to go to, or - for the one before")
@@ -51,6 +50,7 @@ extern kill(
 )
 "#;
 
+/// The names of the built-in commands, `run` among them.
 pub fn names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = BUILTINS
         .iter()
@@ -197,6 +197,9 @@ pub fn run<S: System>(
             Ok(Value::Null)
         }
         "fg" | "bg" => {
+            if name == "fg" {
+                shell.needs_terminal(name)?;
+            }
             shell.at_most(name, &values, 1)?;
             let id = values.first().map_or_else(|| "%+".to_owned(), scalar_text);
             let ran = shell
@@ -232,6 +235,7 @@ pub fn run<S: System>(
             Ok(Value::Null)
         }
         "exec" => {
+            shell.needs_terminal(name)?;
             let mut texts: Vec<String> = values.iter().map(scalar_text).collect();
             if texts.is_empty() {
                 return Err(shell.fail("`exec` takes a command".into()));

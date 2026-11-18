@@ -1,6 +1,6 @@
 use super::*;
 use crate::ast::Thing;
-use crate::edit::complete::Sources;
+use crate::edit::complete::{Request, Sources};
 use crate::jobs::Ended;
 use crate::parse::parse;
 use std::collections::BTreeMap;
@@ -68,6 +68,10 @@ impl System for Fake {
     }
     fn run(&mut self, run: Run) -> Result<Ran, String> {
         self.runs.push(run.clone());
+        // A program that would not end in time.
+        if run.deadline.is_some() && run.programs.iter().any(|p| p.path == "/bin/slow") {
+            return Err("took longer than completion allows".into());
+        }
         let mut data = match run.input {
             Input::Inherit => Vec::new(),
             Input::Bytes(b) => b,
@@ -851,4 +855,187 @@ fn lists_the_system_things_once_for_each_line() {
     assert!(s.without_waiting().things(Thing::Service).is_empty());
     Sources::things(&s, Thing::Service);
     assert_eq!(s.system.listed.get(), 2);
+}
+
+/// The `from` type of the positional argument `at` of the command
+/// `name`.
+fn source_of(s: &Shell<Fake>, name: &str, at: usize) -> Request {
+    match &s.declaration(name, &[]).unwrap().positional[at].kind {
+        ParamType::From(source) => Request::From(source.clone()),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn runs_from_pipelines_for_completion_without_the_terminal() {
+    let mut s = shell();
+    let names: Behaviour = |_, input| {
+        assert!(input.is_empty());
+        (0, b"main\nmine\n\nfeature\n".to_vec())
+    };
+    s.system.programs.insert("/bin/names".into(), names);
+    run(
+        &mut s,
+        "extern pick(a: from (names), b: from ([one two 3]), c: from cached (names | shout), \
+         d: from (/bin/false), e: from (print hi), f: from (exit 4), g: from (print oops >&2))",
+    )
+    .unwrap();
+    s.set_global("status", Value::Int(7));
+    let before = (s.system.output.len(), s.system.errors.len());
+    assert_eq!(
+        s.run(&source_of(&s, "pick", 0)),
+        ["main", "mine", "feature"]
+    );
+    let ran = s.system.runs.last().unwrap();
+    assert!(ran.deadline.is_some() && ran.capture && !ran.background);
+    assert_eq!(ran.input, Input::Bytes(Vec::new()));
+    assert_eq!(s.run(&source_of(&s, "pick", 1)), ["one", "two", "3"]);
+    // A pipeline that fails gives nothing, and one that exits ends
+    // only itself.
+    assert!(s.run(&source_of(&s, "pick", 3)).is_empty());
+    assert!(s.run(&source_of(&s, "pick", 5)).is_empty());
+    // What the shell writes goes to the candidates, or nowhere.
+    assert_eq!(s.run(&source_of(&s, "pick", 4)), ["hi"]);
+    assert!(s.run(&source_of(&s, "pick", 6)).is_empty());
+    assert_eq!(
+        (s.system.output.len(), s.system.errors.len()),
+        before,
+        "nothing reaches the terminal"
+    );
+    // The status stays.
+    assert_eq!(s.status(), 7);
+    // `from cached` runs once for the line.
+    let cached = source_of(&s, "pick", 2);
+    let runs = s.system.runs.len();
+    assert_eq!(s.run(&cached), ["MAIN", "MINE", "FEATURE"]);
+    assert_eq!(s.run(&cached), ["MAIN", "MINE", "FEATURE"]);
+    assert_eq!(s.system.runs.len(), runs + 1);
+    s.new_line();
+    s.run(&cached);
+    assert_eq!(s.system.runs.len(), runs + 2);
+    // Uncached ones run each time.
+    s.run(&source_of(&s, "pick", 0));
+    s.run(&source_of(&s, "pick", 0));
+    assert_eq!(s.system.runs.len(), runs + 4);
+}
+
+#[test]
+fn keeps_from_pipelines_from_the_terminal_and_the_background() {
+    let mut s = shell();
+    run(
+        &mut s,
+        "extern pick(a: from (fg), b: from (exec cat), c: from (cat &), d: from (cat))",
+    )
+    .unwrap();
+    for at in 0..3 {
+        assert!(s.run(&source_of(&s, "pick", at)).is_empty());
+    }
+    assert!(s.system.resumed.is_empty());
+    assert!(s.system.runs.is_empty());
+    // A program reads nothing, rather than the terminal.
+    assert!(s.run(&source_of(&s, "pick", 3)).is_empty());
+    assert_eq!(s.system.runs[0].input, Input::Bytes(Vec::new()));
+    // Outside completion, they run as before.
+    let _ = run(&mut s, "fg");
+    assert_eq!(s.system.resumed.len(), 1);
+}
+
+#[test]
+fn stops_from_pipelines_that_take_too_long() {
+    let mut s = shell();
+    run(
+        &mut s,
+        "fn spin() { while true { } }\nextern pick(a: from (spin), b: from (slow))",
+    )
+    .unwrap();
+    let slow: Behaviour = |_, _| (0, b"late\n".to_vec());
+    s.system.programs.insert("/bin/slow".into(), slow);
+    let started = std::time::Instant::now();
+    assert!(s.run(&source_of(&s, "pick", 0)).is_empty());
+    let took = started.elapsed();
+    assert!(took >= crate::eval::candidates::COMPLETION_TIME, "{took:?}");
+    assert!(
+        took < crate::eval::candidates::COMPLETION_TIME * 3,
+        "{took:?}"
+    );
+    assert!(s.run(&source_of(&s, "pick", 1)).is_empty());
+    // Outside completion, nothing is stopped.
+    assert_eq!(run(&mut s, "slow").unwrap(), "late\n");
+}
+
+#[test]
+fn asks_programs_for_their_candidates_in_completion_mode() {
+    let mut s = shell();
+    let tool: Behaviour = |args, input| {
+        assert!(input.is_empty());
+        let words = args[1..].join(",");
+        (0, format!("{words}\tthe words\nstop\n").into_bytes())
+    };
+    s.system.programs.insert("/bin/tool".into(), tool);
+    s.system.programs.insert("/system/bin/sudo".into(), tool);
+    let ask = |s: &mut Shell<Fake>, name: &str, words: &[&str]| {
+        s.run(&Request::Program {
+            name: name.into(),
+            words: words.iter().map(|w| w.to_string()).collect(),
+        })
+    };
+    assert_eq!(
+        ask(&mut s, "tool", &["stop", "te"]),
+        ["stop,te\tthe words", "stop"]
+    );
+    let ran = s.system.runs.last().unwrap();
+    let program = &ran.programs[0];
+    assert_eq!(program.args, ["tool", "stop", "te"]);
+    assert!(
+        program
+            .environment
+            .contains(&("MSH_COMPLETE".into(), "1".into()))
+    );
+    assert!(ran.deadline.is_some() && ran.capture);
+    assert_eq!(ran.input, Input::Bytes(Vec::new()));
+    assert_eq!(ask(&mut s, "sudo", &["x", ""]), ["x,\tthe words", "stop"]);
+    assert_eq!(
+        s.system.runs.last().unwrap().programs[0].path,
+        "/system/bin/sudo"
+    );
+    // A program that takes too long, or none, gives nothing.
+    let slow: Behaviour = |_, _| (0, b"late\n".to_vec());
+    s.system.programs.insert("/bin/slow".into(), slow);
+    assert!(ask(&mut s, "slow", &[""]).is_empty());
+    assert!(ask(&mut s, "nope", &[""]).is_empty());
+    // Functions and built-in commands of that name are not run.
+    let runs = s.system.runs.len();
+    run(&mut s, "fn tool() { print x }").unwrap();
+    assert!(ask(&mut s, "tool", &[""]).is_empty());
+    assert!(ask(&mut s, "print", &[""]).is_empty());
+    assert_eq!(s.system.runs.len(), runs);
+}
+
+#[test]
+fn completes_from_the_shell_on_tab() {
+    use crate::edit::complete::{complete, complete_on_tab};
+    let mut s = shell();
+    let tool: Behaviour = |args, _| {
+        let last = args.last().cloned().unwrap_or_default();
+        (0, format!("{last}x\tmore\nother\n").into_bytes())
+    };
+    s.system.programs.insert("/bin/tool".into(), tool);
+    run(
+        &mut s,
+        "extern tool(name: service) complete\nextern pick(x: from ([red green]))",
+    )
+    .unwrap();
+    let texts = |c: crate::edit::complete::Completion| -> Vec<String> {
+        c.candidates.into_iter().map(|c| c.text).collect()
+    };
+    assert_eq!(
+        texts(complete_on_tab("tool t", 6, &mut s)),
+        ["termsvc", "tx"]
+    );
+    assert_eq!(texts(complete_on_tab("pick g", 6, &mut s)), ["green"]);
+    // Without Tab, only what msh lists itself.
+    let runs = s.system.runs.len();
+    assert_eq!(texts(complete("tool t", 6, &s)), ["termsvc"]);
+    assert!(texts(complete("pick g", 6, &s)).is_empty());
+    assert_eq!(s.system.runs.len(), runs);
 }

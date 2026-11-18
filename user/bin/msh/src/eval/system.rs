@@ -36,6 +36,10 @@ pub struct Run {
     pub background: bool,
     /// The command as typed, for job control.
     pub text: String,
+    /// For a run of completion: when its programs must have ended. They
+    /// run without the terminal, in no job, their errors dropped, and
+    /// are stopped then, which makes the run fail.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// How a run ended.
