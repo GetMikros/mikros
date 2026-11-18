@@ -11,4 +11,5 @@ Broker.GrantSystem: permission:system.permissions.set
 Broker.RegisterPrompter: data-dependent:permbroker::service::broker::serve
 Broker.WatchConfirmed: permission:system.permissions.read
 Broker.RevocationDone: public
+Broker.ListPermissions: public
 Prompter.Ask: public

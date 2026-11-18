@@ -1,6 +1,7 @@
 //! The names of system things that msh's completion offers
 //! (MIKSPEC-0084.R68, MIKSPEC-0098.R31): services, users, installed apps,
-//! which are the packages of kind `app` (MIKSPEC-0101.R4), volumes and
+//! which are the packages of kind `app` (MIKSPEC-0101.R4), the
+//! permissions that the broker knows (MIKSPEC-0037.R49), volumes and
 //! devices, each from the service that keeps them, page by
 //! page. A thing whose service cannot be reached has no names.
 
@@ -10,12 +11,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::interfaces::mikros::driver::{DevicesClient, VolumesClient};
 use mikros_rt::interfaces::mikros::packages::InstallerClient;
+use mikros_rt::interfaces::mikros::permissions::BrokerClient;
 use mikros_rt::interfaces::mikros::service::ServicesClient;
 use mikros_rt::interfaces::mikros::session::AccountsClient;
 
 const SERVICES: &str = "mikros.service.Services";
 const ACCOUNTS: &str = "mikros.session.Accounts";
 const INSTALLER: &str = "mikros.packages.Installer";
+const BROKER: &str = "mikros.permissions.Broker";
 const VOLUMES: &str = "device.volumes";
 const DEVICES: &str = "mikros.driver.Devices";
 /// How long each page may take, so that completion stays within msh's
@@ -28,7 +31,7 @@ pub enum Thing {
     Service,
     User,
     App,
-    /// No protocol lists the permissions that the broker knows yet.
+    /// The permissions that the broker knows.
     Permission,
     Volume,
     /// As `<class>/<name>`.
@@ -43,7 +46,7 @@ impl Directory {
             Thing::Service => self.services(deadline),
             Thing::User => self.users(deadline),
             Thing::App => self.apps(deadline),
-            Thing::Permission => Vec::new(),
+            Thing::Permission => self.permissions(deadline),
             Thing::Volume => self.volumes(deadline),
             Thing::Device => self.devices(deadline),
         }
@@ -103,6 +106,21 @@ impl Directory {
             after = last;
         }
         names
+    }
+
+    fn permissions(&self, deadline: i64) -> Vec<String> {
+        let Ok(client) = self.connect(BROKER) else {
+            return Vec::new();
+        };
+        let client = BrokerClient::new(client);
+        let mut names: Vec<String> = Vec::new();
+        loop {
+            let after = names.last().cloned().unwrap_or_default();
+            match client.list_permissions(after, deadline) {
+                Ok(Ok(page)) if !page.permissions.is_empty() => names.extend(page.permissions),
+                _ => return names,
+            }
+        }
     }
 
     fn volumes(&self, deadline: i64) -> Vec<String> {

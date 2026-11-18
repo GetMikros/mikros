@@ -18,6 +18,9 @@ mod tests;
 #[cfg(test)]
 pub use table::PERMISSIONS;
 pub use table::{Scope, scope};
+// Only the service, which runs on Mikros alone, lists the names.
+#[cfg_attr(not(target_os = "mikros"), allow(unused_imports))]
+pub use table::names_after;
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;

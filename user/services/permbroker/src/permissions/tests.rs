@@ -40,6 +40,19 @@ fn grant(user: u32, permission: &str, decision: Decision) -> Grant {
 }
 
 #[test]
+fn lists_names_page_by_page() {
+    let first: Vec<&str> = names_after("", 2).collect();
+    assert_eq!(first, [PERMISSIONS[0].0, PERMISSIONS[1].0]);
+    let next: Vec<&str> = names_after(first[1], 1).collect();
+    assert_eq!(next, [PERMISSIONS[2].0]);
+    // A name between two known ones starts after the earlier one.
+    let between = format!("{}a", PERMISSIONS[0].0);
+    assert_eq!(names_after(&between, 1).next(), Some(PERMISSIONS[1].0));
+    assert_eq!(names_after("", usize::MAX).count(), PERMISSIONS.len());
+    assert_eq!(names_after("~", 128).count(), 0);
+}
+
+#[test]
 fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
     assert_eq!(PERMISSIONS.len(), 62);

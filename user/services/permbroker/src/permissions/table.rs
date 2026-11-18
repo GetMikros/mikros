@@ -80,6 +80,13 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("user.volumes.access", Scope::User),
 ];
 
+/// The names of the known permissions after `after`, in byte order, at
+/// most `max` of them (MIKSPEC-0037.R49).
+pub fn names_after(after: &str, max: usize) -> impl Iterator<Item = &'static str> + '_ {
+    let start = PERMISSIONS.partition_point(|(name, _)| *name <= after);
+    PERMISSIONS[start..].iter().take(max).map(|(name, _)| *name)
+}
+
 /// The scope of `permission`, or `None` when the broker does not know it.
 pub fn scope(permission: &str) -> Option<Scope> {
     PERMISSIONS

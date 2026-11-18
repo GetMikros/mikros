@@ -6,7 +6,7 @@
 
 use crate::permissions::{
     self as store, Call, Decision, Failure, Grant, Identity, MANAGE_GRANTS, Requested, Revoked,
-    Store,
+    Store, names_after,
 };
 use crate::service::files::{self, Files};
 use alloc::collections::BTreeSet;
@@ -20,10 +20,10 @@ use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{
     self as midl, BrokerAsyncServer, BrokerCheckResponse, BrokerGrantSystemResponse,
-    BrokerListGrantsRequest, BrokerListGrantsResponse, BrokerRegisterPrompterResponse,
-    BrokerRequest, BrokerRequestRequest, BrokerRequestResponse, BrokerRevocationDoneResponse,
-    BrokerSetGrantRequest, BrokerSetGrantResponse, BrokerWatchConfirmedResponse,
-    BrokerWatchResponse, PrompterAsyncClient,
+    BrokerListGrantsRequest, BrokerListGrantsResponse, BrokerListPermissionsResponse,
+    BrokerRegisterPrompterResponse, BrokerRequest, BrokerRequestRequest, BrokerRequestResponse,
+    BrokerRevocationDoneResponse, BrokerSetGrantRequest, BrokerSetGrantResponse,
+    BrokerWatchConfirmedResponse, BrokerWatchResponse, PrompterAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::{ClientIdentity, DirectoryAsyncClient};
@@ -45,6 +45,8 @@ const CRITICAL: [&str; 2] = ["system.processmgr", "system.servicemgr"];
 const KILL: u32 = 9;
 /// The most permissions one connection watches (MIKSPEC-0037.R47).
 const WATCHES_MAX: usize = 256;
+/// The most names that one `ListPermissions` gives.
+const LIST_PAGE: usize = 128;
 
 /// A connection that watches a permission with confirmation
 /// (MIKSPEC-0037.R34), and the revocations it has confirmed.
@@ -433,6 +435,12 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
             R::RevocationDone(q, r) => {
                 done.borrow_mut().insert(q.sequence);
                 r.reply(s, BrokerRevocationDoneResponse {})
+            }
+            // Names only, for every caller.
+            R::ListPermissions(q, r) => {
+                let names = names_after(&q.after, LIST_PAGE);
+                let permissions = names.map(String::from).collect();
+                r.reply(s, Ok(BrokerListPermissionsResponse { permissions }))
             }
             R::SetGrant(q, r) => {
                 // Asking an administrator may take long, so the call runs
