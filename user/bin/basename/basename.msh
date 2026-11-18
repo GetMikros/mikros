@@ -1,0 +1,11 @@
+# What `basename` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern basename(
+    name: path "the name to strip",
+    ...suffix: string "a suffix to remove, or with -a or -s more names",
+    --multiple(-a): bool "take every operand as a name",
+    --suffix(-s): string "remove this suffix from every name; implies -a",
+    --zero(-z): bool "end each name with NUL, not a newline",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

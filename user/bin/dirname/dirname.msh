@@ -1,0 +1,8 @@
+# What `dirname` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern dirname(
+    ...name: path "the names whose folders to write",
+    --zero(-z): bool "end each folder with NUL, not a newline",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
