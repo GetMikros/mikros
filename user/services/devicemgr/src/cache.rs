@@ -362,6 +362,20 @@ impl Profiles {
             (Some(why), _) => why,
             (None, [root]) => {
                 self.decision.set(Decision::Root(*root));
+                if let Some(d) = devices.get(*root) {
+                    let at = location(d, devices).unwrap_or_else(|| "no location".into());
+                    let guid = property(&d.properties, PARTITION_GUID).unwrap_or("no GUID");
+                    let disk = match (&self.boot_location, &self.esp) {
+                        (Some(_), _) => "the boot disk that boot_disk= names",
+                        (None, Some(_)) => "the disk of the EFI system partition",
+                        (None, None) => "a disk that is not removable",
+                    };
+                    mikros_rt::log!(
+                        Info,
+                        "device-manager: the root partition is {} at {at}, {guid}, on {disk}",
+                        d.name
+                    );
+                }
                 self.give_root_properties(*root, devices);
                 return core::mem::take(&mut *self.held.borrow_mut());
             }
