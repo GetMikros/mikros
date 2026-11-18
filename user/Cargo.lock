@@ -290,6 +290,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "date"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+ "mikros-rt",
+ "mikros-tz",
+]
+
+[[package]]
 name = "debuggee"
 version = "0.0.0"
 dependencies = [
