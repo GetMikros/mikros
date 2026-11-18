@@ -2,25 +2,63 @@
 //! line per user in aligned columns, a JSON array, or why a call on the
 //! accounts service failed.
 
-use mikros_cli::{Arguments, Command, json_string, value};
+use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
 
-pub const COMMAND: Command = Command {
-    name: "accounts",
-    operands: "[add|delete|password|kind|full-name ...]",
-    most: 3,
-    about: "Lists the users, or changes them:\n\
-            \x20 accounts add <name> [--admin] [--full-name <text>]\n\
-            \x20 accounts delete <name> [--delete-home]\n\
-            \x20 accounts password [name]\n\
-            \x20 accounts kind <name> standard|admin\n\
-            \x20 accounts full-name <name> <text>\n\
-            Changing another user needs an administrator's authorization.",
-    options: &[
-        ("--json", "write the users as a JSON array of objects"),
-        ("--admin", "with add: make an administrator"),
-        ("--delete-home", "with delete: delete the home folder too"),
+/// The user that a subcommand changes.
+const USER: Operand = Operand::one("name", Kind::User, "the user's name");
+
+pub static COMMAND: Spec = Spec {
+    options: &[Opt::long(
+        "json",
+        "write the users as a JSON array of objects",
+    )],
+    subcommands: &[
+        Spec {
+            operands: &[Operand::one("name", Kind::Text, "the new user's name")],
+            options: &[
+                Opt::long("admin", "make an administrator"),
+                Opt::long("full-name", "the full name, the name when none is given")
+                    .takes("text", Kind::Text),
+            ],
+            ..Spec::new("add", "Adds a user, asking for the new password twice.")
+        },
+        Spec {
+            operands: &[USER],
+            options: &[Opt::long("delete-home", "delete the home folder too")],
+            ..Spec::new("delete", "Deletes a user.")
+        },
+        Spec {
+            operands: &[Operand::optional(
+                "name",
+                Kind::User,
+                "the user's name, yours when none is given",
+            )],
+            ..Spec::new(
+                "password",
+                "Sets a user's password, asking for your current one when it is yours.",
+            )
+        },
+        Spec {
+            operands: &[
+                USER,
+                Operand::one(
+                    "kind",
+                    Kind::Choice(&["standard", "admin"]),
+                    "standard or admin",
+                ),
+            ],
+            ..Spec::new("kind", "Makes a user a standard user or an administrator.")
+        },
+        Spec {
+            operands: &[USER, Operand::one("text", Kind::Text, "the full name")],
+            ..Spec::new("full-name", "Sets a user's full name.")
+        },
     ],
-    values: &[("--full-name", "text", "with add: the full name")],
+    ..Spec::new(
+        "accounts",
+        "Lists the users, or adds, deletes or changes one. Changing another\n\
+         user needs an administrator's authorization.",
+    )
 };
 
 /// What accounts is asked to do. Users are named.
@@ -50,97 +88,59 @@ pub enum Request {
         name: String,
         text: String,
     },
-    Help,
-    Invalid(String),
 }
 
-pub fn read(arguments: Vec<String>) -> Request {
-    let (options, values, mut operands) = match COMMAND.parse(arguments) {
-        Arguments::Run {
-            options,
-            values,
-            operands,
-        } => (options, values, operands),
-        Arguments::Help => return Request::Help,
-        Arguments::Invalid(reason) => return Request::Invalid(reason),
-    };
-    let has = |option: &str| options.contains(&option);
-    let full_name = value(&values, "--full-name").map(String::from);
-    let subcommand = match operands.first() {
-        Some(s) => s.clone(),
-        None => {
-            return Request::List {
-                json: has("--json"),
-            };
-        }
-    };
-    // The options that the subcommand takes.
-    let takes: &[&str] = match subcommand.as_str() {
-        "add" => &["--admin", "--full-name"],
-        "delete" => &["--delete-home"],
-        "password" | "kind" | "full-name" => &[],
-        other => return Request::Invalid(format!("unknown subcommand {other}")),
-    };
-    let given = options
-        .iter()
-        .copied()
-        .chain(values.iter().map(|(o, _)| *o));
-    if let Some(option) = given.into_iter().find(|o| !takes.contains(o)) {
-        return Request::Invalid(format!("{option} cannot go with {subcommand}"));
-    }
-    let count = operands.len() - 1;
-    let wanted = match subcommand.as_str() {
-        "password" => 0..=1,
-        "kind" | "full-name" => 2..=2,
-        _ => 1..=1,
-    };
-    if !wanted.contains(&count) {
-        return Request::Invalid(match count < *wanted.start() {
-            true => format!("{subcommand} is missing an operand"),
-            false => format!("unexpected argument {}", operands[wanted.end() + 1]),
+/// What `run` asks, or why its arguments are invalid.
+pub fn read(run: &Run) -> Result<Request, String> {
+    let Some(subcommand) = run.subcommand() else {
+        return Ok(Request::List {
+            json: run.has("--json"),
         });
+    };
+    if run.has("--json") {
+        return Err(format!("--json cannot go with {subcommand}"));
     }
-    operands.remove(0);
-    let mut operands = operands.into_iter();
-    let mut next = || operands.next().unwrap_or_default();
+    let full_name = run.value("--full-name").map(String::from);
     if full_name.as_deref() == Some("") {
-        return Request::Invalid("the full name is empty".into());
+        return Err("the full name is empty".into());
     }
-    match subcommand.as_str() {
+    let mut operands = run.operands.clone().into_iter();
+    let mut next = || operands.next().unwrap_or_default();
+    Ok(match subcommand {
         "add" => {
             let name = next();
             if !valid_name(&name) {
-                return Request::Invalid(format!("invalid user name {name}"));
+                return Err(format!("invalid user name {name}"));
             }
             Request::Add {
                 name,
-                admin: has("--admin"),
+                admin: run.has("--admin"),
                 full_name,
             }
         }
         "delete" => Request::Delete {
             name: next(),
-            delete_home: has("--delete-home"),
+            delete_home: run.has("--delete-home"),
         },
         "password" => Request::Password {
-            name: (count == 1).then(next),
+            name: run.operands.first().cloned(),
         },
         "kind" => {
             let name = next();
             match next().as_str() {
                 "standard" => Request::Kind { name, admin: false },
                 "admin" => Request::Kind { name, admin: true },
-                other => Request::Invalid(format!("unknown kind {other}")),
+                other => return Err(format!("unknown kind {other}")),
             }
         }
         _ => {
             let name = next();
             match next() {
-                text if text.is_empty() => Request::Invalid("the full name is empty".into()),
+                text if text.is_empty() => return Err("the full name is empty".into()),
                 text => Request::FullName { name, text },
             }
         }
-    }
+    })
 }
 
 /// The longest user name.
@@ -167,38 +167,63 @@ pub struct User {
 
 /// The header and lines of `users`: the ID aligned to the right, the
 /// name and kind to the left, and the full name.
-pub fn text(users: &[User]) -> String {
+pub fn text(users: &[User], paint: Paint) -> String {
     let header = ["ID", "NAME", "KIND", "FULL NAME"];
-    let mut rows = vec![header.map(String::from)];
-    rows.extend(users.iter().map(|u| {
-        [
-            u.id.to_string(),
-            u.name.clone(),
-            u.kind.into(),
-            u.full_name.clone(),
-        ]
-    }));
-    let width = |column: usize| {
-        rows.iter()
-            .map(|r| r[column].chars().count())
-            .max()
-            .unwrap_or(0)
-    };
-    let widths = [width(0), width(1), width(2)];
-    rows.iter()
-        .map(|r| {
-            format!(
-                "{:>w0$}  {:<w1$}  {:<w2$}  {}\n",
-                r[0],
-                r[1],
-                r[2],
-                r[3],
-                w0 = widths[0],
-                w1 = widths[1],
-                w2 = widths[2],
-            )
+    let rows: Vec<Vec<Cell>> = users
+        .iter()
+        .map(|u| {
+            vec![
+                (u.id.to_string(), Some(Role::Number)),
+                (u.name.clone(), None),
+                (u.kind.into(), None),
+                (u.full_name.clone(), Some(Role::String)),
+            ]
         })
-        .collect()
+        .collect();
+    columns(&header, &rows, &[true, false, false, false], paint)
+}
+
+/// A cell of a table: its text, and the role it is coloured in.
+type Cell = (String, Option<Role>);
+
+/// The header and `rows` in columns two spaces apart, the header in the
+/// secondary colour, each column as wide as its widest text without
+/// colours, aligned to the right where `right` says, the last one not
+/// padded.
+fn columns(header: &[&str], rows: &[Vec<Cell>], right: &[bool], paint: Paint) -> String {
+    let header: Vec<Cell> = header
+        .iter()
+        .map(|h| (h.to_string(), Some(Role::Secondary)))
+        .collect();
+    let all: Vec<&Vec<Cell>> = std::iter::once(&header).chain(rows).collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|c| {
+            all.iter()
+                .map(|r| r[c].0.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut text = String::new();
+    for row in all {
+        for (c, (cell, role)) in row.iter().enumerate() {
+            let pad = " ".repeat(widths[c] - cell.chars().count());
+            let shown = match role {
+                Some(role) => paint.paint(*role, cell),
+                None => cell.clone(),
+            };
+            if c > 0 {
+                text.push_str("  ");
+            }
+            match (right[c], c + 1 == row.len()) {
+                (true, _) => text.push_str(&(pad + &shown)),
+                (false, true) => text.push_str(&shown),
+                (false, false) => text.push_str(&(shown + &pad)),
+            }
+        }
+        text.push('\n');
+    }
+    text
 }
 
 /// `users` as a JSON array of objects with the members `id`, `name`,
@@ -249,68 +274,77 @@ pub fn lowercase(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mikros_cli::Parsed;
 
-    fn read_args(arguments: &[&str]) -> Request {
-        read(arguments.iter().map(|a| a.to_string()).collect())
+    fn read_args(arguments: &[&str]) -> Result<Request, String> {
+        match COMMAND.parse(arguments.iter().map(|a| a.to_string())) {
+            Parsed::Run(run) => read(&run),
+            Parsed::Invalid(reason) => Err(reason),
+            Parsed::Help(path) => Err(format!("help for {path:?}")),
+        }
     }
 
     #[test]
     fn reads_every_subcommand() {
-        assert_eq!(read_args(&["--json"]), Request::List { json: true });
+        assert_eq!(read_args(&["--json"]), Ok(Request::List { json: true }));
         assert_eq!(
             read_args(&["add", "bob", "--admin", "--full-name", "Bob B"]),
-            Request::Add {
+            Ok(Request::Add {
                 name: "bob".into(),
                 admin: true,
                 full_name: Some("Bob B".into()),
-            }
+            })
         );
         assert_eq!(
             read_args(&["add", "bob"]),
-            Request::Add {
+            Ok(Request::Add {
                 name: "bob".into(),
                 admin: false,
                 full_name: None,
-            }
+            })
         );
         assert_eq!(
             read_args(&["delete", "bob", "--delete-home"]),
-            Request::Delete {
+            Ok(Request::Delete {
                 name: "bob".into(),
                 delete_home: true,
-            }
+            })
         );
-        assert_eq!(read_args(&["password"]), Request::Password { name: None });
+        assert_eq!(
+            read_args(&["password"]),
+            Ok(Request::Password { name: None })
+        );
         assert_eq!(
             read_args(&["password", "bob"]),
-            Request::Password {
+            Ok(Request::Password {
                 name: Some("bob".into())
-            }
+            })
         );
         assert_eq!(
             read_args(&["kind", "bob", "admin"]),
-            Request::Kind {
+            Ok(Request::Kind {
                 name: "bob".into(),
                 admin: true,
-            }
+            })
         );
         assert_eq!(
             read_args(&["full-name", "bob", "Bob B"]),
-            Request::FullName {
+            Ok(Request::FullName {
                 name: "bob".into(),
                 text: "Bob B".into(),
-            }
+            })
         );
     }
 
     #[test]
     fn refuses_bad_subcommands_operands_and_options() {
-        let invalid = |reason: &str| Request::Invalid(reason.into());
+        let invalid = |reason: &str| Err(reason.into());
         assert_eq!(
             read_args(&["rename", "a"]),
-            invalid("unknown subcommand rename")
+            invalid("unexpected argument rename")
         );
-        assert_eq!(read_args(&["add"]), invalid("add is missing an operand"));
+        assert_eq!(read_args(&["add"]), invalid("missing operand <name>"));
+        assert_eq!(read_args(&["kind", "a"]), invalid("missing operand <kind>"));
         assert_eq!(
             read_args(&["delete", "a", "b"]),
             invalid("unexpected argument b")
@@ -325,16 +359,21 @@ mod tests {
         );
         assert_eq!(
             read_args(&["delete", "a", "--admin"]),
-            invalid("--admin cannot go with delete")
+            invalid("unknown option --admin")
         );
         assert_eq!(
             read_args(&["kind", "a", "admin", "--full-name", "x"]),
-            invalid("--full-name cannot go with kind")
+            invalid("unknown option --full-name")
         );
         assert_eq!(
             read_args(&["add", "a", "--json"]),
             invalid("--json cannot go with add")
         );
+        assert_eq!(
+            read_args(&["--json", "password"]),
+            invalid("--json cannot go with password")
+        );
+        assert_eq!(read_args(&["--admin"]), invalid("unknown option --admin"));
         assert_eq!(read_args(&["add", "Bob"]), invalid("invalid user name Bob"));
         assert_eq!(read_args(&["add", "9a"]), invalid("invalid user name 9a"));
         let long = "a".repeat(33);
@@ -369,10 +408,17 @@ mod tests {
             },
         ];
         assert_eq!(
-            text(&users),
+            text(&users, Paint::never()),
             "  ID  NAME  KIND      FULL NAME\n\
              1000  ada   admin     Ada Lovelace\n\
              1001  bob   standard  Bob\n"
+        );
+        let on = Paint::new(Some("always"), false, None);
+        assert_eq!(
+            text(&users[1..], on).lines().nth(1),
+            Some(
+                "\x1b[38;2;21;193;160m1001\x1b[0m  bob   standard  \x1b[38;2;255;134;26mBob\x1b[0m"
+            )
         );
         assert_eq!(
             json(&users[..1]),
@@ -396,5 +442,11 @@ mod tests {
         assert_eq!(failure("bob", "access_denied", false), "not authorized");
         assert_eq!(failure("bob", "invalid_args", false), "invalid_args");
         assert_eq!(lowercase("NoResources"), "no_resources");
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/accounts.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
     }
 }

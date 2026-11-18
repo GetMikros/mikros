@@ -1,10 +1,27 @@
-# What `accounts` takes, for msh's completion and colours.
+# What `accounts` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
 extern accounts(
-    call?: [add delete password kind full-name] "how to change a user",
-    ...rest: string "the user's name, and what to set",
-    --admin: bool "with add: make an administrator",
-    --full-name: string "with add: the full name",
-    --delete-home: bool "with delete: delete the home folder too",
-    --json: bool "write the users as JSON",
-    --help: bool "show how to use accounts"
-)
+    --json: bool "write the users as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
+extern accounts add(
+    name: string "the new user's name",
+    --admin: bool "make an administrator",
+    --full-name: string "the full name, the name when none is given"
+) complete
+extern accounts delete(
+    name: user "the user's name",
+    --delete-home: bool "delete the home folder too"
+) complete
+extern accounts password(
+    name?: user "the user's name, yours when none is given"
+) complete
+extern accounts kind(
+    name: user "the user's name",
+    kind: [standard admin] "standard or admin"
+) complete
+extern accounts full-name(
+    name: user "the user's name",
+    text: string "the full name"
+) complete

@@ -4,7 +4,7 @@
 //! asks for an administrator's authorization where it needs one.
 
 use crate::listing::{self, COMMAND, Request, User};
-use mikros_cli::{FAILURE, INVALID, SUCCESS};
+use mikros_cli::{FAILURE, INVALID, Paint, Run, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::session::{AccountsClient, UserKind};
@@ -82,10 +82,11 @@ impl Drop for Secret {
 }
 
 pub fn main() -> ExitCode {
-    let request = match listing::read(std::env::args().skip(1).collect()) {
-        Request::Help => return write(&COMMAND.help()),
-        Request::Invalid(reason) => return fail(INVALID, &reason),
-        request => request,
+    let run = start(&COMMAND, &mikros_command::list);
+    let fail = |status: u8, message: &str| fail(&run, status, message);
+    let request = match listing::read(&run) {
+        Ok(request) => request,
+        Err(reason) => return fail(INVALID, &reason),
     };
     let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
         return fail(FAILURE, "cannot reach the service directory");
@@ -94,14 +95,15 @@ pub fn main() -> ExitCode {
         Ok(client) => AccountsClient::new(client),
         Err(why) => return fail(FAILURE, &why),
     };
-    match run(&accounts, request) {
+    match change(&accounts, request, Paint::stdout(&run)) {
         Ok(()) => ExitCode::from(SUCCESS),
         Err(why) => fail(FAILURE, &why),
     }
 }
 
-/// Does `request`, and says why it failed.
-fn run(accounts: &AccountsClient, request: Request) -> Result<(), String> {
+/// Does `request`, writing the list with `paint`, and says why it
+/// failed.
+fn change(accounts: &AccountsClient, request: Request, paint: Paint) -> Result<(), String> {
     let called = |name: &str, done: Result<Result<(), Status>, _>, own_password: bool| match done {
         Ok(Ok(())) => Ok(()),
         Ok(Err(status)) => Err(listing::failure(
@@ -116,7 +118,7 @@ fn run(accounts: &AccountsClient, request: Request) -> Result<(), String> {
             let users = list(accounts)?;
             let text = match json {
                 true => listing::json(&users),
-                false => listing::text(&users),
+                false => listing::text(&users, paint),
             };
             std::io::stdout()
                 .write_all(text.as_bytes())
@@ -178,7 +180,6 @@ fn run(accounts: &AccountsClient, request: Request) -> Result<(), String> {
             let done = accounts.set_full_name(id, text, FOREVER);
             called(&name, done.map(|r| r.map(drop)), false)
         }
-        Request::Help | Request::Invalid(_) => unreachable!("answered before"),
     }
 }
 
@@ -309,16 +310,8 @@ fn ask_secret(prompt: &str) -> Result<Secret, String> {
     }
 }
 
-/// Writes `text` to standard output.
-fn write(text: &str) -> ExitCode {
-    match std::io::stdout().write_all(text.as_bytes()) {
-        Ok(()) => ExitCode::from(SUCCESS),
-        Err(_) => ExitCode::from(FAILURE),
-    }
-}
-
 /// Writes the error `message` to standard error and gives `status`.
-fn fail(status: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
+fn fail(run: &Run, status: u8, message: &str) -> ExitCode {
+    complain(&COMMAND, run, message);
     ExitCode::from(status)
 }
