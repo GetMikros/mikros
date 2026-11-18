@@ -340,6 +340,13 @@ fn create_parts(
     extras: Extras,
     key: Option<&Key>,
 ) -> Result<()> {
+    // The root file system is built in `target/image` under a name of the
+    // build kind, and then copied into `out`: one image at a time, for the
+    // parallel lanes of cargo xtask test.
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root_guid = Uuid::new_v4();
     let mut command_line = format!("root=PARTUUID={root_guid}");
     if !extra.is_empty() {

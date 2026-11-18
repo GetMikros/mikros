@@ -32,6 +32,11 @@ pub struct Args {
     /// and slow paths that KVM hides.
     #[arg(long, conflicts_with = "host")]
     pub emulated_isolation: bool,
+    /// How many lanes of QEMU boots run at once, each a few boots one
+    /// after another. With 1 every boot runs on its own, in order, as
+    /// when the host is busy.
+    #[arg(long, default_value_t = 4)]
+    pub jobs: usize,
     #[command(flatten)]
     pub machine: MachineArgs,
 }
@@ -494,240 +499,330 @@ pub fn run(args: &Args) -> Result<()> {
     image::create_for_tests(args.kind, &built, &disk, &cmdline)?;
     let log = dir.join("serial.log");
     let processor = qemu::Processor::available();
-    integration(
-        args,
-        processor,
-        args.timeout,
-        &disk,
-        &log,
-        "",
-        UEFI_SELFTEST_PASSED,
-    )?;
-    // The kernel's tests once more on QEMU's AMD IOMMU, without the suites
-    // of ported projects, which do not depend on the IOMMU. Emulated, its
-    // DMA translation is about three times slower than the Intel one's.
-    if !args.machine.no_iommu {
-        let mut amd = args.clone();
-        amd.machine.amd_iommu = true;
-        let amd_disk = dir.join("amd-iommu-disk.img");
-        let amd_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
-        image::create_for_tests(args.kind, &built, &amd_disk, amd_cmdline.trim())?;
-        let timeout = match processor {
-            qemu::Processor::Host => args.timeout,
-            _ => args.timeout * 3,
-        };
-        let amd_log = dir.join("amd-iommu-serial.log");
-        integration(
-            &amd,
-            processor,
-            timeout,
-            &amd_disk,
-            &amd_log,
-            " on AMD-Vi",
-            "AMD-Vi units",
-        )?;
+    // The boots run in lanes, each one after another, and the lanes side
+    // by side, as many at once as `--jobs` says. The runs of the first
+    // lane share the scratch disks of `dir`; those of the others each have
+    // a directory of their own.
+    let lanes: Vec<Lane<'_>> = vec![
+        (
+            "kernel",
+            Box::new(|| {
+                integration(
+                    args,
+                    processor,
+                    args.timeout,
+                    &disk,
+                    &log,
+                    "",
+                    UEFI_SELFTEST_PASSED,
+                )?;
+                // The kernel's tests once more on QEMU's AMD IOMMU, without the suites
+                // of ported projects, which do not depend on the IOMMU. Emulated, its
+                // DMA translation is about three times slower than the Intel one's.
+                if !args.machine.no_iommu {
+                    let mut amd = args.clone();
+                    amd.machine.amd_iommu = true;
+                    let amd_disk = dir.join("amd-iommu-disk.img");
+                    let amd_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
+                    image::create_for_tests(args.kind, &built, &amd_disk, amd_cmdline.trim())?;
+                    let timeout = match processor {
+                        qemu::Processor::Host => args.timeout,
+                        _ => args.timeout * 3,
+                    };
+                    let amd_log = dir.join("amd-iommu-serial.log");
+                    integration(
+                        &amd,
+                        processor,
+                        timeout,
+                        &amd_disk,
+                        &amd_log,
+                        " on AMD-Vi",
+                        "AMD-Vi units",
+                    )?;
+                }
+                // Kernel page-table isolation applies only to Intel processors that do
+                // not report RDCL_NO: the host's under KVM with the bit hidden, or
+                // QEMU's emulated processor when it names that vendor. Emulation takes
+                // about five times as long as KVM.
+                if args.kind != Kind::Fuzz {
+                    let isolation_disk = dir.join("isolation-disk.img");
+                    let isolation_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
+                    let isolation_cmdline = isolation_cmdline.trim();
+                    image::create_for_tests(args.kind, &built, &isolation_disk, isolation_cmdline)?;
+                    let isolating = if args.emulated_isolation {
+                        qemu::Processor::EmulatedIntel
+                    } else {
+                        qemu::Processor::isolating()
+                    };
+                    let timeout = match (processor, isolating) {
+                        (qemu::Processor::Host, qemu::Processor::EmulatedIntel) => args.timeout * 5,
+                        _ => args.timeout,
+                    };
+                    let isolation_log = dir.join("isolation-serial.log");
+                    integration(
+                        args,
+                        isolating,
+                        timeout,
+                        &isolation_disk,
+                        &isolation_log,
+                        " with kernel page-table isolation",
+                        "page-table isolation on",
+                    )?;
+                }
+                // The debugger checks boot as cargo xtask debug does, at the kernel's
+                // linked addresses.
+                let gdb_disk = dir.join("gdb-disk.img");
+                let gdb_cmdline = [cmdline.as_str(), image::KASLR_OFF].join(" ");
+                image::create_for_tests(args.kind, &built, &gdb_disk, gdb_cmdline.trim())?;
+                let gdb_log = dir.join("gdb-serial.log");
+                let timeout = Duration::from_secs(args.timeout);
+                crate::debug::check_scripts(
+                    &args.machine,
+                    &built.kernel,
+                    &gdb_disk,
+                    &gdb_log,
+                    timeout,
+                )?;
+                println!("kernel debugger scripts passed");
+                let entry_log = dir.join("entry-serial.log");
+                crate::entry_state::check(
+                    &args.machine,
+                    &built.kernel,
+                    &gdb_disk,
+                    &entry_log,
+                    timeout,
+                )?;
+                println!("kernel entry state checked");
+                crate::machine_state::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("machine"),
+                    timeout,
+                )?;
+                println!("machine state checked");
+                let scenarios = dir.join("scenarios");
+                crate::scenario::run(&args.machine, args.kind, &built, &scenarios, timeout)?;
+                println!("panic scenarios passed");
+                let boot_menu = dir.join("boot-menu");
+                crate::boot_menu::run(&args.machine, args.kind, &built, &boot_menu, timeout)?;
+                println!("boot menu runs passed");
+                crate::secure_boot::check::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("secure-boot"),
+                    timeout,
+                )?;
+                println!("Secure Boot runs passed");
+                Ok(())
+            }),
+        ),
+        (
+            "system",
+            Box::new(|| {
+                let timeout = Duration::from_secs(args.timeout);
+                crate::power::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("power"),
+                    timeout,
+                )?;
+                println!("power-off run passed");
+                system_tests(args, &dir)?;
+                crate::volumes::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("volumes"),
+                    timeout,
+                )?;
+                println!("USB volumes run passed");
+                crate::own_root::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("namespaces"),
+                    timeout,
+                    "namespaces",
+                    "",
+                )?;
+                println!("namespaces run passed");
+                // Each Argon2id hash of the accounts probe takes seconds when
+                // emulated, and it makes about a dozen.
+                crate::own_root::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("accounts"),
+                    timeout * 2,
+                    "accounts",
+                    "",
+                )?;
+                println!("accounts run passed");
+                crate::own_root::run_live(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("live"),
+                    timeout,
+                )?;
+                println!("live run passed");
+                crate::boot_attempts::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("boot-attempts"),
+                    timeout,
+                )?;
+                println!("boot attempts run passed");
+                Ok(())
+            }),
+        ),
+        (
+            "disks",
+            Box::new(|| {
+                let timeout = Duration::from_secs(args.timeout);
+                crate::root_disk::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("root-disk"),
+                    timeout,
+                )?;
+                println!("root disk runs passed");
+                crate::root_disk::run_fresh_guids(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("fresh-guids"),
+                    timeout,
+                )?;
+                println!("fresh GUIDs run passed");
+                crate::root_disk::run_dirty_esp(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("dirty-esp"),
+                    timeout,
+                )?;
+                println!("dirty ESP run passed");
+                crate::root_disk::run_boot_disk_missing(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("boot-disk-missing"),
+                    timeout,
+                )?;
+                println!("missing boot disk run passed");
+                crate::root_disk::run_bus_restart(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("bus-restart"),
+                    timeout,
+                )?;
+                println!("bus restart runs passed");
+                crate::root_disk::run_acpi_restart(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("acpi-restart"),
+                    timeout,
+                )?;
+                println!("ACPI restart run passed");
+                crate::input::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("input"),
+                    timeout,
+                )?;
+                println!("input run passed");
+                crate::console::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("console"),
+                    timeout,
+                )?;
+                println!("console run passed");
+                Ok(())
+            }),
+        ),
+        (
+            "setup",
+            Box::new(|| {
+                let timeout = Duration::from_secs(args.timeout);
+                crate::console::run_setup(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("setup"),
+                    timeout,
+                )?;
+                println!("setup run passed");
+                crate::takeover::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("takeover"),
+                    timeout,
+                )?;
+                println!("takeover run passed");
+                crate::durability::run(
+                    &args.machine,
+                    args.kind,
+                    &built,
+                    &dir.join("durability"),
+                    timeout,
+                )?;
+                println!("durability run passed");
+                Ok(())
+            }),
+        ),
+    ];
+    run_lanes(lanes, args.jobs)
+}
+
+/// A lane of boots: its name, for the report, and the boots, which stop
+/// at the first that fails.
+type Lane<'a> = (&'static str, Box<dyn FnOnce() -> Result<()> + Send + 'a>);
+
+/// Runs `lanes`, at most `jobs` of them at once, each on a thread of its
+/// own, and fails with the failure of every lane that failed. With one
+/// job they run one after another, in order.
+fn run_lanes(lanes: Vec<Lane<'_>>, jobs: usize) -> Result<()> {
+    let waiting = std::sync::Mutex::new(std::collections::VecDeque::from(lanes));
+    let failed = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..jobs.max(1) {
+            scope.spawn(|| {
+                loop {
+                    let next = waiting.lock().map(|mut w| w.pop_front());
+                    let Ok(Some((name, lane))) = next else {
+                        break;
+                    };
+                    if let Err(why) = lane() {
+                        println!("the {name} lane failed: {why:#}");
+                        if let Ok(mut failed) = failed.lock() {
+                            failed.push(format!("the {name} lane: {why:#}"));
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let failed = failed.into_inner().unwrap_or_default();
+    if failed.is_empty() {
+        return Ok(());
     }
-    // Kernel page-table isolation applies only to Intel processors that do
-    // not report RDCL_NO: the host's under KVM with the bit hidden, or
-    // QEMU's emulated processor when it names that vendor. Emulation takes
-    // about five times as long as KVM.
-    if args.kind != Kind::Fuzz {
-        let isolation_disk = dir.join("isolation-disk.img");
-        let isolation_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
-        let isolation_cmdline = isolation_cmdline.trim();
-        image::create_for_tests(args.kind, &built, &isolation_disk, isolation_cmdline)?;
-        let isolating = if args.emulated_isolation {
-            qemu::Processor::EmulatedIntel
-        } else {
-            qemu::Processor::isolating()
-        };
-        let timeout = match (processor, isolating) {
-            (qemu::Processor::Host, qemu::Processor::EmulatedIntel) => args.timeout * 5,
-            _ => args.timeout,
-        };
-        let isolation_log = dir.join("isolation-serial.log");
-        integration(
-            args,
-            isolating,
-            timeout,
-            &isolation_disk,
-            &isolation_log,
-            " with kernel page-table isolation",
-            "page-table isolation on",
-        )?;
-    }
-    // The debugger checks boot as cargo xtask debug does, at the kernel's
-    // linked addresses.
-    let gdb_disk = dir.join("gdb-disk.img");
-    let gdb_cmdline = [cmdline.as_str(), image::KASLR_OFF].join(" ");
-    image::create_for_tests(args.kind, &built, &gdb_disk, gdb_cmdline.trim())?;
-    let gdb_log = dir.join("gdb-serial.log");
-    let timeout = Duration::from_secs(args.timeout);
-    crate::debug::check_scripts(&args.machine, &built.kernel, &gdb_disk, &gdb_log, timeout)?;
-    println!("kernel debugger scripts passed");
-    let entry_log = dir.join("entry-serial.log");
-    crate::entry_state::check(&args.machine, &built.kernel, &gdb_disk, &entry_log, timeout)?;
-    println!("kernel entry state checked");
-    crate::machine_state::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("machine"),
-        timeout,
-    )?;
-    println!("machine state checked");
-    let scenarios = dir.join("scenarios");
-    crate::scenario::run(&args.machine, args.kind, &built, &scenarios, timeout)?;
-    println!("panic scenarios passed");
-    let boot_menu = dir.join("boot-menu");
-    crate::boot_menu::run(&args.machine, args.kind, &built, &boot_menu, timeout)?;
-    println!("boot menu runs passed");
-    crate::secure_boot::check::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("secure-boot"),
-        timeout,
-    )?;
-    println!("Secure Boot runs passed");
-    crate::power::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("power"),
-        timeout,
-    )?;
-    println!("power-off run passed");
-    system_tests(args, &dir)?;
-    crate::volumes::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("volumes"),
-        timeout,
-    )?;
-    println!("USB volumes run passed");
-    crate::own_root::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("namespaces"),
-        timeout,
-        "namespaces",
-        "",
-    )?;
-    println!("namespaces run passed");
-    // Each Argon2id hash of the accounts probe takes seconds when
-    // emulated, and it makes about a dozen.
-    crate::own_root::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("accounts"),
-        timeout * 2,
-        "accounts",
-        "",
-    )?;
-    println!("accounts run passed");
-    crate::own_root::run_live(&args.machine, args.kind, &built, &dir.join("live"), timeout)?;
-    println!("live run passed");
-    crate::boot_attempts::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("boot-attempts"),
-        timeout,
-    )?;
-    println!("boot attempts run passed");
-    crate::root_disk::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("root-disk"),
-        timeout,
-    )?;
-    println!("root disk runs passed");
-    crate::root_disk::run_fresh_guids(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("fresh-guids"),
-        timeout,
-    )?;
-    println!("fresh GUIDs run passed");
-    crate::root_disk::run_dirty_esp(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("dirty-esp"),
-        timeout,
-    )?;
-    println!("dirty ESP run passed");
-    crate::root_disk::run_boot_disk_missing(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("boot-disk-missing"),
-        timeout,
-    )?;
-    println!("missing boot disk run passed");
-    crate::root_disk::run_bus_restart(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("bus-restart"),
-        timeout,
-    )?;
-    println!("bus restart runs passed");
-    crate::root_disk::run_acpi_restart(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("acpi-restart"),
-        timeout,
-    )?;
-    println!("ACPI restart run passed");
-    crate::input::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("input"),
-        timeout,
-    )?;
-    println!("input run passed");
-    crate::console::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("console"),
-        timeout,
-    )?;
-    println!("console run passed");
-    crate::console::run_setup(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("setup"),
-        timeout,
-    )?;
-    println!("setup run passed");
-    crate::takeover::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("takeover"),
-        timeout,
-    )?;
-    println!("takeover run passed");
-    crate::durability::run(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("durability"),
-        timeout,
-    )?;
-    println!("durability run passed");
-    Ok(())
+    bail!(
+        "{} of the lanes failed:\n{}",
+        failed.len(),
+        failed.join("\n")
+    )
 }
 
 #[cfg(test)]
