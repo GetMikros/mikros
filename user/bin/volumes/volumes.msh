@@ -1,7 +1,13 @@
-# What `volumes` takes, for msh's completion and colours.
+# What `volumes` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
 extern volumes(
-    call?: [eject mount] "eject or mount a volume",
-    volume?: string "the name or ID of the volume",
-    --json: bool "write the volumes as JSON",
-    --help: bool "show how to use volumes"
-)
+    --json: bool "write the volumes as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
+extern volumes eject(
+    volume: volume "the name in /volumes or the ID of the volume"
+) complete
+extern volumes mount(
+    id: volume "the ID of the volume"
+) complete

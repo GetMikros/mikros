@@ -4,7 +4,7 @@
 //! the device manager asks for the permissions.
 
 use crate::listing::{self, COMMAND, Call, Request, State, Volume};
-use mikros_cli::{FAILURE, INVALID, SUCCESS};
+use mikros_cli::{FAILURE, INVALID, Paint, Run, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::driver::VolumesClient;
@@ -19,11 +19,11 @@ const FOLDER: &str = "/volumes";
 const FOREVER: i64 = i64::MAX;
 
 pub fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let request = match listing::read(arguments) {
-        Request::Help => return write(&COMMAND.help()),
-        Request::Invalid(reason) => return fail(INVALID, &reason),
-        request => request,
+    let run = start(&COMMAND, &mikros_command::list);
+    let fail = |status: u8, message: &str| fail(&run, status, message);
+    let request = match listing::read(&run) {
+        Ok(request) => request,
+        Err(reason) => return fail(INVALID, &reason),
     };
     let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
         return fail(FAILURE, "cannot reach the service directory");
@@ -40,14 +40,13 @@ pub fn main() -> ExitCode {
             };
             match json {
                 true => write(&listing::json(&listed)),
-                false => write(&listing::text(&listed)),
+                false => write(&listing::text(&listed, Paint::stdout(&run))),
             }
         }
         Request::Call(call, volume) => match call_on(&volumes, call, &volume) {
             Ok(()) => ExitCode::from(SUCCESS),
             Err(why) => fail(FAILURE, &why),
         },
-        Request::Help | Request::Invalid(_) => unreachable!("answered above"),
     }
 }
 
@@ -151,7 +150,7 @@ fn write(text: &str) -> ExitCode {
 }
 
 /// Writes the error `message` to standard error and gives `status`.
-fn fail(status: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
+fn fail(run: &Run, status: u8, message: &str) -> ExitCode {
+    complain(&COMMAND, run, message);
     ExitCode::from(status)
 }

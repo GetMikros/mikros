@@ -2,16 +2,32 @@
 //! per volume in aligned columns, a JSON array, or why a call on a volume
 //! failed.
 
-use mikros_cli::{Arguments, Command, json_string};
+use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
 
-pub const COMMAND: Command = Command {
-    name: "volumes",
-    operands: "[eject <volume>|mount <id>]",
-    most: 2,
-    about: "Lists the volumes with their names, IDs, file systems and states,\n\
-            or ejects one by its name or ID, or mounts one by its ID.",
-    options: &[("--json", "write the volumes as a JSON array of objects")],
-    values: &[],
+pub static COMMAND: Spec = Spec {
+    options: &[Opt::long(
+        "json",
+        "write the volumes as a JSON array of objects",
+    )],
+    subcommands: &[
+        Spec {
+            operands: &[Operand::one(
+                "volume",
+                Kind::Volume,
+                "the name in /volumes or the ID of the volume",
+            )],
+            ..Spec::new("eject", "Ejects a volume.")
+        },
+        Spec {
+            operands: &[Operand::one("id", Kind::Volume, "the ID of the volume")],
+            ..Spec::new("mount", "Mounts an ejected volume.")
+        },
+    ],
+    ..Spec::new(
+        "volumes",
+        "Lists the volumes with their names, IDs, file systems and states,\n\
+         or ejects one by its name or ID, or mounts one by its ID.",
+    )
 };
 
 /// A call on a volume.
@@ -26,34 +42,21 @@ pub enum Call {
 pub enum Request {
     List { json: bool },
     Call(Call, String),
-    Help,
-    Invalid(String),
 }
 
-pub fn read(arguments: Vec<String>) -> Request {
-    let (options, mut operands) = match COMMAND.parse(arguments) {
-        Arguments::Run {
-            options, operands, ..
-        } => (options, operands),
-        Arguments::Help => return Request::Help,
-        Arguments::Invalid(reason) => return Request::Invalid(reason),
-    };
-    let json = options.contains(&"--json");
-    if operands.is_empty() {
-        return Request::List { json };
-    }
-    let call = match operands[0].as_str() {
-        "eject" => Call::Eject,
-        "mount" => Call::Mount,
-        other => return Request::Invalid(format!("unknown subcommand {other}")),
+/// What `run` asks, or why its arguments are invalid.
+pub fn read(run: &Run) -> Result<Request, String> {
+    let json = run.has("--json");
+    let call = match run.subcommand() {
+        None => return Ok(Request::List { json }),
+        Some("eject") => Call::Eject,
+        Some(_) => Call::Mount,
     };
     if json {
-        return Request::Invalid(format!("--json does not go with {}", operands[0]));
+        let subcommand = run.subcommand().unwrap_or_default();
+        return Err(format!("--json does not go with {subcommand}"));
     }
-    match operands.len() {
-        2 => Request::Call(call, operands.swap_remove(1)),
-        _ => Request::Invalid(format!("{} needs a volume", operands[0])),
-    }
+    Ok(Request::Call(call, run.operands[0].clone()))
 }
 
 /// The state of a volume.
@@ -97,44 +100,73 @@ pub struct Volume {
 
 /// The header and lines of `volumes`, each column aligned to the left,
 /// with `-` for a name or type that a volume has not.
-pub fn text(volumes: &[Volume]) -> String {
+pub fn text(volumes: &[Volume], paint: Paint) -> String {
     let header = ["NAME", "ID", "TYPE", "STATE", "REMOVABLE"];
-    let mut rows = vec![header.map(String::from)];
-    rows.extend(volumes.iter().map(|v| {
-        [
-            v.name.clone().unwrap_or_else(|| "-".into()),
-            v.id.clone(),
-            v.kind.clone().unwrap_or_else(|| "-".into()),
-            v.state.name().into(),
-            match v.removable {
-                true => "yes".into(),
-                false => "no".into(),
-            },
-        ]
-    }));
-    let width = |column: usize| {
-        rows.iter()
-            .map(|r| r[column].chars().count())
-            .max()
-            .unwrap_or(0)
+    let or_none = |text: &Option<String>, role: Option<Role>| match text {
+        Some(text) => (text.clone(), role),
+        None => ("-".into(), Some(Role::Secondary)),
     };
-    let widths = [width(0), width(1), width(2), width(3)];
-    rows.iter()
-        .map(|r| {
-            format!(
-                "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}\n",
-                r[0],
-                r[1],
-                r[2],
-                r[3],
-                r[4],
-                w0 = widths[0],
-                w1 = widths[1],
-                w2 = widths[2],
-                w3 = widths[3],
-            )
+    let rows: Vec<Vec<Cell>> = volumes
+        .iter()
+        .map(|v| {
+            let state = (v.state == State::Mounted).then_some(Role::Ok);
+            let removable = match v.removable {
+                true => "yes",
+                false => "no",
+            };
+            vec![
+                or_none(&v.name, Some(Role::Path)),
+                (v.id.clone(), Some(Role::Number)),
+                or_none(&v.kind, None),
+                (v.state.name().into(), state),
+                (removable.into(), None),
+            ]
         })
-        .collect()
+        .collect();
+    columns(&header, &rows, &[false; 5], paint)
+}
+
+/// A cell of a table: its text, and the role it is coloured in.
+type Cell = (String, Option<Role>);
+
+/// The header and `rows` in columns two spaces apart, the header in the
+/// secondary colour, each column as wide as its widest text without
+/// colours, aligned to the right where `right` says, the last one not
+/// padded.
+fn columns(header: &[&str], rows: &[Vec<Cell>], right: &[bool], paint: Paint) -> String {
+    let header: Vec<Cell> = header
+        .iter()
+        .map(|h| (h.to_string(), Some(Role::Secondary)))
+        .collect();
+    let all: Vec<&Vec<Cell>> = std::iter::once(&header).chain(rows).collect();
+    let widths: Vec<usize> = (0..header.len())
+        .map(|c| {
+            all.iter()
+                .map(|r| r[c].0.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut text = String::new();
+    for row in all {
+        for (c, (cell, role)) in row.iter().enumerate() {
+            let pad = " ".repeat(widths[c] - cell.chars().count());
+            let shown = match role {
+                Some(role) => paint.paint(*role, cell),
+                None => cell.clone(),
+            };
+            if c > 0 {
+                text.push_str("  ");
+            }
+            match (right[c], c + 1 == row.len()) {
+                (true, _) => text.push_str(&(pad + &shown)),
+                (false, true) => text.push_str(&shown),
+                (false, false) => text.push_str(&(shown + &pad)),
+            }
+        }
+        text.push('\n');
+    }
+    text
 }
 
 /// `volumes` as a JSON array of objects with the members `name`, `id`,
@@ -188,9 +220,14 @@ pub fn failure(call: Call, volume: &str, status: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mikros_cli::Parsed;
 
-    fn read_args(arguments: &[&str]) -> Request {
-        read(arguments.iter().map(|a| a.to_string()).collect())
+    fn read_args(arguments: &[&str]) -> Result<Request, String> {
+        match COMMAND.parse(arguments.iter().map(|a| a.to_string())) {
+            Parsed::Run(run) => read(&run),
+            Parsed::Invalid(reason) => Err(reason),
+            Parsed::Help(path) => Err(format!("help for {path:?}")),
+        }
     }
 
     fn volume(name: Option<&str>, id: &str, kind: Option<&str>, state: State) -> Volume {
@@ -205,24 +242,27 @@ mod tests {
 
     #[test]
     fn reads_a_list_or_a_call() {
-        assert_eq!(read_args(&[]), Request::List { json: false });
-        assert_eq!(read_args(&["--json"]), Request::List { json: true });
+        assert_eq!(read_args(&[]), Ok(Request::List { json: false }));
+        assert_eq!(read_args(&["--json"]), Ok(Request::List { json: true }));
         assert_eq!(
             read_args(&["eject", "STICK"]),
-            Request::Call(Call::Eject, "STICK".into())
+            Ok(Request::Call(Call::Eject, "STICK".into()))
         );
         assert_eq!(
             read_args(&["mount", "1234-abcd"]),
-            Request::Call(Call::Mount, "1234-abcd".into())
+            Ok(Request::Call(Call::Mount, "1234-abcd".into()))
         );
-        assert_eq!(read_args(&["--help", "eject"]), Request::Help);
+        assert_eq!(
+            read_args(&["--help", "eject"]),
+            Err("help for [\"eject\"]".into())
+        );
     }
 
     #[test]
     fn refuses_bad_subcommands_and_operands() {
-        let invalid = |reason: &str| Request::Invalid(reason.into());
-        assert_eq!(read_args(&["list"]), invalid("unknown subcommand list"));
-        assert_eq!(read_args(&["eject"]), invalid("eject needs a volume"));
+        let invalid = |reason: &str| Err(reason.into());
+        assert_eq!(read_args(&["list"]), invalid("unexpected argument list"));
+        assert_eq!(read_args(&["eject"]), invalid("missing operand <volume>"));
         assert_eq!(
             read_args(&["mount", "a", "b"]),
             invalid("unexpected argument b")
@@ -230,6 +270,10 @@ mod tests {
         assert_eq!(
             read_args(&["--json", "eject", "a"]),
             invalid("--json does not go with eject")
+        );
+        assert_eq!(
+            read_args(&["mount", "a", "--json"]),
+            invalid("--json does not go with mount")
         );
     }
 
@@ -252,12 +296,26 @@ mod tests {
             volume(None, "1234-abcd", None, State::Ejected),
         ];
         assert_eq!(
-            text(&volumes),
+            text(&volumes, Paint::never()),
             "NAME   ID                                    TYPE  STATE    REMOVABLE\n\
              STICK  4e564d65-0000-4000-8000-000000000001  fat   mounted  yes\n\
              -      1234-abcd                             -     ejected  yes\n"
         );
-        assert_eq!(text(&[]), "NAME  ID  TYPE  STATE  REMOVABLE\n");
+        assert_eq!(
+            text(&[], Paint::never()),
+            "NAME  ID  TYPE  STATE  REMOVABLE\n"
+        );
+        let on = Paint::new(Some("always"), false, None);
+        let paint = |sgr: &str, t: &str| format!("\x1b[{sgr}m{t}\x1b[0m");
+        assert_eq!(
+            text(&volumes, on).lines().nth(2).unwrap(),
+            format!(
+                "{}      {}                             {}     ejected  yes",
+                paint("90", "-"),
+                paint("38;2;21;193;160", "1234-abcd"),
+                paint("90", "-")
+            )
+        );
     }
 
     #[test]
@@ -289,5 +347,11 @@ mod tests {
         assert_eq!(failure(Call::Mount, "x", "bad_state"), "x: already mounted");
         assert_eq!(failure(Call::Mount, "x", "access_denied"), "not authorized");
         assert_eq!(failure(Call::Mount, "x", "timed_out"), "timed_out");
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/volumes.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
     }
 }
