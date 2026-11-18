@@ -1,0 +1,13 @@
+# What `touch` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern touch(
+    ...file: file "the files to create or set the times of",
+    -a: bool "set only the access time",
+    -m: bool "set only the modified time",
+    --no-create(-c): bool "create no file that does not exist",
+    --date(-d): string "use this time: now, yesterday, @seconds or YYYY-MM-DD hh:mm[:ss] [zone]",
+    -t: string "use this local time: [[CC]YY]MMDDhhmm[.ss]",
+    --reference(-r): file "use the times of this file",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
