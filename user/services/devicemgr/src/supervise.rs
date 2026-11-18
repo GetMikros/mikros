@@ -219,6 +219,8 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             .starter
             .start(&spawned.driver, prepared, bus, manager)
             .await;
+        let held = m.profiles.replied(id, &mut m.devices.borrow_mut());
+        crate::cache::start_held(&m, held);
         if matches!(started, Started::Yes | Started::Declined(_)) {
             boot_framebuffer_fallback(&m, id);
         }

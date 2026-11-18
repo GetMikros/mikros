@@ -308,6 +308,59 @@ pub fn run_dirty_esp(
     boot(&DIRTY_ESP, "nvme", &machine, &dir, timeout)
 }
 
+/// A boot disk location that no disk of the test machine has, which the
+/// bootloader keeps, and the start of the device manager's line once it
+/// stopped the boot because that disk did not appear, with the root
+/// partition on the NVMe disk among the candidates (MIKSPEC-0045.R22).
+const MISSING_BOOT_DISK: &str = "boot_disk=pci-0000:00:1f.7/nvme-9";
+const ROOT_STOPPED: &str = "device-manager: stopping the boot without a root partition: \
+                            the boot disk did not appear within 30 seconds; candidates: part-";
+
+/// Boots the missing boot disk run in `dir`: the root disk run's image
+/// from an NVMe controller, whose command line names a boot disk that
+/// is not there. The device manager must stop the boot 30 seconds after
+/// it started, listing the root partition it saw elsewhere, and the run
+/// ends once it has logged that, since the boot then waits for good.
+pub fn run_boot_disk_missing(
+    machine: &MachineArgs,
+    kind: Kind,
+    built: &build::Built,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    let dir = dir.join("nvme");
+    fs::create_dir_all(&dir)?;
+    let disk = dir.join("disk.img");
+    // The scenario waits for the root longer than the device manager
+    // waits for the boot disk.
+    let extra = format!("{} {MISSING_BOOT_DISK}", ROOT_DISK.scenario);
+    image::create_with(kind, built, &disk, &extra, &[])?;
+    let mut machine = machine.clone();
+    machine.disk = Disk::Nvme;
+    let log = dir.join("serial.log");
+    let mut qemu = scenario::start(&machine, &dir, false)?;
+    let deadline = Instant::now() + timeout;
+    let stopped = loop {
+        let serial = fs::read(&log).unwrap_or_default();
+        if String::from_utf8_lossy(&serial).contains(ROOT_STOPPED) {
+            break true;
+        }
+        if qemu.try_wait()?.is_some() || Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let _ = qemu.kill();
+    let _ = qemu.wait();
+    if !stopped {
+        bail!(
+            "the missing boot disk run did not log {ROOT_STOPPED:?}; serial output in {}",
+            log.display()
+        );
+    }
+    Ok(())
+}
+
 /// Clears the clean-shutdown bit of FAT entry 1 in every FAT of the
 /// FAT32 EFI system partition of the disk image at `path`.
 fn leave_esp_dirty(path: &Path) -> Result<()> {

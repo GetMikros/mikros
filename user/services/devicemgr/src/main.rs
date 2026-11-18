@@ -304,6 +304,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         volumes: volumes::State::default(),
     });
     spawner.spawn(shutdown::watch(manager.clone()));
+    spawner.spawn(cache::boot_disk_deadline(manager.clone()));
     match provider {
         Some(end) => spawner.spawn(removal::serve(manager.clone(), ServerEnd::new(end))),
         None => mikros_rt::log!(

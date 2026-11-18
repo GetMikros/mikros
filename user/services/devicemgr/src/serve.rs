@@ -59,6 +59,8 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
                         Ok((id, Added::Again)) => {
                             m.spawner.spawn(supervise::reconnect(m.clone(), id))
                         }
+                        // It starts once the root partition is decided.
+                        Ok((_, Added::Held)) => {}
                         _ => {}
                     }
                     replied
@@ -138,6 +140,9 @@ async fn request_reset(m: &Manager, caller: u64) -> Result<(), Status> {
 enum Added {
     /// Added a new device, and bound a driver to it.
     Bound,
+    /// Added a new device and bound a driver to it, which starts once the
+    /// root partition is decided, since the device is a candidate.
+    Held,
     /// Added a new device, which has no driver.
     Unbound,
     /// Gave back a device that was kept for the restarted driver of its
@@ -147,8 +152,8 @@ enum Added {
 
 /// Adds the device of `request` as a child of device `caller`, with the
 /// `cache` property when it is a disk or partition, from the storage
-/// profiles read again for it, and the root partition's properties when
-/// it is the root partition, and binds a driver to it. A device that
+/// profiles read again for it, and binds a driver to it, which waits
+/// when the device is a candidate for the root partition. A device that
 /// was kept for `caller`'s restarted driver, with the same name and
 /// hardware IDs, is given back instead. The PCI function that has the
 /// boot framebuffer also gets `display:boot-framebuffer` after its own
@@ -213,10 +218,11 @@ async fn add_device(
         Some(caller),
         request.resources,
     );
-    m.profiles.give_root_properties(id, &mut devices);
-    let added = match devices.bind_device(id, &m.drivers.borrow()) {
-        true => Added::Bound,
-        false => Added::Unbound,
+    let bound = devices.bind_device(id, &m.drivers.borrow());
+    let added = match (bound, m.profiles.added(id, &devices, bound)) {
+        (true, true) => Added::Held,
+        (true, false) => Added::Bound,
+        (false, _) => Added::Unbound,
     };
     Some(Ok((id, added)))
 }

@@ -5,8 +5,19 @@
 //! the command line. The root partition and the EFI system partition of
 //! the boot are taken only from the boot disk: the disk at the location
 //! that `boot_disk=` names, when the command line has it.
+//!
+//! The root partition is decided once the boot disk's partition driver
+//! has replied to `Start`, having added all its partitions, or, when the
+//! boot disk is any disk that is not removable, once the partition
+//! drivers of those that appeared within `BOOT_DISK_WAIT` have replied.
+//! Until then the drivers of the candidates wait. When the boot disk has
+//! not appeared by then, or the boot disk has no candidate or more than
+//! one, the boot stops: no partition becomes the root, and one error
+//! lists the candidates (MIKSPEC-0045.R21, MIKSPEC-0045.R22).
 
+use crate::Manager;
 use crate::devices::{Device, Devices};
+use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -46,6 +57,10 @@ const FILESYSTEM: &str = "device.filesystem";
 /// The profiles' path in the root file system, and their largest size.
 const PROFILES: &str = "config/storage/profiles.yaml";
 const PROFILES_MAX: usize = 64 << 10;
+/// How long after it started the device manager waits for the boot disk,
+/// or, when the boot disk is any disk that is not removable, for such
+/// disks to appear.
+const BOOT_DISK_WAIT: i64 = 30_000_000_000;
 
 /// Which partition is the root, from the command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -56,20 +71,64 @@ enum Root {
     OfRootType,
 }
 
-/// The root partition's device, once the first one that matches `root`
-/// is added or publishes a file system, and its file system once
-/// connected, from which the profiles are read; the GUID of the EFI
-/// system partition that `esp=PARTUUID=` gives; the boot disk's location
-/// that `boot_disk=` gives; and the version that `system=` names and
-/// whether `live` is a word of the command line.
+/// Where the choice of the root partition stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decision {
+    Pending,
+    /// The root partition's device.
+    Root(u64),
+    /// The boot stopped, without a root partition.
+    Stopped,
+}
+
+/// The choice of the root partition and its devices: the candidates
+/// whose drivers wait for it, the disks whose partition drivers replied
+/// to `Start`, and, once `BOOT_DISK_WAIT` has passed when the boot disk
+/// is any disk that is not removable, those of such disks it still waits
+/// for. Then the root partition's file system once connected, from which
+/// the profiles are read; the GUID of the EFI system partition that
+/// `esp=PARTUUID=` gives; the boot disk's location that `boot_disk=`
+/// gives; and the version that `system=` names and whether `live` is a
+/// word of the command line.
 pub struct Profiles {
     root: Root,
-    root_device: Cell<Option<u64>>,
+    decision: Cell<Decision>,
+    held: RefCell<Vec<u64>>,
+    replied: RefCell<Vec<u64>>,
+    due: RefCell<Option<Vec<u64>>>,
     fs: RefCell<Option<Rc<NodeAsyncClient>>>,
     esp: Option<String>,
     boot_location: Option<String>,
     system: Option<String>,
     live: bool,
+}
+
+/// Whether `device` is a disk.
+fn is_disk(device: &Device) -> bool {
+    device.hardware_ids.iter().any(|id| id == DISK)
+}
+
+/// Whether `device` may be removed, unless its `removable` property says
+/// it is not.
+fn removable(device: &Device) -> bool {
+    property(&device.properties, REMOVABLE) != Some("false")
+}
+
+/// Starts the drivers of the devices `held`, which waited for the choice
+/// of the root partition.
+pub fn start_held(m: &Rc<Manager>, held: Vec<u64>) {
+    for id in held {
+        m.spawner.spawn(crate::supervise::supervise(m.clone(), id));
+    }
+}
+
+/// Waits `BOOT_DISK_WAIT` from now, the start of the device manager, and
+/// then lets the boot disk's deadline pass.
+pub async fn boot_disk_deadline(m: Rc<Manager>) {
+    let deadline = crate::supervise::now().saturating_add(BOOT_DISK_WAIT);
+    let _ = m.reactor.sleep_until(deadline).await;
+    let held = m.profiles.deadline(&mut m.devices.borrow_mut());
+    start_held(&m, held);
 }
 
 /// Whether `device` has the partition GUID `guid`, in either case.
@@ -132,7 +191,10 @@ impl Profiles {
         }
         Profiles {
             root,
-            root_device: Cell::new(None),
+            decision: Cell::new(Decision::Pending),
+            held: RefCell::new(Vec::new()),
+            replied: RefCell::new(Vec::new()),
+            due: RefCell::new(None),
             fs: RefCell::new(None),
             esp,
             boot_location,
@@ -175,7 +237,6 @@ impl Profiles {
         let Some(device) = devices.get(disk) else {
             return false;
         };
-        let removable = |d: &Device| property(&d.properties, REMOVABLE) != Some("false");
         if let Some(at) = &self.boot_location {
             return location(device, devices).as_deref() == Some(at.as_str());
         }
@@ -194,38 +255,144 @@ impl Profiles {
         holds_esp(disk) && !(removable(device) && fixed_holds_esp)
     }
 
-    /// Whether `device`, among `devices`, whose driver published a
-    /// `filesystem` service, is the root partition: the one that
-    /// `give_root_properties` chose, or else the first device that
-    /// publishes one and matches the command line, which stays it.
-    pub fn claim_root(&self, device: &Device, devices: &Devices) -> bool {
-        if let Some(root) = self.root_device.get() {
-            return root == device.id;
+    /// Whether the driver of device `id`, just added to `devices`, which
+    /// has one when `bound`, waits for the choice of the root partition:
+    /// it is a candidate that may lie on the boot disk, and nothing is
+    /// decided yet. A candidate that lies elsewhere is logged.
+    pub fn added(&self, id: u64, devices: &Devices, bound: bool) -> bool {
+        let Some(device) = devices.get(id) else {
+            return false;
+        };
+        self.log_elsewhere(device, devices);
+        let waits = bound
+            && self.decision.get() == Decision::Pending
+            && self.root_candidate(device)
+            && (self.boot_location.is_none() || self.on_boot_disk(device, devices));
+        if waits {
+            self.held.borrow_mut().push(id);
         }
-        let matches = self.matches_root(device, devices);
-        if matches {
-            self.root_device.set(Some(device.id));
-        }
-        matches
+        waits
     }
 
-    /// Makes device `id`, just added to `devices`, the root partition when
-    /// none is yet and it matches the command line, and then gives it the
-    /// property `system` with the version that `system=` names, when the
-    /// command line has that option, and `live`, `true` or `false`, in
-    /// place of any it had.
-    pub fn give_root_properties(&self, id: u64, devices: &mut Devices) {
-        if let Some(device) = devices.get(id) {
-            self.log_elsewhere(device, devices);
+    /// Notes that the driver of device `id`, among `devices`, replied to
+    /// `Start`, or failed to start. For the partition driver of the boot
+    /// disk this decides the root partition, and so it may for a disk
+    /// that is not removable once `BOOT_DISK_WAIT` has passed, when the
+    /// boot disk is any such disk. Returns the devices whose drivers then
+    /// start.
+    pub fn replied(&self, id: u64, devices: &mut Devices) -> Vec<u64> {
+        if self.decision.get() != Decision::Pending {
+            return Vec::new();
         }
-        if self.root_device.get().is_some() {
-            return;
+        if !devices.get(id).is_some_and(is_disk) {
+            return Vec::new();
         }
-        match devices.get(id) {
-            Some(device) if self.matches_root(device, devices) => {}
-            _ => return,
+        self.replied.borrow_mut().push(id);
+        let ready = if self.any_fixed_disk() {
+            match self.due.borrow_mut().as_mut() {
+                None => false,
+                Some(due) => {
+                    due.retain(|&d| d != id);
+                    due.is_empty()
+                }
+            }
+        } else {
+            self.boot_disk(id, devices)
+        };
+        match ready {
+            true => self.decide(devices, None),
+            false => Vec::new(),
         }
-        self.root_device.set(Some(id));
+    }
+
+    /// Called `BOOT_DISK_WAIT` after the device manager started: stops
+    /// the boot when the boot disk has not appeared, and, when the boot
+    /// disk is any disk that is not removable, decides once the partition
+    /// drivers of the ones that appeared have replied. Returns the
+    /// devices whose drivers then start.
+    pub fn deadline(&self, devices: &mut Devices) -> Vec<u64> {
+        if self.decision.get() != Decision::Pending {
+            return Vec::new();
+        }
+        if self.any_fixed_disk() {
+            let replied = self.replied.borrow().clone();
+            let due: Vec<u64> = devices
+                .iter()
+                .filter(|d| is_disk(d) && !removable(d) && !replied.contains(&d.id))
+                .map(|d| d.id)
+                .collect();
+            let ready = due.is_empty();
+            *self.due.borrow_mut() = Some(due);
+            return match ready {
+                true => self.decide(devices, None),
+                false => Vec::new(),
+            };
+        }
+        // The boot disk is there: its partition driver has not replied.
+        if devices
+            .iter()
+            .any(|d| is_disk(d) && self.boot_disk(d.id, devices))
+        {
+            return Vec::new();
+        }
+        self.decide(
+            devices,
+            Some("the boot disk did not appear within 30 seconds"),
+        )
+    }
+
+    /// Whether the boot disk is any disk that is not removable: the
+    /// command line has neither `boot_disk=` nor `esp=`.
+    fn any_fixed_disk(&self) -> bool {
+        self.boot_location.is_none() && self.esp.is_none()
+    }
+
+    /// Chooses the root partition among `devices`, the only candidate on
+    /// the boot disk, unless `stopped` says why the boot stops; without
+    /// one, or with more than one, it stops too. A stopped boot logs the
+    /// candidates seen anywhere. Returns the devices whose drivers waited
+    /// for the choice, which then start.
+    fn decide(&self, devices: &mut Devices, stopped: Option<&str>) -> Vec<u64> {
+        let on_boot_disk: Vec<u64> = devices
+            .iter()
+            .filter(|d| self.matches_root(d, devices))
+            .map(|d| d.id)
+            .collect();
+        let why = match (stopped, on_boot_disk.as_slice()) {
+            (Some(why), _) => why,
+            (None, [root]) => {
+                self.decision.set(Decision::Root(*root));
+                self.give_root_properties(*root, devices);
+                return core::mem::take(&mut *self.held.borrow_mut());
+            }
+            (None, []) => "the boot disk has no root partition",
+            (None, _) => "the boot disk has more than one root partition",
+        };
+        self.decision.set(Decision::Stopped);
+        let mut candidates = String::new();
+        for d in devices.iter().filter(|d| self.root_candidate(d)) {
+            if !candidates.is_empty() {
+                candidates.push_str("; ");
+            }
+            let at = location(d, devices).unwrap_or_else(|| "no location".into());
+            let guid = property(&d.properties, PARTITION_GUID).unwrap_or("no GUID");
+            candidates.push_str(&format!("{} at {at}, {guid}", d.name));
+        }
+        if candidates.is_empty() {
+            candidates.push_str("none");
+        }
+        mikros_rt::log!(
+            Error,
+            "device-manager: stopping the boot without a root partition: {why}; candidates: {candidates}"
+        );
+        core::mem::take(&mut *self.held.borrow_mut())
+    }
+
+    /// Gives device `id`, among `devices`, the root partition's
+    /// properties: `system` with the version that `system=` names, when
+    /// the command line has that option, and `live`, `true` or `false`,
+    /// in place of any it had.
+    fn give_root_properties(&self, id: u64, devices: &mut Devices) {
         let Some(device) = devices.get_mut(id) else {
             return;
         };
@@ -282,9 +449,10 @@ impl Profiles {
             return false;
         };
         let on_disk = |d: &&Device| d.parent == Some(disk);
-        let root_here = match self.root_device.get() {
-            Some(root) => devices.get(root).is_some_and(|r| r.parent == Some(disk)),
-            None => devices
+        let root_here = match self.decision.get() {
+            Decision::Root(root) => devices.get(root).is_some_and(|r| r.parent == Some(disk)),
+            Decision::Stopped => false,
+            Decision::Pending => devices
                 .iter()
                 .filter(on_disk)
                 .any(|d| self.matches_root(d, devices)),
@@ -311,9 +479,9 @@ impl Profiles {
         named && on_disk
     }
 
-    /// Whether device `id` is the root partition that `claim_root` chose.
+    /// Whether device `id` is the root partition that was decided.
     pub fn is_root(&self, id: u64) -> bool {
-        self.root_device.get() == Some(id)
+        self.decision.get() == Decision::Root(id)
     }
 
     /// Connects to instance `instance` of the published file systems as

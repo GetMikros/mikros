@@ -663,6 +663,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("dirty ESP run passed");
+    crate::root_disk::run_boot_disk_missing(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("boot-disk-missing"),
+        timeout,
+    )?;
+    println!("missing boot disk run passed");
     crate::root_disk::run_bus_restart(
         &args.machine,
         args.kind,
