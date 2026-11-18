@@ -115,11 +115,12 @@ impl State {
             }
             return Err(PEER_CLOSED);
         };
-        let txid = u32::from_le_bytes(
-            message.bytes[..4]
-                .try_into()
-                .expect("a message has a header"),
-        );
+        // A message shorter than a header, which the kernel writes too,
+        // replies to no call.
+        let txid = message
+            .bytes
+            .get(..4)
+            .map_or(0, |b| u32::from_le_bytes(b.try_into().expect("4 bytes")));
         match target.calls.get_mut(&txid) {
             Some(slot @ None) => *slot = Some(message),
             _ => target.queue.push_back(message),

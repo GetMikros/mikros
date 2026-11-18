@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The cargo-fuzz projects, relative to the repository root.
-const FUZZ_DIRS: [&str; 2] = ["kernel/fuzz", "boot/mikrosboot/fuzz"];
+const FUZZ_DIRS: [&str; 3] = ["kernel/fuzz", "boot/mikrosboot/fuzz", "tools/fuzz"];
 
 #[derive(clap::Args)]
 pub struct Args {
