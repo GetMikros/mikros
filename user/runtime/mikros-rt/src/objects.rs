@@ -37,6 +37,13 @@ pub fn duplicate(handle: Handle, rights: u32) -> Result<OwnedHandle, Status> {
     created(s, out)
 }
 
+/// Clears the signals `clear` of the object of `handle` and sets the
+/// signals `set`.
+pub fn signal(handle: Handle, clear: u32, set: u32) -> Result<(), Status> {
+    // SAFETY: the call takes no pointers.
+    status(unsafe { sys::object_signal(handle, clear, set) })
+}
+
 /// A new event with `options`.
 pub fn event(options: u32) -> Result<OwnedHandle, Status> {
     let mut out = 0;

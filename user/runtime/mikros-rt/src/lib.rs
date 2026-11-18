@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod exec;
 pub mod files;
+pub mod hardware;
 pub mod heap;
 pub mod log;
 pub mod managed;
