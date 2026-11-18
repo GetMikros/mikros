@@ -1,0 +1,10 @@
+# What `stat` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern stat(
+    ...path: path "the files and folders to show",
+    --dereference(-L): bool "follow links",
+    --format(-c): string "write only <format>, with %n, %s, %F, %i, %h, %U, %a, %y and %Y",
+    --json: bool "write the facts as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
