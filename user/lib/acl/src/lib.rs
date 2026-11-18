@@ -143,7 +143,8 @@ pub fn allows(entries: &[Entry], owner: u32, user: u32, app: u32, wanted: u32) -
 }
 
 /// Whom a node connection is for: the user ID, app number, process ID,
-/// kernel object ID and `admin` of a process (MIKSPEC-0049.R30).
+/// kernel object ID, `admin` and portable checksum of a process
+/// (MIKSPEC-0049.R35).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Subject {
     pub user: u32,
@@ -151,6 +152,55 @@ pub struct Subject {
     pub pid: u32,
     pub koid: u64,
     pub admin: u32,
+    pub portable_checksum: Checksum,
+}
+
+/// The longest portable checksum, in bytes (MIKSPEC-0049.R34).
+pub const CHECKSUM_MAX: usize = 71;
+
+/// The portable checksum of a subject's process, kept in place so that a
+/// subject stays a plain value: empty for none.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Checksum {
+    len: u8,
+    bytes: [u8; CHECKSUM_MAX],
+}
+
+impl Checksum {
+    /// No checksum.
+    pub const NONE: Checksum = Checksum {
+        len: 0,
+        bytes: [0; CHECKSUM_MAX],
+    };
+
+    /// `text` as a checksum, or `None` when it is longer than
+    /// `CHECKSUM_MAX`.
+    pub fn new(text: &str) -> Option<Checksum> {
+        let mut checksum = Checksum::NONE;
+        checksum
+            .bytes
+            .get_mut(..text.len())?
+            .copy_from_slice(text.as_bytes());
+        checksum.len = text.len() as u8;
+        Some(checksum)
+    }
+
+    pub fn as_str(&self) -> &str {
+        // It was made from a `str`, so it is UTF-8.
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+}
+
+impl Default for Checksum {
+    fn default() -> Checksum {
+        Checksum::NONE
+    }
+}
+
+impl core::fmt::Debug for Checksum {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), f)
+    }
 }
 
 /// The owner of a node that a connection with `subject` makes: the

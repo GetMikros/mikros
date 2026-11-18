@@ -20,7 +20,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use mikros_acl::Subject;
+use mikros_acl::{Checksum, Subject};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -198,8 +198,13 @@ impl Volumes {
                 pid,
                 koid,
                 admin,
+                portable_checksum,
             } = subject;
-            flat(node.restrict(user, app, pid, koid, admin, q.node).await)?;
+            let checksum = portable_checksum.as_str().into();
+            flat(
+                node.restrict(user, app, pid, koid, admin, checksum, q.node)
+                    .await,
+            )?;
         }
         Ok(NodeOpenResponse {
             r#type: opened.r#type,
@@ -407,17 +412,21 @@ async fn serve(
                 s,
                 match subject {
                     Some(_) => Err(Error::BadState),
-                    None => {
-                        let subject = Subject {
-                            user: q.user,
-                            app: q.app,
-                            pid: q.pid,
-                            koid: q.koid,
-                            admin: q.admin,
-                        };
-                        volumes.serve(q.node, rights, Some(subject));
-                        Ok(NodeRestrictResponse {})
-                    }
+                    None => match Checksum::new(&q.portable_checksum) {
+                        Some(portable_checksum) => {
+                            let subject = Subject {
+                                user: q.user,
+                                app: q.app,
+                                pid: q.pid,
+                                koid: q.koid,
+                                admin: q.admin,
+                                portable_checksum,
+                            };
+                            volumes.serve(q.node, rights, Some(subject));
+                            Ok(NodeRestrictResponse {})
+                        }
+                        None => Err(Error::Invalid),
+                    },
                 },
             ),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),

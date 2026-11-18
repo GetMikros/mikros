@@ -259,7 +259,15 @@ impl Connection {
         let (backing, server) = endpoints::<Node>().map_err(|_| Error::Io)?;
         flat(
             self.backing
-                .restrict(q.user, q.app, q.pid, q.koid, q.admin, server)
+                .restrict(
+                    q.user,
+                    q.app,
+                    q.pid,
+                    q.koid,
+                    q.admin,
+                    q.portable_checksum,
+                    server,
+                )
                 .await,
         )?;
         self.open_domain()?;

@@ -1938,7 +1938,8 @@ async fn bound(
 ) -> Result<NodeAsyncClient, Status> {
     let own = NodeAsyncClient::new(connection(dir, RX).await?, shared.reactor.clone());
     let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
-    flat(own.restrict(user, 0, 0, 0, 0, server).await).map_err(status)?;
+    let checksum = String::new();
+    flat(own.restrict(user, 0, 0, 0, 0, checksum, server).await).map_err(status)?;
     Ok(NodeAsyncClient::new(client, shared.reactor.clone()))
 }
 

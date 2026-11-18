@@ -115,7 +115,7 @@ async fn acls(
     const NAME: &str = "acl-check";
     let entry = |tag, id, rights| AclEntry { tag, id, rights };
     let (_, server) = endpoints::<Node>().map_err(|_| 17)?;
-    let again = home.restrict(user, 0, 1, 1, 0, server).await;
+    let again = home.restrict(user, 0, 1, 1, 0, String::new(), server).await;
     check(matches!(again, Ok(Err(Error::BadState))), 17)?;
     let (file, server) = endpoints::<Node>().map_err(|_| 18)?;
     let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);

@@ -11,7 +11,7 @@ use crate::driver::node::Connection;
 use crate::linux::node::{Changes, Node as BtrfsNode};
 use alloc::vec::Vec;
 use core::ffi::CStr;
-use mikros_acl::{Entry, Subject};
+use mikros_acl::{Checksum, Entry, Subject};
 use mikros_rt::interfaces::mikros::fs::*;
 
 const ACCESS: &CStr = c"system.posix_acl_access";
@@ -175,6 +175,7 @@ impl Connection {
             pid: q.pid,
             koid: q.koid,
             admin: q.admin,
+            portable_checksum: Checksum::new(&q.portable_checksum).ok_or(Error::Invalid)?,
         };
         self.fs.serve(
             q.node,

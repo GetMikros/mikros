@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::poll_fn;
 use core::task::Poll;
-use mikros_acl::Subject;
+use mikros_acl::{Checksum, Subject};
 use mikros_rt::interfaces::__midl::{Error as MidlError, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::*;
 
@@ -271,7 +271,7 @@ impl Connection {
 
     /// Serves `q.node` as a connection to the same node with the same
     /// rights for the subject of `q`: `BAD_STATE` when this connection
-    /// has a subject already (MIKSPEC-0049.R30).
+    /// has a subject already (MIKSPEC-0049.R35).
     fn restrict(&self, q: NodeRestrictRequest) -> Result<NodeRestrictResponse, Error> {
         if self.subject.is_some() {
             return Err(Error::BadState);
@@ -282,6 +282,7 @@ impl Connection {
             pid: q.pid,
             koid: q.koid,
             admin: q.admin,
+            portable_checksum: Checksum::new(&q.portable_checksum).ok_or(Error::Invalid)?,
         };
         self.fs.serve(
             q.node,

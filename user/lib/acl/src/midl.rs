@@ -1,6 +1,6 @@
 //! Lists as `mikros.fs` has them (MIKSPEC-0049.R29), and asking the
 //! broker whether a subject may set the lists of others' nodes
-//! (MIKSPEC-0049.R26, MIKSPEC-0049.R30).
+//! (MIKSPEC-0049.R26, MIKSPEC-0049.R35).
 
 use crate::{Entry, Subject, Tag};
 use alloc::vec::Vec;
@@ -37,7 +37,7 @@ pub async fn may_manage(
         app_id,
         admin: subject.admin,
         koid: subject.koid,
-        portable_checksum: Default::default(),
+        portable_checksum: subject.portable_checksum.as_str().into(),
     };
     let requested = broker.request(client, MANAGE.into(), REASON.into()).await;
     matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)

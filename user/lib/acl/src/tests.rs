@@ -96,7 +96,18 @@ fn subject(user: u32, app: u32) -> Subject {
         pid: 1,
         koid: 2,
         admin: 0,
+        portable_checksum: Checksum::NONE,
     }
+}
+
+#[test]
+fn keeps_checksums_up_to_their_longest() {
+    let full = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    assert_eq!(full.len(), CHECKSUM_MAX);
+    assert_eq!(Checksum::new(full).unwrap().as_str(), full);
+    assert_eq!(Checksum::new("build").unwrap().as_str(), "build");
+    assert_eq!(Checksum::new("").unwrap(), Checksum::NONE);
+    assert!(Checksum::new(&alloc::format!("{full}0")).is_none());
 }
 
 #[test]

@@ -17,7 +17,7 @@ use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use mikros_bootfs::server::Fs;
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient, Rights};
 use mikros_rt::interfaces::mikros::process::{Launcher, NamespaceEntry, StartupHandle};
@@ -198,62 +198,57 @@ impl Shared {
         self.start_as(pid, new, control, true).await.map(drop)
     }
 
-    /// The entries of `namespace` bound with `Restrict` to the process of
-    /// `identity` and the number of its app ID (MIKSPEC-0050.R44), once
-    /// namespaces come from the root file system: before, they come from
-    /// the process manager alone, and the broker gives numbers only once
-    /// it has read the stored ones there. An entry whose server refuses
-    /// keeps its connection.
+    /// The entries of `namespace` bound with `Restrict` to the whole
+    /// identity of the process of `identity`, with the number of its app
+    /// ID (MIKSPEC-0050.R53), once namespaces come from the root file
+    /// system: before, they come from the process manager alone, and the
+    /// broker gives numbers only once it has read the stored ones there.
+    /// Fails with the status of the first entry that cannot be bound, so
+    /// that no entry is ever given unbound or bound to another process.
     async fn restricted(
         &self,
         namespace: Vec<NamespaceEntry>,
         identity: &ClientIdentity,
-    ) -> Vec<NamespaceEntry> {
+    ) -> Result<Vec<NamespaceEntry>, Status> {
         if !self.namespaces.on_root() {
-            return namespace;
+            return Ok(namespace);
         }
         let app = self.permissions.app_number(&identity.app_id).await;
         let mut restricted = Vec::with_capacity(namespace.len());
         for entry in namespace {
             let NamespaceEntry { path, directory } = entry;
             let directory = NodeAsyncClient::new(directory, self.reactor.clone());
-            let bound = match endpoints::<Node>() {
-                Ok((client, server)) => {
-                    let ClientIdentity {
-                        pid,
-                        user,
-                        admin,
-                        koid,
-                        ..
-                    } = *identity;
-                    let made = directory
-                        .restrict(user, app, pid, koid, admin, server)
-                        .await;
-                    match made {
-                        Ok(Ok(_)) => Some(client),
-                        _ => None,
-                    }
-                }
-                Err(_) => None,
-            };
-            let kept = match bound {
-                Some(client) => Some(client),
-                None => {
+            let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
+            let made = directory
+                .restrict(
+                    identity.user,
+                    app,
+                    identity.pid,
+                    identity.koid,
+                    identity.admin,
+                    identity.portable_checksum.clone(),
+                    server,
+                )
+                .await;
+            match made {
+                Ok(Ok(_)) => restricted.push(NamespaceEntry {
+                    path,
+                    directory: client,
+                }),
+                failed => {
                     mikros_rt::log!(
                         Warning,
-                        "process-manager: {path} of pid {} keeps no subject",
+                        "process-manager: binding {path} of pid {} failed: {failed:?}",
                         identity.pid
                     );
-                    let raw = directory.channel().ok();
-                    raw.and_then(|raw| duplicate(raw, SAME_RIGHTS).ok())
-                        .map(ClientEnd::new)
+                    return Err(match failed {
+                        Ok(Err(e)) => crate::namespace::status(e),
+                        _ => Status::Io,
+                    });
                 }
-            };
-            if let Some(directory) = kept {
-                restricted.push(NamespaceEntry { path, directory });
             }
         }
-        restricted
+        Ok(restricted)
     }
 
     /// Starts `new` as process `pid`, whose record it adds, or replaces
@@ -386,7 +381,10 @@ impl Shared {
                 .map(|p| p.checksum.clone())
                 .unwrap_or_default(),
         };
-        let namespace = self.restricted(namespace, &identity).await;
+        let namespace = self
+            .restricted(namespace, &identity)
+            .await
+            .inspect_err(|_| started.kill())?;
         let transferred = self
             .transfer(
                 &started,

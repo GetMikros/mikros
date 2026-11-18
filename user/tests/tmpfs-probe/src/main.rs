@@ -80,7 +80,7 @@ fn entry(tag: AclTag, id: u32, rights: Rights) -> AclEntry {
 /// A connection to the node of `node` for the subject `user` and `app`.
 fn restrict(node: &NodeClient, user: u32, app: u32) -> Result<NodeClient, Option<Error>> {
     let (client, server) = endpoints::<Node>().map_err(|_| None)?;
-    match node.restrict(user, app, 1, 1, 0, server, FOREVER) {
+    match node.restrict(user, app, 1, 1, 0, String::new(), server, FOREVER) {
         Ok(Ok(_)) => Ok(NodeClient::new(client)),
         Ok(Err(e)) => Err(Some(e)),
         Err(_) => Err(None),

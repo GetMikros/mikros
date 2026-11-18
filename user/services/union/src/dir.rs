@@ -222,7 +222,7 @@ impl Connection {
 
     /// Serves `q.node` as a connection to this directory with the same
     /// rights in a view of its own, whose layers' connections are bound
-    /// to the subject of `q` (MIKSPEC-0049.R30, MIKSPEC-0051.R15):
+    /// to the subject of `q` (MIKSPEC-0049.R35, MIKSPEC-0051.R15):
     /// `BAD_STATE` when this one's are already.
     async fn restrict(&self, q: NodeRestrictRequest) -> Result<NodeRestrictResponse, Error> {
         let view = &self.dir.view;
@@ -233,8 +233,16 @@ impl Connection {
         for root in &view.roots {
             let (client, server) = endpoints::<Node>().map_err(|_| Error::Io)?;
             flat(
-                root.restrict(q.user, q.app, q.pid, q.koid, q.admin, server)
-                    .await,
+                root.restrict(
+                    q.user,
+                    q.app,
+                    q.pid,
+                    q.koid,
+                    q.admin,
+                    q.portable_checksum.clone(),
+                    server,
+                )
+                .await,
             )?;
             roots.push(Rc::new(NodeAsyncClient::new(client, view.reactor.clone())));
         }

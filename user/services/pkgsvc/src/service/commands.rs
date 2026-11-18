@@ -31,13 +31,14 @@ const RX: Rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
 const ENTRIES_MAX: usize = 32;
 
 /// The process that a connection is bound to.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Subject {
     user: u32,
     app: u32,
     pid: u32,
     koid: u64,
     admin: u32,
+    portable_checksum: String,
 }
 
 /// The commands that the packages of `scope` have.
@@ -204,7 +205,7 @@ fn open(
             redirect: None,
         });
     };
-    let user = subject.map(|s| s.user);
+    let user = subject.as_ref().map(|s| s.user);
     let command = visible(shared, user)
         .map_err(error)?
         .remove(name)
@@ -237,8 +238,18 @@ fn open(
         pid,
         koid,
         admin,
+        portable_checksum,
     } = subject;
-    match node.restrict(user, app, pid, koid, admin, q.node, FOREVER) {
+    match node.restrict(
+        user,
+        app,
+        pid,
+        koid,
+        admin,
+        portable_checksum,
+        q.node,
+        FOREVER,
+    ) {
         Ok(Ok(_)) => Ok(NodeOpenResponse {
             r#type: opened.r#type,
             redirect: None,
@@ -260,7 +271,7 @@ fn read_directory(
     if !rights.contains(Rights::READ) {
         return Err(Error::AccessDenied);
     }
-    let seen = visible(shared, subject.map(|s| s.user)).map_err(error)?;
+    let seen = visible(shared, subject.as_ref().map(|s| s.user)).map_err(error)?;
     let root = shared.root().map_err(error)?;
     let entries: Vec<DirEntry> = seen
         .into_iter()
@@ -303,7 +314,7 @@ fn serve(shared: &Arc<Shared>, end: ServerEnd<Node>, rights: Rights, subject: Op
             ),
             R::Clone(q, r) => match rights.contains(q.rights) {
                 true => {
-                    spawn(shared.clone(), q.node, q.rights, subject);
+                    spawn(shared.clone(), q.node, q.rights, subject.clone());
                     r.reply(s, Ok(NodeCloneResponse {}))
                 }
                 false => r.reply(s, Err(Error::AccessDenied)),
@@ -323,14 +334,14 @@ fn serve(shared: &Arc<Shared>, end: ServerEnd<Node>, rights: Rights, subject: Op
                     },
                 }),
             ),
-            R::Open(q, r) => r.reply(s, open(shared, q, rights, subject)),
+            R::Open(q, r) => r.reply(s, open(shared, q, rights, subject.clone())),
             R::ReadDirectory(q, r) => r.reply(
                 s,
-                read_directory(shared, rights, subject, q.cookie, q.attributes),
+                read_directory(shared, rights, subject.clone(), q.cookie, q.attributes),
             ),
             R::Restrict(q, r) => r.reply(
                 s,
-                match subject {
+                match &subject {
                     Some(_) => Err(Error::BadState),
                     None => {
                         let subject = Subject {
@@ -339,6 +350,7 @@ fn serve(shared: &Arc<Shared>, end: ServerEnd<Node>, rights: Rights, subject: Op
                             pid: q.pid,
                             koid: q.koid,
                             admin: q.admin,
+                            portable_checksum: q.portable_checksum,
                         };
                         spawn(shared.clone(), q.node, rights, Some(subject));
                         Ok(NodeRestrictResponse {})
