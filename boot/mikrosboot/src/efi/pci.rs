@@ -1,4 +1,5 @@
-//! Finding the PCI function that provides the framebuffer.
+//! Finding the PCI function that provides the framebuffer, and the one
+//! that a disk's device path leads to.
 
 use mikrosboot::display::{PciLocation, only_location};
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol, SearchType};
@@ -39,7 +40,7 @@ fn get<P: ProtocolPointer + ?Sized>(handle: Handle) -> Option<ScopedProtocol<P>>
 
 /// The PCI function of the controller that the device path of `handle`
 /// leads to, if it leads to one.
-fn on_path(handle: Handle) -> Option<PciLocation> {
+pub(super) fn on_path(handle: Handle) -> Option<PciLocation> {
     let path = get::<DevicePath>(handle)?;
     let mut rest: &DevicePath = &path;
     let controller = boot::locate_device_path::<PciIo>(&mut rest).ok()?;

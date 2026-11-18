@@ -21,6 +21,7 @@ pub mod gpt;
 pub mod handoff;
 pub mod info;
 pub mod load;
+pub mod location;
 pub mod memmap;
 pub mod paging;
 pub mod placement;

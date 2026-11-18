@@ -219,6 +219,18 @@ pub fn with_root(cmdline: String, guid: &[u8; 16]) -> String {
     )
 }
 
+/// `cmdline` with `boot_disk=<location>` appended, unless it has an
+/// option that starts with `boot_disk=`.
+pub fn with_boot_disk(cmdline: String, location: &str) -> String {
+    if cmdline
+        .split_ascii_whitespace()
+        .any(|option| option.starts_with("boot_disk="))
+    {
+        return cmdline;
+    }
+    append(cmdline, &alloc::format!("boot_disk={location}"))
+}
+
 /// `cmdline` without its `system=` options, each removed with the
 /// whitespace before it, and with `system=<version>` appended.
 pub fn with_system(cmdline: &str, version: &str) -> String {
@@ -430,6 +442,21 @@ mod tests {
             with_root(String::from("myroot=x"), &guid),
             alloc::format!("myroot=x {root}")
         );
+    }
+
+    #[test]
+    fn appends_the_boot_disk() {
+        let at = "pci-0000:00:04.0/nvme-1";
+        assert_eq!(
+            with_boot_disk(String::new(), at),
+            alloc::format!("boot_disk={at}")
+        );
+        assert_eq!(
+            with_boot_disk(String::from("quiet"), at),
+            alloc::format!("quiet boot_disk={at}")
+        );
+        let given = String::from("boot_disk=pci-0000:00:03.0 quiet");
+        assert_eq!(with_boot_disk(given.clone(), at), given);
     }
 
     #[test]

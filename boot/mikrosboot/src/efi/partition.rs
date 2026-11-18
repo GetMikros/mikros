@@ -67,10 +67,34 @@ fn nodes(path: &DevicePath) -> Vec<(u8, u8, Vec<u8>)> {
         .collect()
 }
 
+/// The location of the disk `handle` with the device path `nodes` for
+/// `boot_disk=` (MIKSPEC-0004.R40), or None, with a warning, when its path
+/// leads to no PCI function or holds a node that no part of a location
+/// stands for.
+fn location(handle: Handle, nodes: &[(u8, u8, Vec<u8>)]) -> Option<String> {
+    let Some(pci) = super::pci::on_path(handle) else {
+        super::warn(format_args!(
+            "the boot disk is on no PCI function; boot_disk= is left out"
+        ));
+        return None;
+    };
+    match mikrosboot::location::location(pci, nodes) {
+        Ok(location) => Some(location),
+        Err(e) => {
+            super::warn(format_args!(
+                "the boot disk's device path has a node of type {} and subtype {:#x} \
+                 after its PCI nodes; boot_disk= is left out",
+                e.kind, e.sub
+            ));
+            None
+        }
+    }
+}
+
 /// The boot disk, whose device path is that of `device`, the bootloader's
 /// device, without its last node, which must be a hard drive media node;
-/// with its block size and last block.
-fn boot_disk(device: Handle) -> Result<(BootDisk, u32, u64), Failure> {
+/// with its block size, last block and location.
+fn boot_disk(device: Handle) -> Result<(BootDisk, u32, u64, Option<String>), Failure> {
     let step = "finding the boot disk";
     let path = protocol::<DevicePath>(device)
         .ok_or_else(|| Failure::new(step, "the boot device has no device path"))?;
@@ -93,7 +117,8 @@ fn boot_disk(device: Handle) -> Result<(BootDisk, u32, u64), Failure> {
             io,
             media: media.media_id(),
         };
-        return Ok((disk, media.block_size(), media.last_block()));
+        let at = location(handle, &wanted);
+        return Ok((disk, media.block_size(), media.last_block(), at));
     }
     Err(Failure::new(step, "no disk has the boot partition's path"))
 }
@@ -133,9 +158,10 @@ fn read(volume: &mut System, root: Node, path: &'static str) -> Result<Vec<u8>, 
 
 /// Finds the system partition on the boot disk of `device`, as `cmdline`
 /// names it, chooses the version to boot, and reads its kernel, the
-/// files its boot list names, and the drivers marked for boot.
+/// files its boot list names, and the drivers marked for boot. The
+/// command line gets the partition and the boot disk's location.
 pub fn find(device: Handle, cmdline: String) -> Result<Found, Failure> {
-    let (mut disk, block_size, last_lba) = boot_disk(device)?;
+    let (mut disk, block_size, last_lba, location) = boot_disk(device)?;
     let step = "finding the system partition";
     let partitions =
         gpt::partitions(&mut disk, block_size, last_lba).map_err(|e| Failure::new(step, e))?;
@@ -153,6 +179,10 @@ pub fn find(device: Handle, cmdline: String) -> Result<Found, Failure> {
         .range(block_size, last_lba)
         .ok_or_else(|| Failure::new(step, "the partition lies outside the disk"))?;
     let cmdline = cmdline::with_root(cmdline, &partition.guid);
+    let cmdline = match &location {
+        Some(at) => cmdline::with_boot_disk(cmdline, at),
+        None => cmdline,
+    };
     let mut volume = Volume::open(Slice { disk, start, size })
         .map_err(|e| Failure::new("reading the system partition", e))?;
     let mut fell_back = false;

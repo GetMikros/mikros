@@ -36,6 +36,13 @@ impl Console for Uefi {
     }
 }
 
+/// Writes `warning: <line>` to the console and goes on.
+pub fn warn(line: Arguments) {
+    system::with_stdout(|out| {
+        let _ = writeln!(out, "warning: {line}\r");
+    });
+}
+
 /// Shows `failure`, waits for a key press or `report::FAILURE_WAIT`, and
 /// gives the status to return to the boot manager or firmware.
 fn fail(failure: &Failure) -> Status {
