@@ -48,6 +48,10 @@ pub struct Tty {
     /// process group.
     pub session: Cell<Option<u32>>,
     pub foreground: Cell<Option<u32>>,
+    /// The kernel object ID of the session's leader, which took it as its
+    /// controlling terminal, so that the hang-up reaches only that
+    /// process (MIKSPEC-0034.R48).
+    pub leader: Cell<Option<u64>>,
     /// The readiness events of the connections that asked for one.
     readiness: RefCell<Vec<Weak<OwnedHandle>>>,
     /// Woken when input, output or the foreground group changed.
@@ -70,6 +74,7 @@ impl Tty {
             hung_up: Cell::new(false),
             session: Cell::new(None),
             foreground: Cell::new(None),
+            leader: Cell::new(None),
             readiness: RefCell::new(Vec::new()),
             changed: Notify::default(),
             output_queued: Notify::default(),

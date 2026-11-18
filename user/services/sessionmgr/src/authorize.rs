@@ -275,7 +275,10 @@ impl Requests {
                 Either::Left(outcome) => break Some(outcome),
                 Either::Right(_) if now() >= deadline => break None,
                 Either::Right(_) => {
-                    if !matches!(self.launcher.get_info(client.pid).await, Ok(Ok(_))) {
+                    // Its ID may have gone to another process since
+                    // (MIKSPEC-0034.R48).
+                    let info = self.launcher.get_info(client.pid).await;
+                    if !matches!(info, Ok(Ok(r)) if r.info.koid == client.koid) {
                         self.close(request);
                         let _ = server.server().send_on_authorize_ended(request);
                         return Err(());

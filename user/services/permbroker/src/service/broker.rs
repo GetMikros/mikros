@@ -347,8 +347,10 @@ impl Inner {
                 "permbroker: process {pid} ({app_id}) did not confirm revocation {} within 5 s",
                 p.sequence
             );
+            // Only the process that was too late, not one that got its
+            // ID since (MIKSPEC-0034.R48).
             if !CRITICAL.contains(&app_id.as_str()) {
-                let _ = self.launcher.kill(pid, KILL).await;
+                let _ = self.launcher.kill_checked(pid, p.caller.koid, KILL).await;
             }
         }
     }

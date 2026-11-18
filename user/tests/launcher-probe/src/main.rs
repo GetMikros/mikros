@@ -591,6 +591,36 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             "seeing KILL end it",
             wait(l, -1).await == Some((sleeper, -3, KILL)),
         )?;
+        // KillChecked signals only the process with the kernel object ID
+        // it names (MIKSPEC-0034.R48).
+        let checked = spawn(l, &["sleep"], |_| {}).await.map(|(pid, _)| pid);
+        check("spawning another sleeping child", checked.is_ok())?;
+        let checked = checked.unwrap_or(0);
+        let koid = get_info(l, checked).await.map(|info| info.koid);
+        check("describing it", koid.is_ok())?;
+        let koid = koid.unwrap_or(0);
+        let with = async |koid: u64| match l.kill_checked(checked, koid, KILL).await {
+            Ok(result) => result.map(drop),
+            Err(_) => Err(Status::PeerClosed),
+        };
+        check(
+            "refusing another kernel object ID",
+            with(koid + 1).await == Err(Status::NotFound),
+        )?;
+        check(
+            "leaving it running",
+            get_info(l, checked)
+                .await
+                .is_ok_and(|info| info.koid == koid),
+        )?;
+        check(
+            "killing it by its kernel object ID",
+            with(koid).await.is_ok(),
+        )?;
+        check(
+            "seeing that KILL end it",
+            wait(l, -1).await == Some((checked, -3, KILL)),
+        )?;
         check(
             "refusing to signal init",
             kill(l, 1, 0).await == Err(Status::AccessDenied),

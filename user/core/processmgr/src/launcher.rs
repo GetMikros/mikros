@@ -20,10 +20,11 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::Rights;
 use mikros_rt::interfaces::mikros::process::{
     ExitStatus, Launcher, LauncherAsyncServer, LauncherCreateSessionResponse, LauncherExecResponse,
-    LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillLoginSessionResponse,
-    LauncherKillResponse, LauncherListResponse, LauncherOpenElevationsResponse, LauncherRequest,
-    LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo,
-    SpawnRequest, StatusKind, WaitOptions,
+    LauncherGetInfoResponse, LauncherKillCheckedResponse, LauncherKillGroupResponse,
+    LauncherKillLoginSessionResponse, LauncherKillResponse, LauncherListResponse,
+    LauncherOpenElevationsResponse, LauncherRequest, LauncherSetProcessGroupResponse,
+    LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo, SpawnRequest, StatusKind,
+    WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::sys;
@@ -87,8 +88,20 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
             R::Kill(request, r) => {
                 let (shared, server) = (shared.clone(), server.clone());
                 shared.clone().spawner.spawn(async move {
-                    let result = kill(&shared, pid, request.pid, request.signo).await;
-                    let _ = r.reply(server.server(), result);
+                    let result = kill(&shared, pid, request.pid, None, request.signo).await;
+                    let _ = r.reply(server.server(), result.map(|()| LauncherKillResponse {}));
+                });
+                Ok(())
+            }
+            R::KillChecked(request, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    let (target, koid) = (request.pid, Some(request.koid));
+                    let result = kill(&shared, pid, target, koid, request.signo).await;
+                    let _ = r.reply(
+                        server.server(),
+                        result.map(|()| LauncherKillCheckedResponse {}),
+                    );
                 });
                 Ok(())
             }
@@ -675,19 +688,31 @@ fn signal(record: &Record, signo: u32) -> Result<(), Status> {
 
 /// Sends `signo` to process `target` for process `caller`, which may
 /// signal it as `may_signal` says, or else when the broker says that it
-/// holds `system.processes.control`.
+/// holds `system.processes.control`. With `koid`, it fails with
+/// `NOT_FOUND`, signalling nothing, unless the process with the ID
+/// `target` has that kernel object ID (MIKSPEC-0034.R48), looked at
+/// again right before the signal.
 async fn kill(
     shared: &Shared,
     caller: u32,
     target: u32,
+    koid: Option<u64>,
     signo: u32,
-) -> Result<LauncherKillResponse, Status> {
+) -> Result<(), Status> {
+    let found = |records: &Records| {
+        records
+            .get(target)
+            .filter(|r| koid.is_none_or(|koid| r.koid == koid))
+            .ok_or(Status::NotFound)
+            .map(|_| ())
+    };
     let client = {
         let records = shared.records.borrow();
         let from = records.get(caller).ok_or(Status::BadState)?;
+        found(&records)?;
         let to = records.get(target).ok_or(Status::NotFound)?;
         if may_signal(&records, caller, target) {
-            return signal(to, signo).map(|()| LauncherKillResponse {});
+            return signal(to, signo);
         }
         ClientIdentity {
             pid: caller,
@@ -706,10 +731,12 @@ async fn kill(
     {
         return Err(Status::AccessDenied);
     }
-    // The target may have ended while the broker answered.
+    // The target may have ended while the broker answered, and another
+    // process got its ID.
     let records = shared.records.borrow();
+    found(&records)?;
     let to = records.get(target).ok_or(Status::NotFound)?;
-    signal(to, signo).map(|()| LauncherKillResponse {})
+    signal(to, signo)
 }
 
 /// Sends `signo` for process `caller` to every running process of

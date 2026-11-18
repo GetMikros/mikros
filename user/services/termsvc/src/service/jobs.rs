@@ -88,6 +88,7 @@ pub async fn make_controlling(
         return Err(Status::AccessDenied);
     }
     tty.session.set(Some(session));
+    tty.leader.set(Some(client.koid));
     tty.foreground.set(Some(group));
     tty.update();
     Ok(())
@@ -148,11 +149,12 @@ pub async fn events(service: Rc<Service>, tty: Rc<Tty>) {
                 Event::Signal(Signal::Suspend) => Some(SIGTSTP),
                 Event::WindowChanged => Some(SIGWINCH),
                 Event::HungUp => {
-                    if let Some(leader) = tty.session.get() {
-                        let _ = service.launcher.kill(leader, SIGHUP).await;
+                    if let (Some(leader), Some(koid)) = (tty.session.get(), tty.leader.get()) {
+                        let _ = service.launcher.kill_checked(leader, koid, SIGHUP).await;
                     }
                     // The session may take another controlling terminal.
                     tty.session.set(None);
+                    tty.leader.set(None);
                     tty.foreground.set(None);
                     None
                 }
