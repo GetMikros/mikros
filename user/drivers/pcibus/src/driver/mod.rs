@@ -34,8 +34,6 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
 
-const INFO_RESOURCE: u32 = 5;
-const INFO_RESOURCE_SIZE: usize = 0x18;
 /// The configuration space of one bus, in an ECAM range.
 const BUS_SIZE: u64 = 1 << 20;
 
@@ -223,17 +221,7 @@ async fn start(
 
 /// The kind of `resource`, if it is one.
 fn kind(resource: &OwnedHandle) -> Option<u32> {
-    let mut info = [0u8; INFO_RESOURCE_SIZE];
-    let mut len = 0;
-    // SAFETY: the pointers describe `info` and `len`.
-    let status = unsafe {
-        sys::object_get_info(
-            resource.raw(),
-            INFO_RESOURCE,
-            info.as_mut_ptr(),
-            info.len() as u64,
-            &mut len,
-        )
-    };
-    (status == mikros_rt::OK).then(|| u32::from_le_bytes([info[0], info[1], info[2], info[3]]))
+    mikros_rt::hardware::resource(resource.raw())
+        .ok()
+        .map(|r| r.kind)
 }

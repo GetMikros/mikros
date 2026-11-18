@@ -7,6 +7,7 @@ use crate::pci::{Address, CAP_MSI, CAP_MSIX, COMMAND, Config, STATUS, capabiliti
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
+use mikros_rt::hardware::{self, Mapping};
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::acpi::{Acpi, AcpiAsyncClient};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -100,8 +101,7 @@ pub async fn get_interrupt(bus: &Rc<Bus>, function: &Rc<Function>) -> Result<Own
 pub fn ack_interrupt(bus: &Bus, function: &Function) -> Result<(), Status> {
     let intx = function.intx.borrow();
     let intx = intx.as_ref().ok_or(Status::BadState)?;
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::object_signal(intx.event.raw(), SIGNALED, 0) };
+    let _ = mikros_rt::objects::signal(intx.event.raw(), SIGNALED, 0);
     let mut config = &bus.ecam;
     let command = config.read(function.at, COMMAND, 2);
     config.write(function.at, COMMAND, 2, command & !INTERRUPT_DISABLE);
@@ -178,17 +178,11 @@ async fn line(bus: &Rc<Bus>, route: &Route) -> Result<Rc<Line>, Status> {
     }
     let options =
         if route.level { LEVEL } else { 0 } | if route.active_low { ACTIVE_LOW } else { 0 };
-    let mut interrupt = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status =
-        unsafe { sys::interrupt_create(resource.raw(), route.gsi, options, &mut interrupt) };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
+    let interrupt = hardware::interrupt(resource.raw(), route.gsi, options)
+        .map_err(|s| Status::from_raw(s as i32))?;
     let line = Rc::new(Line {
         _resource: resource,
-        // SAFETY: the kernel just created the handle for us.
-        interrupt: unsafe { OwnedHandle::from_raw(interrupt) },
+        interrupt,
         functions: core::cell::RefCell::new(Vec::new()),
     });
     bus.lines.borrow_mut().insert(route.gsi, line.clone());
@@ -222,12 +216,10 @@ async fn watch(bus: Rc<Bus>, line: Rc<Line>) {
             let command = config.read(at, COMMAND, 2);
             config.write(at, COMMAND, 2, command | INTERRUPT_DISABLE);
             if let Some(intx) = function.intx.borrow().as_ref() {
-                // SAFETY: the call takes no pointers.
-                unsafe { sys::object_signal(intx.event.raw(), 0, SIGNALED) };
+                let _ = mikros_rt::objects::signal(intx.event.raw(), 0, SIGNALED);
             }
         }
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::interrupt_ack(line.interrupt.raw()) };
+        let _ = hardware::interrupt_ack(line.interrupt.raw());
     }
 }
 
@@ -237,7 +229,7 @@ pub struct Msi {
     at: Address,
     capability: (u8, u16),
     _interrupts: Vec<OwnedHandle>,
-    table: Option<(u64, u64)>,
+    table: Option<Mapping>,
 }
 
 /// Enables up to `count` message-signaled interrupts for `function`:
@@ -268,27 +260,9 @@ pub async fn enable_msi(
     };
     let resource = msi_resource(bus).await?;
     let bti = function.bti.as_ref().map_err(|s| *s)?;
-    let mut handles = vec![0; n as usize];
     let mut messages = vec![0u8; 16 * n as usize];
-    // SAFETY: the pointers describe `n` handles and `n` messages.
-    let status = unsafe {
-        sys::interrupt_create_msi(
-            resource.raw(),
-            bti.raw(),
-            n,
-            0,
-            handles.as_mut_ptr(),
-            messages.as_mut_ptr(),
-        )
-    };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    // SAFETY: the kernel just created the handles for us.
-    let interrupts: Vec<OwnedHandle> = handles
-        .into_iter()
-        .map(|h| unsafe { OwnedHandle::from_raw(h) })
-        .collect();
+    let interrupts = hardware::msi_interrupts(resource.raw(), bti.raw(), n, 0, &mut messages)
+        .map_err(|s| Status::from_raw(s as i32))?;
     let message = |i: usize| {
         let m = &messages[16 * i..16 * i + 16];
         let address = u64::from_le_bytes(m[..8].try_into().expect("8 bytes"));
@@ -297,19 +271,16 @@ pub async fn enable_msi(
     };
     let mut table = None;
     if msix.is_some() {
-        let mapped = map_table(function, process, config.read(at, cap + 4, 4), n)?;
+        let (mapped, first) = map_table(function, process, config.read(at, cap + 4, 4), n)?;
         for i in 0..n as usize {
             let (address, data) = message(i);
-            let entry = mapped.0 + 16 * i as u64;
-            // SAFETY: the entry lies in the mapped table.
-            unsafe {
-                core::ptr::write_volatile(entry as *mut u32, address as u32);
-                core::ptr::write_volatile((entry + 4) as *mut u32, (address >> 32) as u32);
-                core::ptr::write_volatile((entry + 8) as *mut u32, data);
-                core::ptr::write_volatile((entry + 12) as *mut u32, 0);
-            }
+            let entry = first + 16 * i as u64;
+            mapped.write32(entry, address as u32);
+            mapped.write32(entry + 4, (address >> 32) as u32);
+            mapped.write32(entry + 8, data);
+            mapped.write32(entry + 12, 0);
         }
-        table = Some((mapped.1, mapped.2));
+        table = Some(mapped);
         config.write(at, cap + 2, 2, (control | MSIX_ENABLE) & !MSIX_MASK);
     } else {
         let (address, data) = message(0);
@@ -342,7 +313,7 @@ pub async fn enable_msi(
 /// Disables the capability of `msi`, lets the function raise INTx again,
 /// unmaps the MSI-X table and closes the bus driver's handles to the
 /// interrupts.
-pub fn disable(bus: &Bus, process: sys::Handle, msi: Msi) {
+pub fn disable(bus: &Bus, msi: Msi) {
     let mut config = &bus.ecam;
     let (id, cap) = msi.capability;
     let control = config.read(msi.at, cap + 2, 2);
@@ -354,21 +325,18 @@ pub fn disable(bus: &Bus, process: sys::Handle, msi: Msi) {
     config.write(msi.at, cap + 2, 2, control & !enable);
     let command = config.read(msi.at, COMMAND, 2);
     config.write(msi.at, COMMAND, 2, command & !INTERRUPT_DISABLE);
-    if let Some((mapped, size)) = msi.table {
-        // SAFETY: nothing refers to the mapping any more.
-        unsafe { sys::vm_unmap(process, mapped, size) };
-    }
+    drop(msi.table);
 }
 
 /// Maps the first `n` entries of the MSI-X table that `table` places
-/// in a BAR of `function`. Returns the address of the first entry, and
-/// the mapping's start and size.
+/// in a BAR of `function`. Returns the mapping, and where the first
+/// entry lies in it.
 fn map_table(
     function: &Function,
     process: sys::Handle,
     table: u32,
     n: u32,
-) -> Result<(u64, u64, u64), Status> {
+) -> Result<(Mapping, u64), Status> {
     let index = (table & MSIX_BIR) as u8;
     let offset = u64::from(table & !MSIX_BIR);
     let (bar, resource) = function
@@ -379,40 +347,12 @@ fn map_table(
     let resource = resource.as_ref().map_err(|s| *s)?;
     let start = (bar.base + offset) & !(PAGE_SIZE - 1);
     let end = (bar.base + offset + 16 * u64::from(n)).next_multiple_of(PAGE_SIZE);
-    let mut mem = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe {
-        sys::mem_create_physical(
-            resource.raw(),
-            start,
-            end - start,
-            UNCACHED_DEVICE,
-            &mut mem,
-        )
-    };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    // SAFETY: the kernel just created the handle for us.
-    let mem = unsafe { OwnedHandle::from_raw(mem) };
-    let mut mapped = 0;
-    // SAFETY: the out pointer is valid; the kernel picks a free range.
-    let status = unsafe {
-        sys::vm_map(
-            process,
-            PERM_READ | PERM_WRITE,
-            0,
-            mem.raw(),
-            0,
-            end - start,
-            &mut mapped,
-        )
-    };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    let first = mapped + (bar.base + offset - start);
-    Ok((first, mapped, end - start))
+    let kernel = |s: sys::Status| Status::from_raw(s as i32);
+    let mem = hardware::physical_memory(resource.raw(), start, end - start, UNCACHED_DEVICE)
+        .map_err(kernel)?;
+    let mapped =
+        Mapping::new(process, PERM_READ | PERM_WRITE, mem.raw(), 0, end - start).map_err(kernel)?;
+    Ok((mapped, bar.base + offset - start))
 }
 
 /// The `MSI` resource that the bus driver asks for once.
@@ -432,23 +372,9 @@ async fn msi_resource(bus: &Bus) -> Result<OwnedHandle, Status> {
 }
 
 fn event_create() -> Result<OwnedHandle, Status> {
-    let mut event = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe { sys::event_create(0, &mut event) };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    // SAFETY: the kernel just created the handle for us.
-    Ok(unsafe { OwnedHandle::from_raw(event) })
+    mikros_rt::objects::event(0).map_err(|s| Status::from_raw(s as i32))
 }
 
 fn duplicate(handle: &OwnedHandle, rights: u32) -> Result<OwnedHandle, Status> {
-    let mut out = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe { sys::handle_duplicate(handle.raw(), rights, &mut out) };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    // SAFETY: the kernel just created the handle for us.
-    Ok(unsafe { OwnedHandle::from_raw(out) })
+    mikros_rt::objects::duplicate(handle.raw(), rights).map_err(|s| Status::from_raw(s as i32))
 }

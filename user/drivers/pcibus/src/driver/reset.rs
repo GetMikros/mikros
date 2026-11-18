@@ -6,7 +6,7 @@ use crate::pci::{
     VENDOR_ID, reset_method,
 };
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::sys;
+use mikros_rt::objects::now;
 
 /// The `Interrupt Line` register.
 const INTERRUPT_LINE: u16 = 0x3C;
@@ -57,8 +57,7 @@ pub async fn reset(bus: &Bus, function: &Function) -> Result<(), Status> {
         config.write(at, COMMAND, 2, command & !u32::from(COMMAND_BUS_MASTER));
     }
     if let Ok(bti) = &function.bti {
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::bti_release_quarantine(bti.raw()) };
+        let _ = mikros_rt::hardware::release_quarantine(bti.raw());
     }
     result
 }
@@ -106,11 +105,4 @@ async fn ready(bus: &Bus, function: &Function) -> Result<(), Status> {
 
 async fn sleep(bus: &Bus, ns: i64) {
     let _ = bus.reactor.sleep_until(now() + ns).await;
-}
-
-fn now() -> i64 {
-    let mut now = 0;
-    // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::clock_get_monotonic(&mut now) };
-    now
 }

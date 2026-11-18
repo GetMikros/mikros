@@ -13,12 +13,15 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 extern crate alloc;
 
+#[allow(unsafe_code)]
 mod acpica;
 mod devices;
 mod host;
+#[allow(unsafe_code)]
 mod service;
 
 use alloc::boxed::Box;

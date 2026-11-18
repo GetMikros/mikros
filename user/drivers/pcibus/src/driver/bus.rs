@@ -23,7 +23,6 @@ use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{DeviceManagerAsyncClient, Property};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
-use mikros_rt::sys;
 
 pub const KIND_MMIO: u32 = 1;
 pub const KIND_IOPORT: u32 = 2;
@@ -255,12 +254,6 @@ async fn request(bus: &Bus, kind: u32, base: u64, size: u64) -> Result<OwnedHand
 /// A bus transaction initiator for `requester_id`, made from the `BTI`
 /// resource `resource`.
 fn bti_create(resource: &OwnedHandle, requester_id: u64) -> Result<OwnedHandle, Status> {
-    let mut bti = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe { sys::bti_create(resource.raw(), requester_id, 0, &mut bti) };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    // SAFETY: the kernel just created the handle for us.
-    Ok(unsafe { OwnedHandle::from_raw(bti) })
+    mikros_rt::hardware::bti(resource.raw(), requester_id, 0)
+        .map_err(|s| Status::from_raw(s as i32))
 }

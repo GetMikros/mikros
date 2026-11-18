@@ -7,11 +7,14 @@
 
 #![cfg_attr(target_os = "mikros", no_std, no_main)]
 #![cfg_attr(not(target_os = "mikros"), allow(dead_code))]
+#![deny(unsafe_code)]
 
 extern crate alloc;
 
 #[cfg(target_os = "mikros")]
+#[allow(unsafe_code)]
 mod driver;
+#[allow(unsafe_code)]
 mod linux;
 
 #[cfg(not(target_os = "mikros"))]

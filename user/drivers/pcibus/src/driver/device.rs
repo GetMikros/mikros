@@ -111,7 +111,7 @@ pub async fn serve(
             R::DisableMsi(_, r) => {
                 let disabled = match msi.take() {
                     Some(state) => {
-                        interrupts::disable(&bus, process, state);
+                        interrupts::disable(&bus, state);
                         Ok(DeviceDisableMsiResponse {})
                     }
                     None => Err(Status::BadState),
@@ -129,13 +129,12 @@ pub async fn serve(
         };
     }
     if let Some(state) = msi.take() {
-        interrupts::disable(&bus, process, state);
+        interrupts::disable(&bus, state);
     }
     let off = u32::from(COMMAND_IO | COMMAND_MEMORY | COMMAND_BUS_MASTER);
     command(&|c| c & !off);
     if let Ok(bti) = &function.bti {
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::bti_release_quarantine(bti.raw()) };
+        let _ = mikros_rt::hardware::release_quarantine(bti.raw());
     }
 }
 
@@ -207,12 +206,5 @@ fn bar(function: &Function, index: u8) -> Result<pci::Bar, Status> {
 }
 
 fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, Status> {
-    let mut out = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe { sys::handle_duplicate(handle.raw(), SAME_RIGHTS, &mut out) };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    // SAFETY: the kernel just created the handle for us.
-    Ok(unsafe { OwnedHandle::from_raw(out) })
+    mikros_rt::objects::duplicate(handle.raw(), SAME_RIGHTS).map_err(|s| Status::from_raw(s as i32))
 }
