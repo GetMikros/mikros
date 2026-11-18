@@ -12,6 +12,7 @@ mod pager;
 pub mod size;
 pub mod spec;
 mod start;
+pub mod table;
 pub mod time;
 mod usage;
 

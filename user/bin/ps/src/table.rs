@@ -2,6 +2,7 @@
 //! process in aligned columns, or a JSON array with an object per process
 //! (MIKSPEC-0098.R9).
 
+use mikros_cli::table::{Cell, columns};
 use mikros_cli::{Opt, Paint, Role, Spec, json_string};
 
 pub static COMMAND: Spec = Spec {
@@ -47,49 +48,6 @@ pub fn text(processes: &[Process], paint: Paint) -> String {
         })
         .collect();
     columns(&header, &rows, &[true, true, false, false, false], paint)
-}
-
-/// A cell of a table: its text, and the role it is coloured in.
-type Cell = (String, Option<Role>);
-
-/// The header and `rows` in columns two spaces apart, the header in the
-/// secondary colour, each column as wide as its widest text without
-/// colours, aligned to the right where `right` says, the last one not
-/// padded.
-fn columns(header: &[&str], rows: &[Vec<Cell>], right: &[bool], paint: Paint) -> String {
-    let header: Vec<Cell> = header
-        .iter()
-        .map(|h| (h.to_string(), Some(Role::Secondary)))
-        .collect();
-    let all: Vec<&Vec<Cell>> = std::iter::once(&header).chain(rows).collect();
-    let widths: Vec<usize> = (0..header.len())
-        .map(|c| {
-            all.iter()
-                .map(|r| r[c].0.chars().count())
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-    let mut text = String::new();
-    for row in all {
-        for (c, (cell, role)) in row.iter().enumerate() {
-            let pad = " ".repeat(widths[c] - cell.chars().count());
-            let shown = match role {
-                Some(role) => paint.paint(*role, cell),
-                None => cell.clone(),
-            };
-            if c > 0 {
-                text.push_str("  ");
-            }
-            match (right[c], c + 1 == row.len()) {
-                (true, _) => text.push_str(&(pad + &shown)),
-                (false, true) => text.push_str(&shown),
-                (false, false) => text.push_str(&(shown + &pad)),
-            }
-        }
-        text.push('\n');
-    }
-    text
 }
 
 /// `processes` as a JSON array of objects, on one line.

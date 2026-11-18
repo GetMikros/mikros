@@ -2,6 +2,7 @@
 //! line per service in aligned columns, a JSON array, or why a call on a
 //! service failed.
 
+use mikros_cli::table::{Cell, columns};
 use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
 
 /// The operand of a call on a service.
@@ -139,49 +140,6 @@ pub fn text(services: &[Service], paint: Paint) -> String {
         })
         .collect();
     columns(&header, &rows, &[false, false, true, true, false], paint)
-}
-
-/// A cell of a table: its text, and the role it is coloured in.
-type Cell = (String, Option<Role>);
-
-/// The header and `rows` in columns two spaces apart, the header in the
-/// secondary colour, each column as wide as its widest text without
-/// colours, aligned to the right where `right` says, the last one not
-/// padded.
-fn columns(header: &[&str], rows: &[Vec<Cell>], right: &[bool], paint: Paint) -> String {
-    let header: Vec<Cell> = header
-        .iter()
-        .map(|h| (h.to_string(), Some(Role::Secondary)))
-        .collect();
-    let all: Vec<&Vec<Cell>> = std::iter::once(&header).chain(rows).collect();
-    let widths: Vec<usize> = (0..header.len())
-        .map(|c| {
-            all.iter()
-                .map(|r| r[c].0.chars().count())
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-    let mut text = String::new();
-    for row in all {
-        for (c, (cell, role)) in row.iter().enumerate() {
-            let pad = " ".repeat(widths[c] - cell.chars().count());
-            let shown = match role {
-                Some(role) => paint.paint(*role, cell),
-                None => cell.clone(),
-            };
-            if c > 0 {
-                text.push_str("  ");
-            }
-            match (right[c], c + 1 == row.len()) {
-                (true, _) => text.push_str(&(pad + &shown)),
-                (false, true) => text.push_str(&shown),
-                (false, false) => text.push_str(&(shown + &pad)),
-            }
-        }
-        text.push('\n');
-    }
-    text
 }
 
 /// `services` as a JSON array of objects with the members `name`,
