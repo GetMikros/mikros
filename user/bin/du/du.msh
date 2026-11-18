@@ -1,0 +1,16 @@
+# What `du` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern du(
+    ...path: path "the files and folders to measure, or the current folder",
+    --all(-a): bool "show files too, not only folders",
+    --summarize(-s): bool "show only a total for each path",
+    --total(-c): bool "show a grand total at the end",
+    --human-readable(-h): bool "show sizes with K, M and G",
+    --max-depth(-d): int "show folders at most <depth> below each path",
+    --apparent-size: bool "count the sizes of the files, not the space they use",
+    -k: bool "show sizes in units of 1024 bytes, as without options",
+    -m: bool "show sizes in units of 1024 * 1024 bytes",
+    --json: bool "write the paths as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
