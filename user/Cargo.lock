@@ -348,6 +348,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "env"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "exfat"
 version = "0.0.0"
 dependencies = [
@@ -1292,6 +1300,14 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "sleep"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
 
 [[package]]
 name = "spawn-std"

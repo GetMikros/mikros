@@ -1,0 +1,7 @@
+# What `sleep` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern sleep(
+    ...duration: string "how long to wait: a number with s, m, h or d, seconds without",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
