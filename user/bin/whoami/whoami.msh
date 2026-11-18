@@ -1,0 +1,7 @@
+# What `whoami` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern whoami(
+    --json: bool "write an object with the user's name and ID",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

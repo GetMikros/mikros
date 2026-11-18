@@ -1,0 +1,15 @@
+# What `uname` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern uname(
+    --all(-a): bool "every field, in the order of the options below",
+    --kernel-name(-s): bool "the system's name, Mikros",
+    --nodename(-n): bool "the host name",
+    --kernel-release(-r): bool "the booted system version",
+    --kernel-version(-v): bool "the booted system version",
+    --machine(-m): bool "the machine, x86_64",
+    --processor(-p): bool "the processor, x86_64",
+    --operating-system(-o): bool "the operating system, Mikros",
+    --json: bool "write an object with system, node, release, machine and os",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
