@@ -276,7 +276,7 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
         };
         let mut outcome = None;
         for key in keys {
-            match editor.key(key, &*shell) {
+            match editor.key(key, shell) {
                 Outcome::Continue => {}
                 Outcome::Clear => {
                     show("\x1b[H\x1b[2J");

@@ -10,9 +10,11 @@
 //! type gives, and files where nothing is declared. A file or command
 //! name that would not stay one word is put on the line quoted, and a
 //! word that starts with a quote is completed inside it, which is closed
-//! once the name is complete.
+//! once the name is complete. Only Tab runs what declarations name to
+//! give candidates: the pipelines of `from` types and programs declared
+//! with `complete`; suggestions and colours take what msh knows itself.
 
-use crate::ast::{Extern, Param, ParamType, Thing};
+use crate::ast::{Extern, Param, ParamType, Source, Thing};
 use std::rc::Rc;
 
 /// A way to complete the word.
@@ -33,6 +35,19 @@ pub struct Candidate {
 pub struct Completion {
     pub start: usize,
     pub candidates: Vec<Candidate>,
+}
+
+/// What completion runs on Tab for candidates.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    /// The pipeline of a `from` type, whose value's items or output's
+    /// lines are the candidates.
+    From(Rc<Source>),
+    /// The program `name`, declared with `complete`, in completion mode
+    /// with `words`, those after its name, the last the one completed;
+    /// each line it writes is a candidate, perhaps with a tab and a
+    /// description after it.
+    Program { name: String, words: Vec<String> },
 }
 
 /// What completion asks of the shell.
@@ -66,6 +81,11 @@ pub trait Sources {
     }
     /// The names of the system's things of kind `thing`.
     fn things(&self, _thing: Thing) -> Vec<String> {
+        Vec::new()
+    }
+    /// The lines that `request` gives once run, none when it fails or
+    /// takes too long. Only Tab asks for them.
+    fn run(&mut self, _request: &Request) -> Vec<String> {
         Vec::new()
     }
 }
@@ -112,6 +132,11 @@ impl Walk {
     /// The declaration that the arguments read so far reach.
     pub fn declared(&self) -> Option<&Rc<Extern>> {
         self.declared.as_ref()
+    }
+
+    /// The command's name.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Takes the argument `word`.
@@ -347,8 +372,70 @@ fn quote_names(mut found: Vec<Candidate>, open: Option<char>) -> Vec<Candidate> 
     found
 }
 
-/// The candidates for `line` with the cursor at byte `cursor`.
+/// The candidates for `line` with the cursor at byte `cursor`, from what
+/// msh knows itself, without running anything.
 pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion {
+    let (mut completion, _) = gather(line, cursor, sources);
+    tidy(&mut completion.candidates);
+    completion
+}
+
+/// The candidates for Tab on `line` with the cursor at byte `cursor`:
+/// those of `complete`, and those that the pipelines of `from` types and
+/// the programs declared with `complete` give, which start as the word
+/// does.
+pub fn complete_on_tab(line: &str, cursor: usize, sources: &mut dyn Sources) -> Completion {
+    let (mut completion, pending) = gather(line, cursor, &*sources);
+    if let Some(pending) = pending {
+        for request in &pending.requests {
+            let lines = sources.run(request);
+            let program = matches!(request, Request::Program { .. });
+            let found = ran(&lines, program, &pending.word, pending.open);
+            completion.candidates.extend(found);
+        }
+    }
+    tidy(&mut completion.candidates);
+    completion
+}
+
+/// Sorts `candidates` by their text and keeps the first of each.
+fn tidy(candidates: &mut Vec<Candidate>) {
+    candidates.sort_by(|a, b| a.text.cmp(&b.text));
+    candidates.dedup_by(|a, b| a.text == b.text);
+}
+
+/// What completion would run for the word `word`, `open` being the
+/// quote that it starts with.
+struct Pending {
+    requests: Vec<Request>,
+    word: String,
+    open: Option<char>,
+}
+
+/// The candidates that `lines`, which a request gave, hold for `word`:
+/// those that start as it does, with the description after a tab when a
+/// `program` wrote them. A value that ends in `/` is a folder, which the
+/// rest of a path may follow.
+fn ran(lines: &[String], program: bool, word: &str, open: Option<char>) -> Vec<Candidate> {
+    lines
+        .iter()
+        .map(|line| match line.split_once('\t') {
+            Some((value, description)) if program => (value, Some(description)),
+            _ => (line.as_str(), None),
+        })
+        .filter(|(value, _)| !value.is_empty() && value.starts_with(word))
+        .map(|(value, description)| {
+            let done = !value.ends_with('/');
+            let text = quoted(value, open, done);
+            let description = description.filter(|d| !d.is_empty());
+            candidate(text, value.to_owned(), description, done)
+        })
+        .collect()
+}
+
+/// The candidates for `line` with the cursor at byte `cursor` that msh
+/// knows itself, and what Tab would run for more.
+fn gather(line: &str, cursor: usize, sources: &dyn Sources) -> (Completion, Option<Pending>) {
     let (words, open) = words(&line[..cursor]);
     let (start, word) = words.last().cloned().unwrap_or_default();
     let raw = &line[start..cursor];
@@ -357,7 +444,8 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
     while first < index && COMMAND_KEYWORDS.contains(&words[first].1.as_str()) {
         first += 1;
     }
-    let mut candidates = if word.starts_with('$') && !word.contains('/') {
+    let mut requests = Vec::new();
+    let candidates = if word.starts_with('$') && !word.contains('/') {
         // A variable whose value names a folder goes on with its `/`,
         // as the folder's path would, rather than a blank.
         let mut found = variables(&word, sources);
@@ -381,6 +469,14 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
             walk.take(arg, sources);
         }
         let declared = walk.declared().cloned();
+        if declared.as_ref().is_some_and(|d| d.complete) {
+            let mut after: Vec<String> = command[1..].iter().map(|(_, w)| w.clone()).collect();
+            after.push(word.clone());
+            requests.push(Request::Program {
+                name: walk.name().to_owned(),
+                words: after,
+            });
+        }
         if word.starts_with('-') {
             let mut found = options(&word, command, sources);
             if let Some(declared) = &declared {
@@ -399,6 +495,7 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
                 .map(|s| candidate(s.clone(), s, Some("subcommand"), true))
                 .collect();
             match (kind, found.is_empty()) {
+                (Some(ParamType::From(source)), _) => requests.push(Request::From(source)),
                 (Some(kind), _) => found.extend(by_type(&kind, &word, raw, sources, open)),
                 // Subcommands are offered without files.
                 (None, true) => found = files(&word, raw, sources, open),
@@ -407,9 +504,12 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
             found
         }
     };
-    candidates.sort_by(|a, b| a.text.cmp(&b.text));
-    candidates.dedup_by(|a, b| a.text == b.text);
-    Completion { start, candidates }
+    let pending = (!requests.is_empty()).then_some(Pending {
+        requests,
+        word: word.clone(),
+        open,
+    });
+    (Completion { start, candidates }, pending)
 }
 
 /// The options of `declared` that start as `word` does, long and short,
@@ -432,7 +532,8 @@ fn declared_options(word: &str, declared: &Extern) -> Vec<Candidate> {
 /// The candidates for a value of type `kind`: only folders for a
 /// folder, files and folders for a file or path, commands for a command,
 /// the choices of a list, the names of the system's things for their
-/// types, and none for the other types.
+/// types, and none for the other types, whose candidates, if any, Tab
+/// runs something for.
 fn by_type(
     kind: &ParamType,
     word: &str,
@@ -687,6 +788,9 @@ extern vcs(--verbose(-v): bool "say more", -C: folder "where to run")
 extern vcs remote add(name: string, url: string, -f: bool "fetch it")
 extern services stop(name: service "the service")
 extern sv(who: user, -n: int)
+extern scm checkout(branch: from (branches), --track: from cached (branches))
+extern tool(--json: bool) complete
+extern tool stop(name: service, --force(-f): bool "do it anyway") complete
 "#;
 
     impl Sources for Fake {
@@ -767,6 +871,72 @@ extern sv(who: user, -n: int)
             .into_iter()
             .map(|c| c.text)
             .collect()
+    }
+
+    /// `Fake`, which also answers what Tab runs, and notes what it was
+    /// asked to run.
+    #[derive(Default)]
+    struct Tab {
+        asked: Vec<Request>,
+    }
+
+    impl Sources for Tab {
+        fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
+            Fake.entries(folder)
+        }
+        fn programs(&self) -> Vec<String> {
+            Fake.programs()
+        }
+        fn functions(&self) -> Vec<(String, Vec<String>)> {
+            Fake.functions()
+        }
+        fn variables(&self) -> Vec<(String, String)> {
+            Fake.variables()
+        }
+        fn environment(&self) -> Vec<(String, String)> {
+            Fake.environment()
+        }
+        fn params(&self, path: &str) -> Option<Vec<Param>> {
+            Fake.params(path)
+        }
+        fn declaration(&self, name: &str, path: &[String]) -> Option<Rc<Extern>> {
+            Fake.declaration(name, path)
+        }
+        fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
+            Fake.subcommands(name, path)
+        }
+        fn things(&self, thing: Thing) -> Vec<String> {
+            Fake.things(thing)
+        }
+        fn run(&mut self, request: &Request) -> Vec<String> {
+            self.asked.push(request.clone());
+            let lines: &[&str] = match request {
+                Request::From(source) if source.text == "branches" => {
+                    &["main", "mine", "feature/x", "with\ttab"]
+                }
+                Request::From(_) => &[],
+                Request::Program { .. } => &[
+                    "termite\tan insect",
+                    "test",
+                    "stop\tstops it",
+                    "te dir/",
+                    "tea\t",
+                    "",
+                ],
+            };
+            lines.iter().map(|l| l.to_string()).collect()
+        }
+    }
+
+    /// The candidates of Tab for `line`, and what it ran for them.
+    fn tab(line: &str) -> (Vec<Candidate>, Vec<Request>) {
+        let mut sources = Tab::default();
+        let found = complete_on_tab(line, line.len(), &mut sources);
+        (found.candidates, sources.asked)
+    }
+
+    fn tab_texts(line: &str) -> Vec<String> {
+        tab(line).0.into_iter().map(|c| c.text).collect()
     }
 
     #[test]
@@ -869,6 +1039,76 @@ extern sv(who: user, -n: int)
         assert_eq!(texts("sv -n 3 b"), ["bob"]);
         // Past what is declared, files.
         assert_eq!(texts("sv ada "), ["notes.txt", "src/"]);
+    }
+
+    #[test]
+    fn runs_from_pipelines_only_on_tab() {
+        // Without Tab, nothing is run, and a `from` type gives nothing.
+        assert!(texts("scm checkout m").is_empty());
+        let (found, asked) = tab("scm checkout m");
+        let shown: Vec<_> = found.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(shown, ["main", "mine"]);
+        assert!(found.iter().all(|c| c.done && c.description.is_none()));
+        let [Request::From(source)] = asked.as_slice() else {
+            panic!("{asked:?}")
+        };
+        assert!(!source.cached);
+        // Lines are taken whole, and a value that ends in `/` goes on.
+        assert_eq!(tab_texts("scm checkout f"), ["feature/x"]);
+        assert_eq!(tab_texts("scm checkout w"), ["'with\ttab'"]);
+        let (_, asked) = tab("scm checkout --track ");
+        assert!(matches!(asked.as_slice(), [Request::From(s)] if s.cached));
+        // A word that is no value of the type asks for nothing.
+        assert!(tab("scm checkout -").1.is_empty());
+        assert!(tab("scm ").1.is_empty());
+    }
+
+    #[test]
+    fn asks_programs_declared_with_complete_on_tab() {
+        let (found, asked) = tab("tool stop te");
+        assert_eq!(
+            asked,
+            [Request::Program {
+                name: "tool".into(),
+                words: vec!["stop".into(), "te".into()],
+            }]
+        );
+        // Its candidates that start as the word does, with their
+        // descriptions, and those that the declaration gives.
+        let shown: Vec<_> = found
+            .iter()
+            .map(|c| (c.text.as_str(), c.description.as_deref(), c.done))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("'te dir'/", None, false),
+                ("tea", None, true),
+                ("termite", Some("an insect"), true),
+                ("termsvc", None, true),
+                ("test", None, true),
+            ]
+        );
+        // Without Tab, only the declaration's.
+        assert_eq!(texts("tool stop te"), ["termsvc"]);
+        // The words after the name, as typed, the last empty after a
+        // blank; options too are asked for.
+        let (_, asked) = tab("tool --json ");
+        assert_eq!(
+            asked,
+            [Request::Program {
+                name: "tool".into(),
+                words: vec!["--json".into(), String::new()],
+            }]
+        );
+        let (found, _) = tab("tool stop --f");
+        let shown: Vec<_> = found.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(shown, ["--force"]);
+        // The command's name, variables, and commands without `complete`
+        // ask for nothing.
+        assert!(tab("too").1.is_empty());
+        assert!(tab("tool $sta").1.is_empty());
+        assert!(tab("vcs remote add ").1.is_empty());
     }
 
     #[test]

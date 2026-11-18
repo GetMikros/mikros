@@ -6,7 +6,7 @@
 //! line shows the most likely rest of it, from the history or else the
 //! one candidate, which Right or End takes.
 
-use super::complete::{Sources, complete};
+use super::complete::{Sources, complete, complete_on_tab};
 use super::history::Entry;
 use super::keys::Key;
 use super::line::Line;
@@ -91,8 +91,9 @@ impl Editor {
         self.menu.as_ref()
     }
 
-    /// Does what `key` does, completing from `sources`.
-    pub fn key(&mut self, key: Key, sources: &dyn Sources) -> Outcome {
+    /// Does what `key` does, completing from `sources`, which Tab may
+    /// have run what declarations name for candidates.
+    pub fn key(&mut self, key: Key, sources: &mut dyn Sources) -> Outcome {
         if self.search.is_some()
             && let Some(outcome) = self.search_key(key)
         {
@@ -104,7 +105,7 @@ impl Editor {
             return outcome;
         }
         let rest = match key {
-            Key::Right | Key::End | Key::Ctrl('f' | 'e') => self.suggestion(sources),
+            Key::Right | Key::End | Key::Ctrl('f' | 'e') => self.suggestion(&*sources),
             _ => String::new(),
         };
         if !rest.is_empty() {
@@ -191,8 +192,8 @@ impl Editor {
 
     /// Tab: the one candidate, with a space when the word is done, or
     /// what all candidates start with and the menu of them.
-    fn tab(&mut self, sources: &dyn Sources) {
-        let found = complete(self.line.text(), self.line.cursor(), sources);
+    fn tab(&mut self, sources: &mut dyn Sources) {
+        let found = complete_on_tab(self.line.text(), self.line.cursor(), sources);
         let typed = self.line.cursor() - found.start;
         match found.candidates.as_slice() {
             [] => {}
@@ -500,7 +501,7 @@ mod tests {
 
     fn typed(e: &mut Editor, text: &str) {
         for c in text.chars() {
-            e.key(Key::Char(c), &Nothing);
+            e.key(Key::Char(c), &mut Nothing);
         }
     }
 
@@ -508,33 +509,36 @@ mod tests {
     fn edits_and_accepts_the_line() {
         let mut e = editor(&[]);
         typed(&mut e, "ls -la");
-        e.key(Key::Ctrl('a'), &Nothing);
-        e.key(Key::Ctrl('d'), &Nothing);
-        e.key(Key::Ctrl('d'), &Nothing);
+        e.key(Key::Ctrl('a'), &mut Nothing);
+        e.key(Key::Ctrl('d'), &mut Nothing);
+        e.key(Key::Ctrl('d'), &mut Nothing);
         typed(&mut e, "pwd");
-        e.key(Key::Ctrl('k'), &Nothing);
-        assert_eq!(e.key(Key::Enter, &Nothing), Outcome::Accept("pwd".into()));
+        e.key(Key::Ctrl('k'), &mut Nothing);
+        assert_eq!(
+            e.key(Key::Enter, &mut Nothing),
+            Outcome::Accept("pwd".into())
+        );
         let mut e = editor(&[]);
-        assert_eq!(e.key(Key::Ctrl('d'), &Nothing), Outcome::Eof);
-        assert_eq!(e.key(Key::Ctrl('c'), &Nothing), Outcome::Cancel);
-        assert_eq!(e.key(Key::Ctrl('l'), &Nothing), Outcome::Clear);
+        assert_eq!(e.key(Key::Ctrl('d'), &mut Nothing), Outcome::Eof);
+        assert_eq!(e.key(Key::Ctrl('c'), &mut Nothing), Outcome::Cancel);
+        assert_eq!(e.key(Key::Ctrl('l'), &mut Nothing), Outcome::Clear);
     }
 
     #[test]
     fn joins_kills_and_yanks_them() {
         let mut e = editor(&[]);
         typed(&mut e, "echo one two");
-        e.key(Key::Ctrl('w'), &Nothing);
-        e.key(Key::Ctrl('w'), &Nothing);
+        e.key(Key::Ctrl('w'), &mut Nothing);
+        e.key(Key::Ctrl('w'), &mut Nothing);
         assert_eq!(e.line().text(), "echo ");
-        e.key(Key::Ctrl('a'), &Nothing);
-        e.key(Key::Ctrl('y'), &Nothing);
+        e.key(Key::Ctrl('a'), &mut Nothing);
+        e.key(Key::Ctrl('y'), &mut Nothing);
         assert_eq!(e.line().text(), "one twoecho ");
         // Another key in between starts a new kill.
-        e.key(Key::Ctrl('e'), &Nothing);
-        e.key(Key::Ctrl('w'), &Nothing);
-        e.key(Key::Ctrl('y'), &Nothing);
-        e.key(Key::Ctrl('y'), &Nothing);
+        e.key(Key::Ctrl('e'), &mut Nothing);
+        e.key(Key::Ctrl('w'), &mut Nothing);
+        e.key(Key::Ctrl('y'), &mut Nothing);
+        e.key(Key::Ctrl('y'), &mut Nothing);
         assert_eq!(e.line().text(), "one twoecho twoecho ");
     }
 
@@ -542,50 +546,53 @@ mod tests {
     fn moves_through_the_lines_of_an_entry_and_on_through_the_history() {
         let entry = "if x {\n  long line\n}";
         let mut e = editor(&["pwd", entry, "ls"]);
-        e.key(Key::Up, &Nothing);
-        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &mut Nothing);
+        e.key(Key::Up, &mut Nothing);
         assert_eq!((e.line().text(), e.line().cursor()), (entry, entry.len()));
         // Up goes to the same column of the line above, or its end.
-        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &mut Nothing);
         assert_eq!(e.line().cursor(), "if x {\n ".len());
-        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &mut Nothing);
         assert_eq!(e.line().cursor(), 1);
-        e.key(Key::Ctrl('p'), &Nothing);
+        e.key(Key::Ctrl('p'), &mut Nothing);
         assert_eq!(e.line().text(), "pwd");
         // Down enters the entry on its first line and goes through it.
-        e.key(Key::Down, &Nothing);
+        e.key(Key::Down, &mut Nothing);
         assert_eq!(
             (e.line().text(), e.line().cursor()),
             (entry, "if x {".len())
         );
-        e.key(Key::Down, &Nothing);
-        e.key(Key::Ctrl('n'), &Nothing);
+        e.key(Key::Down, &mut Nothing);
+        e.key(Key::Ctrl('n'), &mut Nothing);
         assert_eq!(e.line().cursor(), entry.len());
-        e.key(Key::Down, &Nothing);
+        e.key(Key::Down, &mut Nothing);
         assert_eq!(e.line().text(), "ls");
         // Enter takes the whole entry.
-        e.key(Key::Up, &Nothing);
-        assert_eq!(e.key(Key::Enter, &Nothing), Outcome::Accept(entry.into()));
+        e.key(Key::Up, &mut Nothing);
+        assert_eq!(
+            e.key(Key::Enter, &mut Nothing),
+            Outcome::Accept(entry.into())
+        );
     }
 
     #[test]
     fn browses_the_entries_that_start_like_the_line() {
         let mut e = editor(&["ls /", "cd /tmp", "ls /usr", "ls /usr"]);
-        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &mut Nothing);
         assert_eq!(e.line().text(), "ls /usr");
-        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &mut Nothing);
         assert_eq!(e.line().text(), "cd /tmp");
-        e.key(Key::Down, &Nothing);
-        e.key(Key::Down, &Nothing);
+        e.key(Key::Down, &mut Nothing);
+        e.key(Key::Down, &mut Nothing);
         assert_eq!(e.line().text(), "");
         typed(&mut e, "ls");
-        e.key(Key::Up, &Nothing);
-        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &mut Nothing);
+        e.key(Key::Up, &mut Nothing);
         assert_eq!(e.line().text(), "ls /");
-        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &mut Nothing);
         assert_eq!(e.line().text(), "ls /");
-        e.key(Key::Down, &Nothing);
-        e.key(Key::Down, &Nothing);
+        e.key(Key::Down, &mut Nothing);
+        e.key(Key::Down, &mut Nothing);
         assert_eq!(e.line().text(), "ls");
     }
 
@@ -593,25 +600,83 @@ mod tests {
     fn searches_the_history_backwards() {
         let mut e = editor(&["make test", "ls", "make run", "cat x"]);
         typed(&mut e, "pw");
-        e.key(Key::Ctrl('r'), &Nothing);
+        e.key(Key::Ctrl('r'), &mut Nothing);
         typed(&mut e, "make");
         assert_eq!(e.line().text(), "make run");
-        e.key(Key::Ctrl('r'), &Nothing);
+        e.key(Key::Ctrl('r'), &mut Nothing);
         assert_eq!(e.line().text(), "make test");
-        e.key(Key::Ctrl('r'), &Nothing);
+        e.key(Key::Ctrl('r'), &mut Nothing);
         assert_eq!(e.line().text(), "make test");
         typed(&mut e, "z");
         assert_eq!(e.line().text(), "pw");
-        e.key(Key::Backspace, &Nothing);
+        e.key(Key::Backspace, &mut Nothing);
         assert_eq!(e.search().map(|s| s.found), Some(Some(2)));
-        e.key(Key::Escape, &Nothing);
+        e.key(Key::Escape, &mut Nothing);
         assert_eq!(e.line().text(), "pw");
-        e.key(Key::Ctrl('r'), &Nothing);
+        e.key(Key::Ctrl('r'), &mut Nothing);
         typed(&mut e, "ls");
-        e.key(Key::Ctrl('e'), &Nothing);
+        e.key(Key::Ctrl('e'), &mut Nothing);
         typed(&mut e, " -l");
         assert!(e.search().is_none());
-        assert_eq!(e.key(Key::Enter, &Nothing), Outcome::Accept("ls -l".into()));
+        assert_eq!(
+            e.key(Key::Enter, &mut Nothing),
+            Outcome::Accept("ls -l".into())
+        );
+    }
+
+    /// Sources whose `tool` completes its own arguments, which count
+    /// what Tab ran.
+    #[derive(Default)]
+    struct Asking {
+        ran: usize,
+    }
+
+    impl Sources for Asking {
+        fn entries(&self, _: &str) -> Option<Vec<(String, bool)>> {
+            None
+        }
+        fn programs(&self) -> Vec<String> {
+            vec!["tool".into()]
+        }
+        fn functions(&self) -> Vec<(String, Vec<String>)> {
+            Vec::new()
+        }
+        fn variables(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn environment(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn params(&self, _: &str) -> Option<Vec<Param>> {
+            None
+        }
+        fn declaration(
+            &self,
+            name: &str,
+            path: &[String],
+        ) -> Option<std::rc::Rc<crate::ast::Extern>> {
+            crate::eval::declarations::Declarations::parse("extern tool() complete").get(name, path)
+        }
+        fn run(&mut self, _: &super::super::complete::Request) -> Vec<String> {
+            self.ran += 1;
+            vec!["start\tstarts it".into()]
+        }
+    }
+
+    #[test]
+    fn runs_what_declarations_name_only_on_tab() {
+        let mut e = editor(&[]);
+        let mut sources = Asking::default();
+        for c in "tool st".chars() {
+            e.key(Key::Char(c), &mut sources);
+        }
+        // Suggestions run nothing.
+        assert_eq!(e.suggestion(&sources), "");
+        e.key(Key::End, &mut sources);
+        assert_eq!(sources.ran, 0);
+        e.key(Key::Tab, &mut sources);
+        assert_eq!(e.line().text(), "tool start ");
+        assert_eq!(sources.ran, 1);
     }
 
     /// A folder with two notes and a program.
@@ -641,7 +706,7 @@ mod tests {
 
     fn press(e: &mut Editor, keys: &[Key]) {
         for &key in keys {
-            e.key(key, &Files);
+            e.key(key, &mut Files);
         }
     }
 
