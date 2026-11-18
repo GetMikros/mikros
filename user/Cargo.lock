@@ -552,6 +552,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ls"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "managed"
 version = "0.0.0"
 dependencies = [
