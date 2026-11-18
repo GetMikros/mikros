@@ -247,6 +247,14 @@ name = "coreutils-check"
 version = "0.0.0"
 
 [[package]]
+name = "cp"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
