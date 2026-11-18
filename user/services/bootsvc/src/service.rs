@@ -2,8 +2,9 @@
 //! `root_resource` boot handle, closes that handle, takes the booted
 //! version from the command line of its `platform_info` boot handle, and
 //! serves `mikros.boot.Attempts`, reading and writing `MikrosBoot` with
-//! the firmware variable calls. The service manager lets only processes
-//! with `system.boot_state.set` connect.
+//! the firmware variable calls, to the processes with
+//! `system.boot_state.set`, which alone the service manager lets connect,
+//! and `mikros.boot.Version`, the booted version, to every process.
 
 use crate::attempts::{self, ATTRIBUTES, NAME, Record};
 use mikros_rt::exec::{Executor, Reactor};
@@ -11,7 +12,8 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::boot::{
     Attempts, AttemptsAsyncServer, AttemptsGetStateResponse, AttemptsMarkGoodResponse,
-    AttemptsRequest, AttemptsStartTryingResponse, BootState,
+    AttemptsRequest, AttemptsStartTryingResponse, BootState, Version, VersionAsyncServer,
+    VersionGetResponse, VersionRequest,
 };
 use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, ProviderRequest};
 use mikros_rt::sys;
@@ -27,6 +29,7 @@ const ROOT_RESOURCE_ID: u32 = 1;
 const PLATFORM_INFO_ID: u32 = 5;
 const KIND_FIRMWARE: u32 = 10;
 const ATTEMPTS: &str = "mikros.boot.Attempts";
+const VERSION: &str = "mikros.boot.Version";
 
 /// The kernel's statuses that the variable calls give.
 const NOT_SUPPORTED: sys::Status = -2;
@@ -199,6 +202,15 @@ async fn serve(boot: Rc<Boot>, end: ServerEnd<Attempts>, reactor: Reactor) {
     }
 }
 
+/// Serves `Version` on `end`: the booted version, empty without one.
+async fn serve_version(boot: Rc<Boot>, end: ServerEnd<Version>, reactor: Reactor) {
+    let server = VersionAsyncServer::new(end, reactor);
+    while let Ok(VersionRequest::Get(_, r)) = server.next().await {
+        let version = boot.booted.clone().unwrap_or_default();
+        let _ = r.reply(server.server(), VersionGetResponse { version });
+    }
+}
+
 pub fn main() -> ExitCode {
     let (Some(provider), Some(root), Some(info)) = (
         take(PROVIDER, 0),
@@ -226,9 +238,15 @@ pub fn main() -> ExitCode {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
             // Other protocols and named instances are not ours; dropping
             // the server end closes the connection.
-            if c.instance.is_none() && c.protocol == ATTEMPTS {
+            if c.instance.is_some() {
+                continue;
+            }
+            if c.protocol == ATTEMPTS {
                 let end = ServerEnd::new(c.server);
                 spawner.spawn(serve(boot.clone(), end, reactor.clone()));
+            } else if c.protocol == VERSION {
+                let end = ServerEnd::new(c.server);
+                spawner.spawn(serve_version(boot.clone(), end, reactor.clone()));
             }
         }
     });

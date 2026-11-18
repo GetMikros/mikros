@@ -1,0 +1,7 @@
+// MIKSPEC-0099.R9
+
+library mikros.boot;
+
+protocol Version {
+    @1 Get() -> (version string<64>);
+};

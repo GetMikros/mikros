@@ -7,3 +7,4 @@ boot_handles: [root_resource, platform_info]
 provides:
   - protocol: mikros.boot.Attempts
     permission: system.boot_state.set
+  - protocol: mikros.boot.Version
