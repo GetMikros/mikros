@@ -450,6 +450,51 @@ impl<'a> Decoder<'a> {
     }
 }
 
+/// The most two-way requests of one connection that an asynchronous
+/// server has outstanding at once (MIKSPEC-0060.R12).
+pub const OUTSTANDING_MAX: usize = 64;
+
+/// The two-way requests of one connection that have no reply yet, and
+/// the task that waits for one of them to get it. A request counts from
+/// when it is read until its reply is sent; one whose responder is
+/// dropped without a reply stays outstanding, as its client still waits.
+#[derive(Default)]
+pub struct Outstanding {
+    count: Cell<usize>,
+    waiting: Cell<Option<core::task::Waker>>,
+}
+
+impl Outstanding {
+    pub fn taken(&self) {
+        self.count.set(self.count.get() + 1);
+    }
+
+    pub fn replied(&self) {
+        self.count.set(self.count.get().saturating_sub(1));
+        if let Some(waker) = self.waiting.take() {
+            waker.wake();
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.count.get()
+    }
+
+    /// Resolves once fewer than `OUTSTANDING_MAX` requests are
+    /// outstanding.
+    pub async fn room(&self) {
+        use core::task::Poll;
+        core::future::poll_fn(|cx| match self.count.get() < OUTSTANDING_MAX {
+            true => Poll::Ready(()),
+            false => {
+                self.waiting.set(Some(cx.waker().clone()));
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+
 /// A channel that a client or server owns, which it closes after a
 /// protocol error.
 pub struct Channel(Cell<Option<RawHandle>>);

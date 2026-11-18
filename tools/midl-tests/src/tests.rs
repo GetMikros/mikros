@@ -542,3 +542,23 @@ fn types_without_handles_clone() {
     let original = everything();
     assert_eq!(original.clone(), original);
 }
+
+#[test]
+fn outstanding_requests_leave_room_once_fewer_than_the_most() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let outstanding = rt::Outstanding::default();
+    let mut cx = Context::from_waker(Waker::noop());
+    let has_room = |o: &rt::Outstanding, cx: &mut Context<'_>| {
+        let room = std::pin::pin!(o.room());
+        room.poll(cx).is_ready()
+    };
+    for _ in 0..rt::OUTSTANDING_MAX {
+        assert!(has_room(&outstanding, &mut cx));
+        outstanding.taken();
+    }
+    assert_eq!(outstanding.count(), rt::OUTSTANDING_MAX);
+    assert!(!has_room(&outstanding, &mut cx));
+    outstanding.replied();
+    assert!(has_room(&outstanding, &mut cx));
+}
