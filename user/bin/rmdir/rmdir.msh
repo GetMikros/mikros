@@ -1,0 +1,9 @@
+# What `rmdir` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern rmdir(
+    ...folder: folder "the empty folders to remove",
+    --parents(-p): bool "remove the folders above each one that its path names, too",
+    --verbose(-v): bool "name each folder removed",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
