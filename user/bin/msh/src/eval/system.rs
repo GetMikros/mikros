@@ -1,7 +1,7 @@
 //! What the shell needs of the system, and the programs it starts.
 
 use super::glob;
-use crate::ast::RedirectionKind;
+use crate::ast::{RedirectionKind, Thing};
 use crate::jobs::Ended;
 
 /// A program to start.
@@ -84,4 +84,9 @@ pub trait System: glob::Folders {
     fn kill(&mut self, target: &str, signal: i32) -> Result<(), String>;
     /// Replaces the shell with `program`, returning only why it could not.
     fn exec(&mut self, program: Program) -> String;
+    /// The names of the things of the system of kind `thing`, for
+    /// completion; none where the system cannot list them.
+    fn things(&self, _thing: Thing) -> Vec<String> {
+        Vec::new()
+    }
 }

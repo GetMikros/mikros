@@ -1,11 +1,12 @@
 //! The shell as the source of what Tab completes: its functions with
 //! their flags, its variables and environment, the programs of
-//! `$env.PATH`, folders, and the options that scripts declare. Folders
-//! are listed through the listings the shell keeps between keys.
+//! `$env.PATH`, folders, the options that scripts declare, and the names
+//! of the system's things. Folders are listed through the listings the
+//! shell keeps between keys, and the system's things once for each line.
 
 use super::listings::Disk;
 use super::{Shell, System};
-use crate::ast::{Extern, Param, StatementKind};
+use crate::ast::{Extern, Param, StatementKind, Thing};
 use crate::edit::complete::{Sources, collapsed};
 use crate::value::{Value, scalar_text};
 use std::rc::Rc;
@@ -13,10 +14,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 impl<S: System> Shell<S> {
-    /// Lists folders anew for the next line, keeping the programs of
-    /// `PATH`, which are listed again once their folder changes.
-    pub fn new_line(&self) {
+    /// Lists folders and the system's things anew for the next line,
+    /// keeping the programs of `PATH`, which are listed again once their
+    /// folder changes.
+    pub fn new_line(&mut self) {
         self.listings.forget_entries();
+        self.things.borrow_mut().clear();
     }
 
     /// Starts the thread that reads folders on `disk` for suggestions,
@@ -75,6 +78,15 @@ impl<S: System> Sources for Shell<S> {
 
     fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
         Shell::subcommands(self, name, path)
+    }
+
+    fn things(&self, thing: Thing) -> Vec<String> {
+        if let Some(names) = self.things.borrow().get(&thing) {
+            return names.clone();
+        }
+        let names = self.system.things(thing);
+        self.things.borrow_mut().insert(thing, names.clone());
+        names
     }
 
     fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
@@ -146,7 +158,8 @@ impl<S: System> Sources for Shell<S> {
 
 /// The shell as the source of a suggestion: with the reader thread
 /// running, it takes the folders' kept listings and has the thread check
-/// them, instead of reading them; it is the shell otherwise.
+/// them, instead of reading them; it is the shell otherwise. It takes the
+/// system's things only as listed for the line already, and runs nothing.
 pub struct WithoutWaiting<'a, S: System>(&'a Shell<S>);
 
 impl<S: System> Sources for WithoutWaiting<'_, S> {
@@ -156,6 +169,17 @@ impl<S: System> Sources for WithoutWaiting<'_, S> {
 
     fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
         self.0.subcommands(name, path)
+    }
+
+    /// Only the names listed for the line already: listing them anew
+    /// is left to Tab.
+    fn things(&self, thing: Thing) -> Vec<String> {
+        self.0
+            .things
+            .borrow()
+            .get(&thing)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {

@@ -36,7 +36,9 @@ pub fn typed(kind: &ParamType, text: &str) -> Option<Value> {
         | ParamType::Path
         | ParamType::Folder
         | ParamType::File
-        | ParamType::Command => Some(Value::String(text.into())),
+        | ParamType::Command
+        | ParamType::Thing(_)
+        | ParamType::From(_) => Some(Value::String(text.into())),
         ParamType::Choices(words) => words
             .iter()
             .any(|w| w == text)

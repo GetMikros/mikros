@@ -454,7 +454,8 @@ impl Parser<'_> {
         }
     }
 
-    /// A type: a name such as `int` or `folder`, or the choices `[a b c]`.
+    /// A type: a name such as `int`, `folder` or `service`, the choices
+    /// `[a b c]`, or `from (pipeline)` or `from cached (pipeline)`.
     pub(super) fn param_type(&mut self) -> Result<ParamType> {
         if self.peek() == Some('[') {
             self.pos += 1;
@@ -484,7 +485,39 @@ impl Parser<'_> {
             return Ok(ParamType::Choices(choices));
         }
         let at = self.pos;
-        Ok(match self.name()?.as_str() {
+        if self.at_keyword("from") {
+            self.pos += 4;
+            self.skip_spaces();
+            let cached = self.at_keyword("cached");
+            if cached {
+                self.pos += "cached".len();
+                self.skip_spaces();
+            }
+            if self.peek() != Some('(') {
+                return Err(match self.peek() {
+                    None => self.incomplete("`(` and a pipeline are missing after `from`"),
+                    _ => self.error("`from` takes a pipeline in parentheses"),
+                });
+            }
+            let open = self.pos;
+            let expr = self.paren()?;
+            // The `)` is the last character taken, or the one before a `?`.
+            let close = match self.chars[self.pos - 1] {
+                '?' => self.pos - 2,
+                _ => self.pos - 1,
+            };
+            let text: String = self.chars[open + 1..close].iter().collect();
+            return Ok(ParamType::From(std::rc::Rc::new(Source {
+                cached,
+                text: text.trim().to_owned(),
+                expr,
+            })));
+        }
+        let name = self.name()?;
+        if let Some(thing) = Thing::named(&name) {
+            return Ok(ParamType::Thing(thing));
+        }
+        Ok(match name.as_str() {
             "string" => ParamType::String,
             "int" => ParamType::Int,
             "float" => ParamType::Float,

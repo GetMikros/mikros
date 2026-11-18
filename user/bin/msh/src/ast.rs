@@ -1,5 +1,7 @@
 //! The syntax tree of msh's command language.
 
+use std::rc::Rc;
+
 /// A script, or a line typed at the prompt: statements in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
@@ -448,7 +450,7 @@ pub struct Param {
 
 /// The type of a script's option, of a declared argument or option, or
 /// of a function's.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ParamType {
     String,
     Int,
@@ -467,6 +469,56 @@ pub enum ParamType {
     Any,
     /// One of the words.
     Choices(Vec<String>),
+    /// The name of a thing of the system, which msh lists.
+    Thing(Thing),
+    /// `from (pipeline)` or `from cached (pipeline)`.
+    From(Rc<Source>),
+}
+
+/// A kind of thing of the system whose names msh lists for completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Thing {
+    Service,
+    User,
+    App,
+    Permission,
+    Volume,
+    Device,
+}
+
+impl Thing {
+    pub const ALL: [(Thing, &str); 6] = [
+        (Thing::Service, "service"),
+        (Thing::User, "user"),
+        (Thing::App, "app"),
+        (Thing::Permission, "permission"),
+        (Thing::Volume, "volume"),
+        (Thing::Device, "device"),
+    ];
+
+    /// The thing that the type `name` stands for, if it is one.
+    pub fn named(name: &str) -> Option<Thing> {
+        Thing::ALL.iter().find(|(_, n)| *n == name).map(|(t, _)| *t)
+    }
+
+    /// The type's name.
+    pub fn name(self) -> &'static str {
+        Thing::ALL
+            .iter()
+            .find(|(t, _)| *t == self)
+            .map_or("", |(_, n)| n)
+    }
+}
+
+/// The pipeline of a `from` type, whose output or value gives the
+/// candidates of completion.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
+    /// Written `from cached`, whose candidates may be kept for the line.
+    pub cached: bool,
+    /// The text in the parentheses, as written.
+    pub text: String,
+    pub expr: Expr,
 }
 
 impl ParamType {
@@ -487,6 +539,11 @@ impl ParamType {
             ParamType::List => "list",
             ParamType::Any => "any",
             ParamType::Choices(words) => return format!("[{}]", words.join(" ")),
+            ParamType::Thing(thing) => thing.name(),
+            ParamType::From(source) => {
+                let cached = if source.cached { "cached " } else { "" };
+                return format!("from {cached}({})", source.text);
+            }
         };
         name.into()
     }

@@ -5,6 +5,7 @@
 //! the system on Mikros. Only `program` is left out of the host's build,
 //! which runs the tests of the rest.
 
+#![cfg_attr(target_os = "mikros", feature(mikros_handles))]
 #![cfg_attr(not(target_os = "mikros"), allow(dead_code))]
 
 mod ast;

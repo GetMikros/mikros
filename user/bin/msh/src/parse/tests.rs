@@ -346,6 +346,58 @@ fn reads_nested_subcommands_short_options_and_complete() {
 }
 
 #[test]
+fn reads_the_types_of_system_things_and_sources() {
+    let StatementKind::Extern(e) = one(
+        "extern t(a: service, b: user, c: app, d: permission, e: volume, f: device, \
+         --g: from (git branch | lines) \"a branch\", h: from cached ([x y]), ...i: string)",
+    ) else {
+        panic!()
+    };
+    let kinds: Vec<String> = e.positional.iter().map(|p| p.kind.written()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "service",
+            "user",
+            "app",
+            "permission",
+            "volume",
+            "device",
+            "from cached ([x y])",
+            "string"
+        ]
+    );
+    assert_eq!(e.positional[0].kind, ParamType::Thing(Thing::Service));
+    let ParamType::From(branch) = &e.options[0].kind else {
+        panic!()
+    };
+    assert!(!branch.cached);
+    assert_eq!(branch.text, "git branch | lines");
+    assert!(matches!(&branch.expr, Expr::Pipeline(p) if p.commands.len() == 2));
+    assert_eq!(e.options[0].description.as_deref(), Some("a branch"));
+    let ParamType::From(list) = &e.positional[6].kind else {
+        panic!()
+    };
+    assert!(list.cached && matches!(list.expr, Expr::List(_)));
+    // The types are those of `param` and `fn` too.
+    let StatementKind::Param(p) = one("param --to: user") else {
+        panic!()
+    };
+    assert_eq!(p.kind, ParamType::Thing(Thing::User));
+    let StatementKind::Fn(f) = one("fn stop(name: service, --why: from (print a)) { }") else {
+        panic!()
+    };
+    assert_eq!(f.type_of("name"), Some(&ParamType::Thing(Thing::Service)));
+    assert!(matches!(f.type_of("--why"), Some(ParamType::From(_))));
+    assert_eq!(
+        failure("extern t(a: from ls)").message,
+        "`from` takes a pipeline in parentheses"
+    );
+    assert!(failure("extern t(a: from (ls").incomplete);
+    assert!(failure("extern t(a: from cached").incomplete);
+}
+
+#[test]
 fn reads_the_forms_of_completion_files() {
     // The forms that completion files in the tree use.
     let block = crate::parse::parse(

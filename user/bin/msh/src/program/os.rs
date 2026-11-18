@@ -2,9 +2,10 @@
 //! std, programs started with `std::process::Command` and joined by
 //! pipes, and, in an interactive shell, each pipeline in a process group
 //! of its own, in the terminal's foreground unless it runs in the
-//! background.
+//! background. The names of the system's things come from their
+//! services, through `mikros-command`.
 
-use crate::ast::RedirectionKind;
+use crate::ast::{RedirectionKind, Thing};
 use crate::eval::glob::Folders;
 use crate::eval::{Input, Program, Ran, Run, Stream, System};
 use crate::jobs::{Ended, Jobs, Lookup, State};
@@ -463,6 +464,22 @@ impl System for Os {
             },
         };
         sent.map_err(|e| reason(&e))
+    }
+
+    fn things(&self, thing: Thing) -> Vec<String> {
+        use mikros_command::{Directory, Thing as Kind};
+        let kind = match thing {
+            Thing::Service => Kind::Service,
+            Thing::User => Kind::User,
+            Thing::App => Kind::App,
+            Thing::Permission => Kind::Permission,
+            Thing::Volume => Kind::Volume,
+            Thing::Device => Kind::Device,
+        };
+        match Directory::new(std::os::mikros::directory().as_raw_handle()) {
+            Some(directory) => directory.names(kind),
+            None => Vec::new(),
+        }
     }
 
     fn exec(&mut self, program: Program) -> String {

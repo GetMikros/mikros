@@ -1,4 +1,6 @@
 use super::*;
+use crate::ast::Thing;
+use crate::edit::complete::Sources;
 use crate::jobs::Ended;
 use crate::parse::parse;
 use std::collections::BTreeMap;
@@ -18,6 +20,8 @@ pub(crate) struct Fake {
     runs: Vec<Run>,
     resumed: Vec<(String, bool)>,
     killed: Vec<(String, i32)>,
+    /// How often the system's things were listed.
+    listed: std::cell::Cell<usize>,
 }
 
 impl glob::Folders for Fake {
@@ -108,6 +112,13 @@ impl System for Fake {
         match stream {
             Stream::Output => self.output.extend_from_slice(bytes),
             Stream::Error => self.errors.extend_from_slice(bytes),
+        }
+    }
+    fn things(&self, thing: Thing) -> Vec<String> {
+        self.listed.set(self.listed.get() + 1);
+        match thing {
+            Thing::Service => vec!["logsvc".into(), "termsvc".into()],
+            _ => Vec::new(),
         }
     }
 }
@@ -820,4 +831,24 @@ fn applies_declared_options_to_subcommands_below() {
     assert_eq!(s.subcommands("git", &path[..1]), ["add"]);
     // Declarations change nothing that runs.
     assert_eq!(run(&mut s, "echo -C x").unwrap(), "-C x\n");
+}
+
+#[test]
+fn lists_the_system_things_once_for_each_line() {
+    let mut s = shell();
+    assert!(s.without_waiting().things(Thing::Service).is_empty());
+    assert_eq!(Sources::things(&s, Thing::Service), ["logsvc", "termsvc"]);
+    assert_eq!(Sources::things(&s, Thing::Service), ["logsvc", "termsvc"]);
+    assert_eq!(s.system.listed.get(), 1);
+    // Suggestions take what Tab listed, and never list anew.
+    assert_eq!(
+        s.without_waiting().things(Thing::Service),
+        ["logsvc", "termsvc"]
+    );
+    assert!(s.without_waiting().things(Thing::User).is_empty());
+    assert_eq!(s.system.listed.get(), 1);
+    s.new_line();
+    assert!(s.without_waiting().things(Thing::Service).is_empty());
+    Sources::things(&s, Thing::Service);
+    assert_eq!(s.system.listed.get(), 2);
 }

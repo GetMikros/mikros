@@ -12,7 +12,7 @@
 //! word that starts with a quote is completed inside it, which is closed
 //! once the name is complete.
 
-use crate::ast::{Extern, Param, ParamType};
+use crate::ast::{Extern, Param, ParamType, Thing};
 use std::rc::Rc;
 
 /// A way to complete the word.
@@ -62,6 +62,10 @@ pub trait Sources {
     /// The subcommands declared right below the subcommands `path` of
     /// the command `name`.
     fn subcommands(&self, _name: &str, _path: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+    /// The names of the system's things of kind `thing`.
+    fn things(&self, _thing: Thing) -> Vec<String> {
         Vec::new()
     }
 }
@@ -427,7 +431,8 @@ fn declared_options(word: &str, declared: &Extern) -> Vec<Candidate> {
 
 /// The candidates for a value of type `kind`: only folders for a
 /// folder, files and folders for a file or path, commands for a command,
-/// the choices of a list, and none for the other types.
+/// the choices of a list, the names of the system's things for their
+/// types, and none for the other types.
 fn by_type(
     kind: &ParamType,
     word: &str,
@@ -447,6 +452,15 @@ fn by_type(
             .filter(|c| c.starts_with(word))
             .map(|c| candidate(c.clone(), c.clone(), None, true))
             .collect(),
+        ParamType::Thing(thing) => {
+            let names = sources.things(*thing);
+            let found = names
+                .into_iter()
+                .filter(|n| n.starts_with(word))
+                .map(|n| candidate(n.clone(), n, None, true))
+                .collect();
+            quote_names(found, open)
+        }
         _ => Vec::new(),
     }
 }
@@ -671,6 +685,8 @@ extern print(--n(-n): bool, ...values: any)
 extern pick(choice: [red green], target: file, run: command)
 extern vcs(--verbose(-v): bool "say more", -C: folder "where to run")
 extern vcs remote add(name: string, url: string, -f: bool "fetch it")
+extern services stop(name: service "the service")
+extern sv(who: user, -n: int)
 "#;
 
     impl Sources for Fake {
@@ -679,6 +695,14 @@ extern vcs remote add(name: string, url: string, -f: bool "fetch it")
         }
         fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
             Declarations::parse(DECLARED).subcommands(name, path)
+        }
+        fn things(&self, thing: Thing) -> Vec<String> {
+            let names: &[&str] = match thing {
+                Thing::Service => &["logsvc", "termsvc", "time svc"],
+                Thing::User => &["ada", "bob"],
+                _ => &[],
+            };
+            names.iter().map(|n| n.to_string()).collect()
         }
         fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
             let entries: &[(&str, bool)] = match folder {
@@ -834,6 +858,17 @@ extern vcs remote add(name: string, url: string, -f: bool "fetch it")
         // A positional argument is no subcommand, and after one none is.
         assert!(texts("vcs remote add origin ").is_empty());
         assert_eq!(texts("vcs x a"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn completes_the_names_of_system_things() {
+        assert_eq!(texts("services stop "), ["'time svc'", "logsvc", "termsvc"]);
+        assert_eq!(texts("services stop t"), ["'time svc'", "termsvc"]);
+        assert_eq!(texts("sv a"), ["ada"]);
+        // An option's value is no position.
+        assert_eq!(texts("sv -n 3 b"), ["bob"]);
+        // Past what is declared, files.
+        assert_eq!(texts("sv ada "), ["notes.txt", "src/"]);
     }
 
     #[test]

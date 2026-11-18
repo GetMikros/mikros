@@ -860,6 +860,7 @@ dependencies = [
 name = "msh"
 version = "0.0.0"
 dependencies = [
+ "mikros-command",
  "regex",
 ]
 

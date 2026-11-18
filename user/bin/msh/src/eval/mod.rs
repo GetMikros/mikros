@@ -94,6 +94,9 @@ pub struct Shell<S: System> {
     declarations: declarations::Declarations,
     /// The commands whose declarations files were looked for.
     looked_up: std::collections::HashSet<String>,
+    /// The names of the system's things listed for the line being
+    /// edited.
+    things: std::cell::RefCell<BTreeMap<Thing, Vec<String>>>,
 }
 
 impl<S: System> Shell<S> {
@@ -131,6 +134,7 @@ impl<S: System> Shell<S> {
             listings: listings::Listings::default(),
             declarations: declarations::Declarations::parse(builtins::DECLARATIONS),
             looked_up: Default::default(),
+            things: Default::default(),
         };
         shell.set_global("status", Value::Int(0));
         shell.set_global("args", Value::List(Vec::new()));

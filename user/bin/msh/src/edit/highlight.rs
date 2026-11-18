@@ -612,7 +612,8 @@ mod tests {
     fn declarations() -> Declarations {
         Declarations::parse(&format!(
             "{}\nextern pick(target: file, ...rest: path)\nextern git push(--repo: folder)\n\
-             extern vcs(-C: folder)\nextern vcs remote add(dest: folder, -f: file)",
+             extern vcs(-C: folder)\nextern vcs remote add(dest: folder, -f: file)\n\
+             extern svc(name: service, --from: from (ls | lines)) complete",
             crate::eval::builtins::DECLARATIONS
         ))
     }
@@ -734,6 +735,15 @@ mod tests {
         assert_eq!(
             shown("vcs remote add 'x' notes.txt"),
             "EEE.aaaaaa.aaa.sss.ppppppppp"
+        );
+    }
+
+    #[test]
+    fn colours_names_of_system_things_and_from_values_as_arguments() {
+        // They are not checked: colours run nothing.
+        assert_eq!(
+            shown("svc anything --from whatever"),
+            "EEE.aaaaaaaa.aaaaaa.aaaaaaaa"
         );
     }
 
