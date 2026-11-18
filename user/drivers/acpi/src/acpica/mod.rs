@@ -15,6 +15,7 @@ mod pci;
 mod physical;
 mod ports;
 pub mod power;
+mod regions;
 pub mod route;
 mod sync;
 mod threads;

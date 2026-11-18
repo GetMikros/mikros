@@ -356,7 +356,7 @@ extern "C" fn mikros_acpi_print(text: *const c_char) {
         line.push_str(&String::from_utf8_lossy(piece));
         if ends || line.len() >= LINE_MAX {
             let text = line.trim_end();
-            if !text.is_empty() {
+            if !text.is_empty() && !crate::acpica::regions::handler_refused(text) {
                 log::write(severity(text), format_args!("acpi: {text}"));
             }
             line.clear();

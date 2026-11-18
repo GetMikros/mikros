@@ -61,4 +61,8 @@ UINT32 glue_isa_irq(UINT8 irq, UINT32 *flags);
  * `device`, legacy IRQs as the GSIs that glue_isa_irq gives them. */
 void glue_current_resources(ACPI_HANDLE handle, struct mikros_acpi_device *device);
 
+/* Installs the handlers of SystemMemory and SystemIO operation regions in
+ * place of ACPICA's own, before the tables are loaded. */
+ACPI_STATUS glue_install_region_handlers(void);
+
 #endif

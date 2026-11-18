@@ -17,12 +17,16 @@ UINT32 mikros_acpi_tables(void)
     return AcpiInitializeTables(NULL, 16, TRUE);
 }
 
-/* Loads the tables into the namespace, enables the ACPI hardware mode and
- * the SCI, and initializes the namespace's objects. Returns an
- * ACPI_STATUS. */
+/* Installs the operation region handlers, loads the tables into the
+ * namespace, enables the ACPI hardware mode and the SCI, and initializes
+ * the namespace's objects. Returns an ACPI_STATUS. */
 UINT32 mikros_acpi_enable(void)
 {
-    ACPI_STATUS status = AcpiLoadTables();
+    ACPI_STATUS status = glue_install_region_handlers();
+    if (ACPI_FAILURE(status)) {
+        return status;
+    }
+    status = AcpiLoadTables();
     if (ACPI_FAILURE(status)) {
         return status;
     }

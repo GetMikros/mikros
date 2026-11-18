@@ -171,6 +171,12 @@ fn get(physical: u64, len: u64) -> Result<u64, (Refused, bool)> {
 }
 
 /// Maps the `len` bytes at the physical address `physical`, and gives
+/// their address: the status that refused them otherwise.
+pub fn hold(physical: u64, len: u64) -> Result<u64, Refused> {
+    get(physical, len).map_err(|(status, _)| status)
+}
+
+/// Maps the `len` bytes at the physical address `physical`, and gives
 /// their address: None when the device manager or the kernel refused,
 /// which is logged when the device manager refused them first.
 pub fn map(physical: u64, len: u64) -> Option<u64> {

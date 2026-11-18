@@ -74,6 +74,12 @@ fn get(port: u16, count: u16) -> Result<(), (Refused, bool)> {
 }
 
 /// Enables the `count` ports from `port` for the process, unless a range
+/// already holds them: the status that refused them otherwise.
+pub(crate) fn hold(port: u16, count: u16) -> Result<(), Refused> {
+    get(port, count).map_err(|(status, _)| status)
+}
+
+/// Enables the `count` ports from `port` for the process, unless a range
 /// already holds them: false when the device manager or the kernel
 /// refused, which is logged when the device manager refused them first.
 pub(crate) fn enable(port: u16, count: u16) -> bool {
