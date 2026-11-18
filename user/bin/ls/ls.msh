@@ -1,0 +1,20 @@
+# What `ls` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern ls(
+    ...path: path "the folders to list and files to name",
+    --all(-a): bool "show entries whose names start with a dot, and . and ..",
+    --almost-all(-A): bool "show entries whose names start with a dot",
+    --directory(-d): bool "show folders themselves, not their entries",
+    --recursive(-R): bool "list the folders inside, too",
+    -1: bool "one entry per line",
+    --reverse(-r): bool "reverse the order",
+    -t: bool "order by modified time, newest first",
+    -S: bool "order by size, largest first",
+    --classify(-F): bool "mark folders with /, links with @ and sockets with =",
+    --inode(-i): bool "show inode numbers",
+    --human-readable(-h): bool "show sizes with K, M and G",
+    -l: bool "long lines: type, access, size, modified time and name",
+    --json: bool "write the entries as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
