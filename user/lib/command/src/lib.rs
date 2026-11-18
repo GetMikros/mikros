@@ -1,13 +1,17 @@
 //! What the commands of Mikros share: reaching services through the
-//! process's service directory, and telling a connection that the
-//! directory refused, which an administrator may not have allowed, apart
-//! from other failures. It runs only on Mikros, and needs only `alloc`,
-//! so that the commands, which use the standard library, can share it
-//! with those that do not.
+//! process's service directory, telling a connection that the directory
+//! refused, which an administrator may not have allowed, apart from
+//! other failures, and the names of system things that completion
+//! offers. It runs only on Mikros, in programs with the standard
+//! library.
 
-#![no_std]
+#![feature(mikros_handles)]
 
 extern crate alloc;
+
+mod things;
+
+pub use things::Thing;
 
 use alloc::format;
 use alloc::string::String;
@@ -66,4 +70,26 @@ impl Directory {
             Err(error) => Err(refused(format!("{error:?}"))),
         }
     }
+}
+
+/// The names that start with `prefix` of the system things of `kind`,
+/// for `mikros_cli::start`; none for the kinds that are not system
+/// things.
+pub fn list(kind: mikros_cli::Kind, prefix: &str) -> alloc::vec::Vec<String> {
+    use mikros_cli::Kind;
+    let thing = match kind {
+        Kind::Service => Thing::Service,
+        Kind::User => Thing::User,
+        Kind::App => Thing::App,
+        Kind::Permission => Thing::Permission,
+        Kind::Volume => Thing::Volume,
+        Kind::Device => Thing::Device,
+        _ => return alloc::vec::Vec::new(),
+    };
+    let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
+        return alloc::vec::Vec::new();
+    };
+    let mut names = directory.names(thing);
+    names.retain(|n| n.starts_with(prefix));
+    names
 }

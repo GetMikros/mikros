@@ -606,6 +606,7 @@ dependencies = [
 name = "mikros-command"
 version = "0.0.0"
 dependencies = [
+ "mikros-cli",
  "mikros-rt",
 ]
 
