@@ -4,6 +4,11 @@
 //!   controller: the test init serves `tests/root.img` with
 //!   `test=root-disk`, until the process manager has switched to the root
 //!   and serves `/system/boot/efi`;
+//! - the root clone run: as the root disk run behind an NVMe controller,
+//!   with `test=root-clone` and a copy of the boot disk as the scratch
+//!   disk behind the AHCI controller, whose root and EFI system
+//!   partitions the device manager must log and ignore (MIKSPEC-0045.R21,
+//!   MIKSPEC-0025.R71);
 //! - the bus restart runs, behind a virtio-blk, an NVMe and the AHCI
 //!   controller: the test init serves `tests/bus.img` with
 //!   `test=bus-restart`, whose restart probe kills the PCI bus driver
@@ -27,14 +32,17 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// A kind of run: its name, the test init's scenario, the line the
-/// test init logs once it passed, other lines it must log, and the
-/// controllers the boot disk is put on, with the name of each run.
+/// test init logs once it passed, other lines it must log, the
+/// controllers the boot disk is put on, with the name of each run, and
+/// whether the scratch disk behind the AHCI controller holds a copy of
+/// the boot disk.
 struct Runs {
     name: &'static str,
     scenario: &'static str,
     passed: &'static str,
     also: &'static [&'static str],
     disks: &'static [(&'static str, Disk)],
+    clone: bool,
 }
 
 const ROOT_DISK: Runs = Runs {
@@ -43,6 +51,16 @@ const ROOT_DISK: Runs = Runs {
     passed: "SCENARIO root-disk PASSED",
     also: &[],
     disks: &[("nvme", Disk::Nvme), ("ahci", Disk::Ahci)],
+    clone: false,
+};
+
+const ROOT_CLONE: Runs = Runs {
+    name: "root clone",
+    scenario: "test=root-clone",
+    passed: "SCENARIO root-clone PASSED",
+    also: &[],
+    disks: &[("nvme", Disk::Nvme)],
+    clone: true,
 };
 
 const ACPI_RESTART: Runs = Runs {
@@ -51,6 +69,7 @@ const ACPI_RESTART: Runs = Runs {
     passed: "SCENARIO acpi-restart PASSED",
     also: &[],
     disks: &[("virtio", Disk::Virtio)],
+    clone: false,
 };
 
 const BUS_RESTART: Runs = Runs {
@@ -65,6 +84,7 @@ const BUS_RESTART: Runs = Runs {
         ("nvme", Disk::Nvme),
         ("ahci", Disk::Ahci),
     ],
+    clone: false,
 };
 
 /// Why a run that logs `passed` once it passes, and each line of `also`,
@@ -82,7 +102,8 @@ fn verdict(code: Option<i32>, serial: &str, passed: &str, also: &[&str]) -> Resu
 }
 
 /// Boots the root disk runs of the components `built` of the build kind
-/// `kind`, each in a directory of `dir` named after its controller.
+/// `kind`, each in a directory of `dir` named after its controller, and
+/// then the root clone run in `clone` of `dir`.
 pub fn run(
     machine: &MachineArgs,
     kind: Kind,
@@ -90,7 +111,15 @@ pub fn run(
     dir: &Path,
     timeout: Duration,
 ) -> Result<()> {
-    run_all(&ROOT_DISK, machine, kind, built, dir, timeout)
+    run_all(&ROOT_DISK, machine, kind, built, dir, timeout)?;
+    run_all(
+        &ROOT_CLONE,
+        machine,
+        kind,
+        built,
+        &dir.join("clone"),
+        timeout,
+    )
 }
 
 /// Boots the bus restart runs, as `run` does the root disk runs.
@@ -131,7 +160,17 @@ fn run_all(
         let mut machine = machine.clone();
         machine.disk = disk;
         let log = dir.join("serial.log");
-        let mut qemu = scenario::start(&machine, &dir, false)?;
+        // The AHCI scratch disk's image, written with the scratch disks,
+        // becomes a copy of the boot disk. Its driver is in the boot image,
+        // unlike xhci, which the test image's root does not have.
+        let clone = |dir: &Path| -> Result<()> {
+            fs::copy(dir.join("disk.img"), dir.join("ahci.img"))?;
+            Ok(())
+        };
+        let mut qemu = match runs.clone {
+            true => scenario::start_with(&machine, &dir, false, &clone, &[], false)?,
+            false => scenario::start(&machine, &dir, false)?,
+        };
         let deadline = Instant::now() + timeout;
         let status = loop {
             if let Some(status) = qemu.try_wait()? {

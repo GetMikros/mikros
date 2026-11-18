@@ -3964,6 +3964,7 @@ mod manager {
     //! The process manager's start, with this test standing in for init.
 
     use super::{TERMINATED, TIMED_OUT, boot_file, exit_code, load_and_start_keeping};
+    use alloc::vec::Vec;
     use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
     use mikros_rt::interfaces::mikros::base::Status;
     use mikros_rt::interfaces::mikros::process::{
@@ -5672,6 +5673,20 @@ mod manager {
     /// stops QEMU with `PASSED` once the process manager has switched to
     /// the root and serves `/system/boot/efi`, or with `FAILED`.
     pub fn root_disk_scenario(s: &Startup) -> i64 {
+        root_scenario(s, "root-disk", &[])
+    }
+
+    /// The `root-clone` scenario: as `root-disk`, with a copy of the boot
+    /// disk on another disk, whose root and EFI system partitions the
+    /// device manager logs and ignores, since they are not on the boot
+    /// disk (MIKSPEC-0045.R21, MIKSPEC-0025.R71).
+    pub fn root_clone_scenario(s: &Startup) -> i64 {
+        root_scenario(s, "root-clone", &[(b"device-manager: ignoring device ", 2)])
+    }
+
+    /// The root disk scenario `name`, which also expects the lines of
+    /// `more`.
+    fn root_scenario(s: &Startup, name: &str, more: &[(&[u8], usize)]) -> i64 {
         // The root's disk, its partitions and file systems take about two
         // minutes when the processor is emulated.
         const ROOT_SECONDS: i64 = 300;
@@ -5708,23 +5723,20 @@ mod manager {
             b"terminated with code",
         ];
         if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
-            mikros_rt::log!(
-                Error,
-                "SCENARIO root-disk: {} failed ({})",
-                f.what,
-                f.status
-            );
+            mikros_rt::log!(Error, "SCENARIO {name}: {} failed ({})", f.what, f.status);
             return 1;
         }
-        match device_manager_logs(s, b"tests/root.img", false, ROOT_SECONDS, EXPECTED, FAILED) {
+        let expected: Vec<(&[u8], usize)> = EXPECTED.iter().chain(more).copied().collect();
+        let image = b"tests/root.img";
+        match device_manager_logs(s, image, false, ROOT_SECONDS, &expected, FAILED) {
             Ok(true) => {
-                mikros_rt::log!(Info, "SCENARIO root-disk PASSED");
+                mikros_rt::log!(Info, "SCENARIO {name} PASSED");
                 mikros_test::exit_qemu(mikros_test::PASSED)
             }
-            Ok(false) => mikros_rt::log!(Error, "SCENARIO root-disk FAILED"),
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO {name} FAILED"),
             Err(f) => mikros_rt::log!(
                 Error,
-                "SCENARIO root-disk FAILED: {} failed ({})",
+                "SCENARIO {name} FAILED: {} failed ({})",
                 f.what,
                 f.status
             ),
@@ -6725,6 +6737,9 @@ fn scenario(s: &Startup) -> Option<i64> {
         "usb-volumes" => manager::usb_volumes_scenario(s),
         // The runner puts the boot disk on an NVMe or an AHCI controller.
         "root-disk" => manager::root_disk_scenario(s),
+        // The runner puts the boot disk on an NVMe controller and a copy
+        // of it behind the AHCI controller.
+        "root-clone" => manager::root_clone_scenario(s),
         // The runner puts the boot disk on a virtio-blk, NVMe or AHCI
         // controller.
         "bus-restart" => manager::bus_restart_scenario(s),
