@@ -36,6 +36,22 @@ impl Disk for BootDisk {
     }
 }
 
+impl BootDisk {
+    /// Writes `data` at `offset`.
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), IoError> {
+        self.io
+            .write_disk(self.media, offset, data)
+            .map_err(|e| IoError(e.status().0))
+    }
+
+    /// Writes each of `writes`, given as offset and bytes, in order.
+    fn write_all(&mut self, writes: &[(u64, &[u8])]) -> Result<(), IoError> {
+        writes
+            .iter()
+            .try_for_each(|&(at, data)| self.write(at, data))
+    }
+}
+
 /// The file system of the system partition.
 pub type System = Volume<Slice<BootDisk>>;
 
@@ -67,6 +83,49 @@ fn nodes(path: &DevicePath) -> Vec<(u8, u8, Vec<u8>)> {
         .collect()
 }
 
+/// The boot disk, its block size and last block, its handle and the
+/// nodes of its device path.
+type OpenDisk = (BootDisk, u32, u64, Handle, Vec<(u8, u8, Vec<u8>)>);
+
+/// Gives the boot disk of `device` and the used entries of its GUID
+/// partition table new random GUIDs from `random`, writes both tables,
+/// and then calls `write_conf`, which writes `boot.conf` again
+/// (MIKSPEC-0004.R41). Returns the partition GUIDs before and after.
+/// When a step fails, writes the old tables back, so that the disk is as
+/// it was, and says why.
+pub fn renew_guids(
+    device: Handle,
+    random: &mut dyn FnMut(&mut [u8]) -> bool,
+    write_conf: impl FnOnce() -> Result<(), String>,
+) -> Result<Vec<gpt::renew::Renamed>, String> {
+    let (mut disk, block_size, last_lba, handle, _) =
+        open_disk(device).map_err(|f| alloc::format!("{f}"))?;
+    let old = gpt::renew::read(&mut disk, block_size, last_lba)
+        .map_err(|e| alloc::format!("reading the partition tables: {e}"))?
+        .ok_or("the disk does not have two valid partition tables that match")?;
+    let (new, renamed) =
+        gpt::renew::renewed(&old, random).ok_or("EFI_RNG_PROTOCOL gave no random bytes")?;
+    let flush = || {
+        if let Some(mut block) = protocol::<BlockIO>(handle) {
+            let _ = block.flush_blocks();
+        }
+    };
+    let restore = |disk: &mut BootDisk| {
+        let _ = disk.write_all(&gpt::renew::writes(&old));
+        flush();
+    };
+    if let Err(e) = disk.write_all(&gpt::renew::writes(&new)) {
+        restore(&mut disk);
+        return Err(alloc::format!("writing the partition tables: {e}"));
+    }
+    flush();
+    if let Err(why) = write_conf() {
+        restore(&mut disk);
+        return Err(why);
+    }
+    Ok(renamed)
+}
+
 /// The location of the disk `handle` with the device path `nodes` for
 /// `boot_disk=` (MIKSPEC-0004.R40), or None, with a warning, when its path
 /// leads to no PCI function or holds a node that no part of a location
@@ -91,10 +150,19 @@ fn location(handle: Handle, nodes: &[(u8, u8, Vec<u8>)]) -> Option<String> {
     }
 }
 
+/// The boot disk with its block size, last block and location, as
+/// `open_disk` finds it.
+fn boot_disk(device: Handle) -> Result<(BootDisk, u32, u64, Option<String>), Failure> {
+    let (disk, block_size, last_lba, handle, nodes) = open_disk(device)?;
+    let at = location(handle, &nodes);
+    Ok((disk, block_size, last_lba, at))
+}
+
 /// The boot disk, whose device path is that of `device`, the bootloader's
 /// device, without its last node, which must be a hard drive media node;
-/// with its block size, last block and location.
-fn boot_disk(device: Handle) -> Result<(BootDisk, u32, u64, Option<String>), Failure> {
+/// with its block size and last block, its handle and the nodes of its
+/// device path.
+fn open_disk(device: Handle) -> Result<OpenDisk, Failure> {
     let step = "finding the boot disk";
     let path = protocol::<DevicePath>(device)
         .ok_or_else(|| Failure::new(step, "the boot device has no device path"))?;
@@ -117,8 +185,7 @@ fn boot_disk(device: Handle) -> Result<(BootDisk, u32, u64, Option<String>), Fai
             io,
             media: media.media_id(),
         };
-        let at = location(handle, &wanted);
-        return Ok((disk, media.block_size(), media.last_block(), at));
+        return Ok((disk, media.block_size(), media.last_block(), handle, wanted));
     }
     Err(Failure::new(step, "no disk has the boot partition's path"))
 }

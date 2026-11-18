@@ -125,14 +125,27 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().expect("8 bytes"))
 }
 
-/// The partitions of the table whose header is at `lba`, when the header
-/// and its entry array are valid.
-fn table(
+/// A valid table as it lies on the disk: its header block and entry
+/// array, the byte offsets of both, and the sizes of the header and of
+/// each entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Raw {
+    pub header_at: u64,
+    pub header: Vec<u8>,
+    pub entries_at: u64,
+    pub entries: Vec<u8>,
+    pub header_size: usize,
+    pub entry_size: usize,
+}
+
+/// The table whose header is at `lba`, when the header and its entry
+/// array are valid.
+pub fn raw(
     disk: &mut impl Disk,
     block_size: u32,
     last_lba: u64,
     lba: u64,
-) -> Result<Option<Vec<Partition>>, IoError> {
+) -> Result<Option<Raw>, IoError> {
     let block = u64::from(block_size);
     let mut header = vec![0; block_size as usize];
     disk.read(lba * block, &mut header)?;
@@ -162,8 +175,30 @@ fn table(
     if crc32(&entries) != u32_at(&header, 88) {
         return Ok(None);
     }
-    let partitions = entries
-        .chunks_exact(entry_size as usize)
+    Ok(Some(Raw {
+        header_at: lba * block,
+        header,
+        entries_at: entries_lba * block,
+        entries,
+        header_size: size as usize,
+        entry_size: entry_size as usize,
+    }))
+}
+
+/// The partitions of the table whose header is at `lba`, when the header
+/// and its entry array are valid.
+fn table(
+    disk: &mut impl Disk,
+    block_size: u32,
+    last_lba: u64,
+    lba: u64,
+) -> Result<Option<Vec<Partition>>, IoError> {
+    let Some(raw) = raw(disk, block_size, last_lba, lba)? else {
+        return Ok(None);
+    };
+    let partitions = raw
+        .entries
+        .chunks_exact(raw.entry_size)
         .filter(|e| e[..16] != [0; 16])
         .map(|e| Partition {
             type_guid: e[..16].try_into().expect("16 bytes"),
@@ -213,5 +248,6 @@ pub fn system_partition(
     }
 }
 
+pub mod renew;
 #[cfg(test)]
 mod tests;

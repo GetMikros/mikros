@@ -1,6 +1,7 @@
 //! Finding the kernel command line.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use boot_protocol::CMDLINE_MAX;
 use core::fmt;
 
@@ -217,6 +218,41 @@ pub fn with_root(cmdline: String, guid: &[u8; 16]) -> String {
         cmdline,
         &alloc::format!("root=PARTUUID={}", guid_text(guid)),
     )
+}
+
+/// The word of `boot.conf` that asks for new partition GUIDs.
+pub const RENEW_GUIDS: &str = "renew_guids";
+
+/// Whether one of the words of `conf` is `RENEW_GUIDS`.
+pub fn renews_guids(conf: &str) -> bool {
+    conf.split_ascii_whitespace()
+        .any(|word| word == RENEW_GUIDS)
+}
+
+/// The words of `conf` that `drop` keeps out, the others separated by
+/// single spaces.
+fn without(conf: &str, drop: impl Fn(&str) -> bool) -> String {
+    let kept: Vec<&str> = conf
+        .split_ascii_whitespace()
+        .filter(|word| !drop(word))
+        .collect();
+    kept.join(" ")
+}
+
+/// `conf` without `RENEW_GUIDS`, as it is used when the renewal fails.
+pub fn without_renewal(conf: &str) -> String {
+    without(conf, |word| word == RENEW_GUIDS)
+}
+
+/// `conf` as `boot.conf` is written once the GUIDs are new: without
+/// `RENEW_GUIDS` and without the `root=PARTUUID=` and `esp=PARTUUID=`
+/// options, which then name the new GUIDs once appended.
+pub fn renewed(conf: &str) -> String {
+    without(conf, |word| {
+        word == RENEW_GUIDS
+            || word.starts_with("root=PARTUUID=")
+            || word.starts_with("esp=PARTUUID=")
+    })
 }
 
 /// `cmdline` with `boot_disk=<location>` appended, unless it has an
@@ -442,6 +478,19 @@ mod tests {
             with_root(String::from("myroot=x"), &guid),
             alloc::format!("myroot=x {root}")
         );
+    }
+
+    #[test]
+    fn drops_the_renewal_and_the_old_guids() {
+        let conf = "root=PARTUUID=0-1 quiet  renew_guids\tesp=PARTUUID=2-3 rootwait";
+        assert!(renews_guids(conf));
+        assert!(!renews_guids("renew_guids=no renew"));
+        assert_eq!(renewed(conf), "quiet rootwait");
+        assert_eq!(
+            without_renewal(conf),
+            "root=PARTUUID=0-1 quiet esp=PARTUUID=2-3 rootwait"
+        );
+        assert_eq!(renewed("root=bootfs renew_guids"), "root=bootfs");
     }
 
     #[test]

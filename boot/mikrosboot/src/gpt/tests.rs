@@ -1,8 +1,8 @@
 use super::*;
 use alloc::string::ToString;
 
-const BLOCK: usize = 512;
-const BLOCKS: u64 = 64;
+pub(super) const BLOCK: usize = 512;
+pub(super) const BLOCKS: u64 = 64;
 const ESP_TYPE: [u8; 16] = [
     0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
 ];
@@ -42,14 +42,14 @@ fn write_table(disk: &mut [u8], lba: u64, entries: u64, parts: &[[u8; 128]]) {
     disk[lba as usize * BLOCK..(lba as usize + 1) * BLOCK].copy_from_slice(&h);
 }
 
-fn disk(parts: &[[u8; 128]]) -> Vec<u8> {
+pub(super) fn disk(parts: &[[u8; 128]]) -> Vec<u8> {
     let mut d = vec![0u8; BLOCKS as usize * BLOCK];
     write_table(&mut d, 1, 2, parts);
     write_table(&mut d, BLOCKS - 1, BLOCKS - 5, parts);
     d
 }
 
-fn two_roots() -> Vec<[u8; 128]> {
+pub(super) fn two_roots() -> Vec<[u8; 128]> {
     vec![
         entry(ESP_TYPE, guid(1), 10, 19),
         entry(ROOT_TYPE, guid(2), 20, 39),

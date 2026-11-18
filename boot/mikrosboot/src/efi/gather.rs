@@ -58,28 +58,80 @@ fn exists(fs: &mut FileSystem, path: &str) -> Result<bool, Failure> {
 }
 
 /// The command line of `boot.conf` and the load options, with the boot
-/// partition, and the bootloader's device.
+/// partition, and the bootloader's device. When `boot.conf` asks for it,
+/// the boot disk's partition GUIDs are renewed first, and `boot.conf` is
+/// written again without the request and the old GUIDs (MIKSPEC-0004.R41).
 fn command_line(fs: &mut FileSystem) -> Result<(String, Handle), Failure> {
     let step = "finding the command line";
     let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
         .map_err(|e| Failure::new(step, alloc::format!("{e}")))?;
-    let conf = match exists(fs, BOOT_CONF_PATH)? {
+    let device = image
+        .device()
+        .ok_or_else(|| Failure::new(step, "the bootloader has no device"))?;
+    let mut conf = match exists(fs, BOOT_CONF_PATH)? {
         true => {
             let contents = read(fs, BOOT_CONF_PATH, "reading \\EFI\\Mikros\\boot.conf")?;
             Some(cmdline::from_boot_conf(&contents).map_err(|e| Failure::new(step, e))?)
         }
         false => None,
     };
+    let mut renamed = Vec::new();
+    if let Some(text) = conf.take_if(|text| cmdline::renews_guids(text)) {
+        let (kept, renewal) = renew_guids(fs, device, &text);
+        if let Some(found) = renewal {
+            renamed = found;
+        }
+        conf = Some(kept);
+    }
     let options = image
         .load_options_as_bytes()
         .and_then(cmdline::from_load_options);
     let line = cmdline::compose(conf, options);
     cmdline::check_len(&line).map_err(|e| Failure::new(step, e))?;
-    let device = image
-        .device()
-        .ok_or_else(|| Failure::new(step, "the bootloader has no device"))?;
+    // The firmware's device path still names the partition's old GUID.
+    let esp = boot_partition(&image).map(|guid| {
+        let new = renamed.iter().find(|(old, _)| *old == guid);
+        new.map_or(guid, |&(_, new)| new)
+    });
     // The limit applies before the boot partition is named.
-    Ok((cmdline::with_esp(line, boot_partition(&image)), device))
+    Ok((cmdline::with_esp(line, esp), device))
+}
+
+/// Renews the partition GUIDs of the boot disk of `device` and writes
+/// `boot.conf`, whose text is `conf`, again: the text to boot with and
+/// the GUIDs before and after. When that fails, the disk stays as it was,
+/// a warning says why, and the system boots as if `conf` did not ask.
+fn renew_guids(
+    fs: &mut FileSystem,
+    device: Handle,
+    conf: &str,
+) -> (String, Option<Vec<mikrosboot::gpt::renew::Renamed>>) {
+    let renewed = cmdline::renewed(conf);
+    let rng = boot::get_handle_for_protocol::<Rng>()
+        .ok()
+        .and_then(|handle| boot::open_protocol_exclusive::<Rng>(handle).ok());
+    let result = match rng {
+        None => Err(String::from("there is no EFI_RNG_PROTOCOL")),
+        Some(mut rng) => {
+            let mut random = |bytes: &mut [u8]| rng.get_rng(None, bytes).is_ok();
+            let write_conf = || {
+                let name = CString16::try_from(BOOT_CONF_PATH).map_err(|_| "bad path")?;
+                let text = alloc::format!("{renewed}\n");
+                fs.write(name.as_ref(), text.as_bytes())
+                    .map_err(|e| alloc::format!("writing boot.conf: {e}"))
+            };
+            super::partition::renew_guids(device, &mut random, write_conf)
+        }
+    };
+    match result {
+        Ok(renamed) => (renewed, Some(renamed)),
+        Err(why) => {
+            super::warn(format_args!(
+                "renewing the partition GUIDs failed, so they stay: {why}"
+            ));
+            (cmdline::without_renewal(conf), None)
+        }
+    }
 }
 
 /// The partition GUID of the GPT partition the bootloader was loaded
