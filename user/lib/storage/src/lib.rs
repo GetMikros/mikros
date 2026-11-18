@@ -17,6 +17,7 @@ mod dma;
 mod memory;
 mod mmio;
 mod service;
+mod unconfirmed;
 mod writer;
 
 pub use block::serve_bus;
@@ -25,6 +26,7 @@ pub use dma::Contiguous;
 pub use memory::{PAGE, pages, pinned, pinned_with};
 pub use mmio::Mmio;
 pub use service::serve_provider;
+pub use unconfirmed::{Mark, Unconfirmed, release};
 pub use writer::Writer;
 
 /// One millisecond, in nanoseconds of the monotonic clock.
@@ -77,6 +79,12 @@ pub trait Disk: 'static {
     /// address memory above it.
     fn below_4g(&self) -> bool {
         false
+    }
+    /// The count of the device's resets whose stop it did not confirm,
+    /// for a driver that asks for such resets: a buffer pinned before
+    /// one is closed into the quarantine when it goes.
+    fn unconfirmed(&self) -> Option<&Unconfirmed> {
+        None
     }
     /// Reads (`write` false) or writes the blocks from `block` that the
     /// `len` bytes at `offset` in the pages at the physical addresses

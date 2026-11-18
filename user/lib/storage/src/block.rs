@@ -3,7 +3,7 @@
 //! lock.
 
 use crate::memory::BELOW_4G;
-use crate::{Disk, PAGE, Writer, pages, pinned_with};
+use crate::{Disk, Mark, PAGE, Writer, pages, pinned_with};
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -27,20 +27,21 @@ const CLIENT_RIGHTS: u32 = 1 << 0 | 1 << 1 | 1 << 2 | 1 << 3 | 1 << 5 | 1 << 9;
 
 /// A buffer: its size, its memory object, and for a disk with a bus
 /// transaction initiator the physical addresses of its pages and its
-/// pin, which is unpinned when the buffer goes.
+/// pin, which is unpinned when the buffer goes, or closed into the
+/// quarantine when the device did not confirm a reset since it was
+/// pinned, as `mark` tells.
 struct Buffer {
     size: u64,
     pages: Vec<u64>,
     mem: OwnedHandle,
     pmt: Option<sys::Handle>,
+    mark: Option<Mark>,
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
         if let Some(pmt) = self.pmt {
-            // SAFETY: the call takes no pointers; it also closes the
-            // handle, which the buffer owns.
-            unsafe { sys::pmt_unpin(pmt) };
+            crate::release(pmt, self.mark.as_ref());
         }
     }
 }
@@ -200,12 +201,14 @@ fn create_buffer(
     }
     let buffer = match disk.bti() {
         Some(bti) => {
+            let mark = disk.unconfirmed().map(|u| u.mark());
             let (mem, pmt) = pinned_with(disk.dma(), bti, size, disk.below_4g())?;
             Buffer {
                 size,
                 pages: pages(&mem, size / PAGE)?,
                 mem,
                 pmt: Some(pmt.into_raw()),
+                mark,
             }
         }
         None => Buffer {
@@ -213,6 +216,7 @@ fn create_buffer(
             pages: Vec::new(),
             mem: unpinned_buffer(disk.dma(), size, disk.below_4g())?,
             pmt: None,
+            mark: None,
         },
     };
     let mem = &buffer.mem;
