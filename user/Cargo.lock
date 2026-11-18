@@ -358,6 +358,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "false"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "fat"
 version = "0.0.0"
 dependencies = [
@@ -1448,6 +1456,14 @@ dependencies = [
 
 [[package]]
 name = "touch"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
+name = "true"
 version = "0.0.0"
 dependencies = [
  "mikros-cli",
