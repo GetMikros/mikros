@@ -152,10 +152,11 @@ enum Added {
 /// was kept for `caller`'s restarted driver, with the same name and
 /// hardware IDs, is given back instead. The PCI function that has the
 /// boot framebuffer also gets `display:boot-framebuffer` after its own
-/// hardware IDs, and the framebuffer's properties. Fails with
-/// `INVALID_ARGS` when a hardware ID does not have the form of one.
-/// Returns its ID and what was done, or None, adding nothing, once
-/// device `caller` is gone.
+/// hardware IDs, and the framebuffer's properties, and the boot's EFI
+/// system partition `boot_esp` (MIKSPEC-0025.R74). Fails with
+/// `INVALID_ARGS` when a hardware ID does not have the form of one, or
+/// when the caller gives `boot_esp` itself. Returns its ID and what was
+/// done, or None, adding nothing, once device `caller` is gone.
 async fn add_device(
     m: &Manager,
     caller: u64,
@@ -163,6 +164,10 @@ async fn add_device(
 ) -> Option<Result<(u64, Added), Status>> {
     let ids = &request.hardware_ids;
     if !ids.iter().all(|id| mikros_manifest::is_hardware_id(id)) {
+        return Some(Err(Status::InvalidArgs));
+    }
+    // Only the device manager marks the boot's EFI system partition.
+    if request.properties.iter().any(|p| p.key == cache::BOOT_ESP) {
         return Some(Err(Status::InvalidArgs));
     }
     let boot = m
@@ -197,6 +202,9 @@ async fn add_device(
     let mut devices = m.devices.borrow_mut();
     // The device may have been removed while its driver's request waited.
     devices.get(caller)?;
+    if cache::applies(ids) && m.profiles.boot_esp(&properties, caller, &devices) {
+        properties.push((cache::BOOT_ESP.into(), "true".into()));
+    }
     cache::set(ids, &mut properties, devices.get(caller), &profiles);
     let id = devices.add(
         request.name,

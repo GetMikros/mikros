@@ -5297,7 +5297,8 @@ mod manager {
     /// each disk and partition the property `cache`, here `write-back`,
     /// since the root partition's file system, which the device manager
     /// connects to once it is published, has no storage profiles, and
-    /// `quick-disconnect` for the USB disk and its partition. The
+    /// `quick-disconnect` for the USB disk and its partition and for the
+    /// boot's EFI system partition (MIKSPEC-0025.R73). The
     /// partition driver reads each disk's GPT and adds its partitions:
     /// the scratch partition `part-1` of each scratch disk, and the EFI
     /// system partition `part-1` and root partition `part-2` of the test
@@ -5437,10 +5438,11 @@ mod manager {
             // `mikros`, and the USB disk.
             (b", serial mikros, removable false", 3),
             (b", serial mikros, removable true", 1),
-            // The three fixed disks and the six partitions on them, none
-            // of them removable, and the USB disk and its partition.
-            (b", cache write-back", 9),
-            (b", cache quick-disconnect", 2),
+            // The three fixed disks and five of the six partitions on
+            // them, none of them removable; the boot's EFI system
+            // partition, and the USB disk and its partition.
+            (b", cache write-back", 8),
+            (b", cache quick-disconnect", 3),
             // The root partition's file system, which has no storage
             // profiles, so the defaults above apply.
             (

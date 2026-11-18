@@ -33,6 +33,9 @@ const PARTITION_GUID: &str = "partition_guid";
 /// disk has for the disk's location, and the hardware ID of the root
 /// devices of PCI host bridges, whose children are PCI functions.
 const LOCATION: &str = "location";
+/// The property that only the boot's EFI system partition gets, which
+/// parents may not give (MIKSPEC-0025.R74).
+pub const BOOT_ESP: &str = "boot_esp";
 const HOST_BRIDGE: &str = "platform:pci-host-ecam";
 /// The root partition's properties: the booted system version and
 /// whether the system is live.
@@ -293,6 +296,21 @@ impl Profiles {
         root_here && first_esp.is_some_and(|d| d.id == device.id)
     }
 
+    /// Whether the partition with `properties`, which the driver of disk
+    /// `disk` adds, among `devices`, is the boot's EFI system partition:
+    /// the one whose GUID `esp=PARTUUID=` gives, on the disk at the
+    /// location of `boot_disk=` when the command line has it; none
+    /// without `esp=` (MIKSPEC-0025.R74).
+    pub fn boot_esp(&self, properties: &[(String, String)], disk: u64, devices: &Devices) -> bool {
+        let Some(guid) = &self.esp else {
+            return false;
+        };
+        let ours = property(properties, PARTITION_GUID);
+        let named = ours.is_some_and(|ours| ours.eq_ignore_ascii_case(guid));
+        let on_disk = self.boot_location.is_none() || self.boot_disk(disk, devices);
+        named && on_disk
+    }
+
     /// Whether device `id` is the root partition that `claim_root` chose.
     pub fn is_root(&self, id: u64) -> bool {
         self.root_device.get() == Some(id)
@@ -400,6 +418,8 @@ pub fn set(
     );
     let value = match chosen {
         Some(cache) => cache.name(),
+        // The boot's EFI system partition, which is written every boot.
+        None if property(properties, BOOT_ESP) == Some("true") => Cache::QuickDisconnect.name(),
         None if ids.iter().any(|id| id == DISK) => match property(properties, REMOVABLE) {
             Some("true") => Cache::QuickDisconnect.name(),
             _ => Cache::WriteBack.name(),
