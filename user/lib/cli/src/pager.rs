@@ -23,9 +23,10 @@ pub fn needs_paging(text: &str, rows_cols: (usize, usize)) -> bool {
     rows(text, columns) > terminal_rows.saturating_sub(1)
 }
 
-/// Writes `text` to standard output, through less when standard output
-/// is a terminal that it would not fit on, and directly when less does
-/// not start.
+/// Writes `text`, a command's help, to standard output, through less when
+/// standard output is a terminal that it would not fit on, and directly
+/// when less does not start, for commands that write their help
+/// themselves.
 pub fn show(text: &str) {
     let paged = std::io::stdout().is_terminal()
         && window().is_some_and(|size| needs_paging(text, size))

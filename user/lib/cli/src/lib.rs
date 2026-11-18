@@ -17,6 +17,7 @@ pub mod time;
 mod usage;
 
 pub use colour::{Paint, Role};
+pub use pager::show as show_help;
 pub use spec::{Kind, Operand, Opt, Parsed, Run, Spec};
 pub use start::{complain, start};
 pub use usage::declared;
