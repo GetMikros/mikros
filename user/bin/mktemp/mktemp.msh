@@ -1,0 +1,13 @@
+# What `mktemp` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern mktemp(
+    template?: string "the name to make, ending in at least three X",
+    --directory(-d): bool "make a folder, not a file",
+    --dry-run(-u): bool "make nothing, only write a name not taken",
+    --quiet(-q): bool "say nothing when the file or folder cannot be made",
+    --tmpdir(-p): folder "make it in this folder",
+    -t: bool "take the template as a name without folders",
+    --suffix: string "add this after the X of the template",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
