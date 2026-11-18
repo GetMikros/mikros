@@ -199,6 +199,7 @@ fn all() -> Result<(), Failed> {
     let installer = installer()?;
     service(&installer)?;
     driver(&installer)?;
+    refused_drivers(&installer)?;
     kept(&installer)?;
     protocol_names(&installer)?;
     components(&installer)?;
@@ -325,6 +326,33 @@ fn listed(installer: &InstallerClient, code: u8) -> Result<Vec<PackageInfo>, Fai
         }
         all.extend(page);
     }
+}
+
+/// Driver packages whose manifest needs the bus or matches a USB class
+/// are refused, before any permission is asked for (MIKSPEC-0101.R76).
+fn refused_drivers(installer: &InstallerClient) -> Result<(), Failed> {
+    let manifest = format!(
+        "id: {DRIVER}\nkind: driver\nversion: 1.0.0\nname: Thing\n\
+         description: Drives nothing.\ndriver: driver.yaml\n"
+    );
+    for refused in ["needs: [bus]\n", "match: [usb:c03]\n"] {
+        let driver = format!("name: {DRIVER}\nbinary: /system/drivers/{DRIVER}/thing\n{refused}");
+        let files = [
+            ("thing", read(ITSELF, 19)?, true),
+            ("driver.yaml", driver.into_bytes(), false),
+        ];
+        pack("refused.mika", &manifest, &files)?;
+        let package =
+            connection("refused.mika").ok_or(Failed(19, "opening refused.mika".into()))?;
+        let installed = installer.install(package, vec![], false, false, vec![], FOREVER);
+        let _ = std::fs::remove_file("refused.mika");
+        ensure(
+            matches!(installed, Ok(Err(Status::InvalidArgs))),
+            19,
+            &format!("a driver with {} gave {installed:?}", refused.trim_end()),
+        )?;
+    }
+    Ok(())
 }
 
 /// A package whose service provides a protocol that is not named under

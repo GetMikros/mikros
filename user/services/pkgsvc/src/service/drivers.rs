@@ -1,6 +1,8 @@
-//! Installed drivers (MIKSPEC-0101.R19, MIKSPEC-0101.R20): a driver package
+//! Installed drivers (MIKSPEC-0101.R76, MIKSPEC-0101.R20): a driver package
 //! holds the driver manifest `driver.yaml`, named as the package, which
-//! asks for no permission beyond those an installed driver may have; and
+//! asks for no permission beyond those an installed driver may have,
+//! needs neither `bus` nor `ioports`, and matches only the IDs that
+//! `mikros_manifest::installed_may_match` accepts; and
 //! the boot list `boot-modules` of the subvolume `drivers` names the
 //! installed drivers marked for boot, written again, and a new try of the
 //! boot started, whenever an install or a removal changes it.
@@ -27,8 +29,9 @@ const HEADER: &str = "# The installed drivers that the bootloader loads, written
 
 /// Checks the driver manifest of the driver package `package`, which
 /// `manifest` describes: `INVALID_ARGS` when it is missing, does not
-/// name the package, or asks for a permission that an installed driver
-/// may not have.
+/// name the package, needs or matches what an installed driver may not
+/// (the parser refuses those), or asks for a permission that an
+/// installed driver may not have.
 pub fn check<S: mikros_mika::format::Source + ?Sized>(
     package: &Package,
     given: &S,
@@ -42,7 +45,13 @@ pub fn check<S: mikros_mika::format::Source + ?Sized>(
         .read(given, entry)
         .map_err(|_| Status::InvalidArgs)?;
     let driver = mikros_manifest::parse_driver(&manifest.id, &bytes)
-        .map_err(|_| Status::InvalidArgs)?
+        .map_err(|e| {
+            eprintln!(
+                "pkgsvc: the driver {} has an invalid manifest: {:?} at line {}",
+                manifest.id, e.kind, e.line
+            );
+            Status::InvalidArgs
+        })?
         .driver;
     let forbidden = driver.permissions.iter().find(|p| {
         (p.starts_with("system.") && !ALLOWED.contains(&p.as_str())) || p.starts_with("admin.")
