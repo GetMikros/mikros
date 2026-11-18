@@ -22,7 +22,7 @@ use mikros_rt::interfaces::mikros::usb::{
     Setup, Speed,
 };
 use mikros_rt::sys;
-use mikros_storage::PAGE;
+use mikros_storage::{Mark, PAGE};
 
 const SET_ADDRESS: u8 = 5;
 const CLEAR_FEATURE: u8 = 1;
@@ -326,14 +326,14 @@ async fn interrupt(
 }
 
 /// A pin of pages of a class driver's buffer for the controller, which
-/// is unpinned when it goes.
-struct Pin(sys::Handle);
+/// is unpinned when it goes, or closed into the quarantine when an
+/// endpoint did not confirm a stop since it was pinned, as its mark
+/// tells (MIKSPEC-0080.R7).
+struct Pin(sys::Handle, Mark);
 
 impl Drop for Pin {
     fn drop(&mut self) {
-        // SAFETY: the call takes no pointers; it also closes the handle,
-        // which the pin owns.
-        unsafe { sys::pmt_unpin(self.0) };
+        mikros_storage::release(self.0, Some(&self.1));
     }
 }
 
@@ -367,6 +367,7 @@ async fn bulk(
         true => DEVICE_WRITE,
         false => DEVICE_READ,
     };
+    let mark = controller.unconfirmed.mark();
     let mut pmt = 0;
     // SAFETY: the out pointer is valid for the call.
     kernel(unsafe {
@@ -379,7 +380,7 @@ async fn bulk(
             &mut pmt,
         )
     })?;
-    let pin = Pin(pmt);
+    let pin = Pin(pmt, mark);
     let mut pages = vec![0u64; count as usize];
     for (i, chunk) in pages.chunks_mut(512).enumerate() {
         // SAFETY: the pointer describes `chunk`.

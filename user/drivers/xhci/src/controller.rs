@@ -18,7 +18,7 @@ use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
 use mikros_rt::sys;
-use mikros_storage::{Contiguous, MS, Mmio, PAGE, PciBus, now};
+use mikros_storage::{Contiguous, MS, Mmio, PAGE, PciBus, Unconfirmed, now};
 
 /// Completion codes.
 pub const CODE_SUCCESS: u8 = 1;
@@ -69,6 +69,10 @@ pub struct Controller {
     _interrupts: RefCell<Vec<OwnedHandle>>,
     /// Pages for the data of control and interrupt transfers.
     pages: RefCell<Vec<Contiguous>>,
+    /// The controller resets that the endpoints did not confirm by
+    /// stopping, after which class drivers' buffers pinned before are
+    /// closed into the quarantine rather than unpinned.
+    pub unconfirmed: Unconfirmed,
     /// The device manager, once the driver has its channel, through which
     /// an endpoint that does not stop has the controller reset.
     pub manager: RefCell<Option<Rc<DeviceManagerAsyncClient>>>,
@@ -139,6 +143,7 @@ impl Controller {
             port_changes: Waiters::default(),
             _interrupts: RefCell::new(Vec::new()),
             pages: RefCell::new(Vec::new()),
+            unconfirmed: Unconfirmed::default(),
             manager: RefCell::new(None),
         });
         controller.take_interrupts().await?;

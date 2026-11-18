@@ -13,7 +13,7 @@ use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
 use mikros_rt::sys;
-use mikros_storage::{Contiguous, MS, Mmio, PAGE, PciBus, now};
+use mikros_storage::{Contiguous, MS, Mmio, PAGE, PciBus, Unconfirmed, now};
 
 /// Admin opcodes.
 const CREATE_IO_SQ: u8 = 0x01;
@@ -76,6 +76,9 @@ pub struct Controller {
     /// Pages for PRP lists and Dataset Management ranges.
     pages: RefCell<Vec<Contiguous>>,
     resetting: Cell<bool>,
+    /// The resets that the controller did not confirm by stopping, after
+    /// which the memory pinned for it before is not reused.
+    pub unconfirmed: Unconfirmed,
     /// Set when a reset could not bring the I/O queues back.
     pub failed: Cell<bool>,
     /// The bus channel, which `Reconnect` replaces.
@@ -170,6 +173,7 @@ impl Controller {
             process,
             pages: RefCell::new(alloc::vec![page]),
             resetting: Cell::new(false),
+            unconfirmed: Unconfirmed::default(),
             failed: Cell::new(false),
             pci,
             manager: RefCell::new(None),
@@ -292,6 +296,7 @@ impl Controller {
                 Error,
                 "nvme: the controller did not stop; asking for its reset"
             );
+            self.unconfirmed.note();
             let manager = self.manager.borrow().clone();
             if let Some(manager) = manager {
                 let _ = manager.request_reset().await;

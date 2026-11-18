@@ -16,7 +16,7 @@ use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
 use mikros_rt::sys;
-use mikros_storage::{Contiguous, MS, Mmio, now};
+use mikros_storage::{Contiguous, MS, Mmio, Unconfirmed, now};
 
 /// The port registers, from the port's base.
 const CLB: u64 = 0x00;
@@ -106,6 +106,9 @@ pub struct Port {
     hba: Rc<Mmio>,
     base: u64,
     memory: Contiguous,
+    /// The resets that the port did not confirm by stopping, after which
+    /// the memory pinned for its disk before is not reused.
+    pub unconfirmed: Unconfirmed,
     slots: u32,
     /// How many slots queued commands may use.
     depth: Cell<u32>,
@@ -135,6 +138,7 @@ impl Port {
             hba,
             base: 0x100 + 0x80 * u64::from(number),
             memory,
+            unconfirmed: Unconfirmed::default(),
             slots,
             depth: Cell::new(1),
             state: RefCell::new(State {
@@ -460,6 +464,7 @@ impl Port {
                 "ahci: port {} did not stop; asking for the controller's reset",
                 self.number
             );
+            self.unconfirmed.note();
             let _ = manager.request_reset().await;
         }
         let sctl = self.read(SCTL) & !0xF;

@@ -7,7 +7,7 @@ use alloc::rc::Rc;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockFlags, BlockInfo};
-use mikros_storage::PAGE;
+use mikros_storage::{PAGE, Unconfirmed};
 
 /// I/O opcodes other than Read and Write, which `Command::read_write`
 /// makes.
@@ -88,8 +88,14 @@ impl Namespace {
         };
         let blocks = (len / u64::from(self.block_size)) as u32;
         let command = Command::read_write(write, self.nsid, block, blocks, prp1, prp2, fua);
+        let mark = self.controller.unconfirmed.mark();
         let done = self.controller.io.submit(command).await;
-        if let Some(page) = list {
+        // A PRP list that the controller had when it did not confirm a
+        // reset is dropped, closing its pin into the quarantine, rather
+        // than taken for another command's list (MIKSPEC-0080.R7).
+        if let Some(page) = list
+            && !mark.passed()
+        {
             self.controller.give_page(page);
         }
         done.map(drop).map_err(Status::from)
@@ -139,8 +145,12 @@ impl Namespace {
                 cdw: [ranges as u32 - 1, DEALLOCATE, 0, 0, 0, 0],
                 ..Command::default()
             };
+            let mark = self.controller.unconfirmed.mark();
             let done = self.controller.io.submit(command).await;
-            self.controller.give_page(page);
+            // As for PRP lists in `transfer`.
+            if !mark.passed() {
+                self.controller.give_page(page);
+            }
             done.map_err(Status::from)?;
         }
         Ok(())
@@ -173,6 +183,10 @@ impl mikros_storage::Disk for Namespace {
 
     fn bti(&self) -> Option<&OwnedHandle> {
         Some(&self.controller.bti)
+    }
+
+    fn unconfirmed(&self) -> Option<&Unconfirmed> {
+        Some(&self.controller.unconfirmed)
     }
 
     async fn transfer(

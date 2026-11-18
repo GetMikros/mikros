@@ -291,6 +291,7 @@ impl Endpoint {
                 self.id,
                 self.slot
             );
+            self.controller.unconfirmed.note();
             let manager = self.controller.manager.borrow().clone();
             if let Some(manager) = manager {
                 let _ = manager.request_reset().await;

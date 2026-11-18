@@ -12,7 +12,7 @@ use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockFlags, BlockInfo};
 use mikros_rt::sys;
-use mikros_storage::{Contiguous, PAGE};
+use mikros_storage::{Contiguous, PAGE, Unconfirmed};
 
 /// DATA SET MANAGEMENT's TRIM bit, the size of one LBA range entry and
 /// the most sectors in one.
@@ -147,8 +147,14 @@ impl Disk {
             Some(page) => page,
             None => self.memory.contiguous(PAGE)?,
         };
+        let mark = self.port.unconfirmed.mark();
         let done = self.trim(&page, &mut block, &mut count).await;
-        self.spare.borrow_mut().push(page);
+        // A page of ranges that the port had when it did not confirm a
+        // reset is dropped, closing its pin into the quarantine, rather
+        // than used again (MIKSPEC-0080.R7).
+        if !mark.passed() {
+            self.spare.borrow_mut().push(page);
+        }
         done
     }
 
@@ -212,6 +218,10 @@ impl mikros_storage::Disk for Disk {
 
     fn bti(&self) -> Option<&OwnedHandle> {
         Some(&self.memory.bti)
+    }
+
+    fn unconfirmed(&self) -> Option<&Unconfirmed> {
+        Some(&self.port.unconfirmed)
     }
 
     fn below_4g(&self) -> bool {
