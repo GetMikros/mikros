@@ -992,6 +992,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pwd"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"

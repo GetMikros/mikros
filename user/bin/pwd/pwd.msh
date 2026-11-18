@@ -1,0 +1,8 @@
+# What `pwd` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern pwd(
+    --logical(-L): bool "write $PWD when it names the current folder (the default)",
+    --physical(-P): bool "write the current folder with its links resolved",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
