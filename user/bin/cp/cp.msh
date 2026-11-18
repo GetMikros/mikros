@@ -1,0 +1,21 @@
+# What `cp` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern cp(
+    ...path: path "the sources, then the target unless -t names it",
+    --recursive(-r): bool "copy folders with what they hold",
+    -R: bool "copy folders with what they hold, as -r",
+    --force(-f): bool "remove a destination that cannot be opened, and try again",
+    --interactive(-i): bool "ask before replacing a destination",
+    --no-clobber(-n): bool "never replace a destination",
+    --update(-u): bool "copy only over destinations older than their source",
+    --verbose(-v): bool "name each file as it is copied",
+    --link(-l): bool "make hard links instead of copying",
+    --symbolic-link(-s): bool "make symbolic links instead of copying",
+    --target-directory(-t): folder "copy every source into this folder",
+    --no-target-directory(-T): bool "take the target as the destination, even a folder",
+    -p: bool "keep the times, the mode and the access control lists",
+    --archive(-a): bool "as -r -p, copying links as links",
+    --reflink: [auto always never] "share contents where the file system can: auto, always or never",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
