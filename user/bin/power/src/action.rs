@@ -1,15 +1,18 @@
-//! What power is asked to do, from its arguments.
+//! What power takes: the subcommands `off` and `restart`
+//! (MIKSPEC-0098.R29).
 
-use mikros_cli::{Arguments, Command};
+use mikros_cli::{Run, Spec};
 
-pub const COMMAND: Command = Command {
-    name: "power",
-    operands: "off|restart",
-    most: 1,
-    about: "Powers the machine off, or restarts it, once an administrator\n\
-            allowed it.",
-    options: &[],
-    values: &[],
+pub static COMMAND: Spec = Spec {
+    subcommands: &[
+        Spec::new("off", "Powers the machine off."),
+        Spec::new("restart", "Restarts the machine."),
+    ],
+    ..Spec::new(
+        "power",
+        "Powers the machine off, or restarts it, once an administrator\n\
+         allowed it.",
+    )
 };
 
 /// What power does.
@@ -17,49 +20,58 @@ pub const COMMAND: Command = Command {
 pub enum Action {
     Off,
     Restart,
-    Help,
-    /// The arguments are invalid, for the reason given.
-    Invalid(String),
 }
 
-/// What `arguments`, those after the command's name, ask.
-pub fn read(arguments: impl IntoIterator<Item = String>) -> Action {
-    match COMMAND.parse(arguments) {
-        Arguments::Help => Action::Help,
-        Arguments::Invalid(reason) => Action::Invalid(reason),
-        Arguments::Run { operands, .. } => match operands.first().map(String::as_str) {
-            Some("off") => Action::Off,
-            Some("restart") => Action::Restart,
-            Some(other) => Action::Invalid(format!("unknown action {other}")),
-            None => Action::Invalid("off or restart is missing".into()),
-        },
+/// What `run` asks, or why its arguments are invalid.
+pub fn read(run: &Run) -> Result<Action, String> {
+    match run.subcommand() {
+        Some("off") => Ok(Action::Off),
+        Some("restart") => Ok(Action::Restart),
+        _ => Err("off or restart is missing".into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mikros_cli::Parsed;
 
-    fn read_all(arguments: &[&str]) -> Action {
-        read(arguments.iter().map(|a| a.to_string()))
+    fn read_all(arguments: &[&str]) -> Result<Action, String> {
+        match COMMAND.parse(arguments.iter().map(|a| a.to_string())) {
+            Parsed::Run(run) => read(&run),
+            Parsed::Invalid(reason) => Err(reason),
+            Parsed::Help(path) => Err(format!("help for {path:?}")),
+        }
     }
 
     #[test]
     fn reads_the_actions() {
-        assert_eq!(read_all(&["off"]), Action::Off);
-        assert_eq!(read_all(&["restart"]), Action::Restart);
-        assert_eq!(read_all(&["off", "--help"]), Action::Help);
+        assert_eq!(read_all(&["off"]), Ok(Action::Off));
+        assert_eq!(read_all(&["restart"]), Ok(Action::Restart));
+        assert_eq!(
+            read_all(&["off", "--help"]),
+            Err("help for [\"off\"]".into())
+        );
     }
 
     #[test]
     fn refuses_other_arguments() {
-        let invalid = |reason: &str| Action::Invalid(reason.into());
+        let invalid = |reason: &str| Err(reason.into());
         assert_eq!(read_all(&[]), invalid("off or restart is missing"));
-        assert_eq!(read_all(&["sideways"]), invalid("unknown action sideways"));
+        assert_eq!(
+            read_all(&["sideways"]),
+            invalid("unexpected argument sideways")
+        );
         assert_eq!(
             read_all(&["off", "now"]),
             invalid("unexpected argument now")
         );
         assert_eq!(read_all(&["--now"]), invalid("unknown option --now"));
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/power.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
     }
 }

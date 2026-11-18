@@ -3,30 +3,15 @@
 //! the keys read from that terminal while a thread reads the input as far
 //! as the screen needs it.
 
+use crate::COMMAND;
 use crate::keys;
 use crate::pager::{Next, Pager, Shown};
-use mikros_cli::{Arguments, Command, FAILURE, INVALID, SUCCESS};
+use mikros_cli::{FAILURE, Kind, Run, SUCCESS, complain, start};
 use std::ffi::{c_int, c_short, c_ulong, c_void};
 use std::io::{ErrorKind, Read, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-
-const COMMAND: Command = Command {
-    name: "less",
-    operands: "[file]",
-    most: 1,
-    about: "Shows the file, or standard input when no file is named, one screen\n\
-            at a time. When standard output is not a terminal, copies the input\n\
-            to it. Space, f and Page Down show the next screen, b and Page Up\n\
-            the previous one, Enter, j and Down the next line, k and Up the\n\
-            previous one, g and Home the first line, G and End the last screen,\n\
-            / followed by text and Enter the next line that contains the text,\n\
-            n and N the next and the previous line that contains it again, and\n\
-            q quits.",
-    options: &[],
-    values: &[],
-};
 
 /// The descriptor of standard output, the terminal that less reads its
 /// keys from.
@@ -115,44 +100,44 @@ struct Shared {
 }
 
 pub fn main() -> ExitCode {
-    let file = match COMMAND.parse(std::env::args().skip(1)) {
-        Arguments::Run { operands, .. } => operands.into_iter().next(),
-        Arguments::Help => {
-            let _ = std::io::stdout().write_all(COMMAND.help().as_bytes());
-            return ExitCode::from(SUCCESS);
-        }
-        Arguments::Invalid(reason) => return fail(INVALID, &reason),
-    };
+    let run = start(&COMMAND, &nothing);
+    let file = run.operands.first().cloned();
     let (input, name): (Box<dyn Read + Send>, String) = match file {
         Some(path) => match std::fs::File::open(&path) {
             Ok(file) => (Box::new(file), path),
-            Err(error) => return fail(FAILURE, &format!("cannot open {path}: {error}")),
+            Err(error) => return fail(&run, &format!("cannot open {path}: {error}")),
         },
         None => (Box::new(std::io::stdin()), "(standard input)".into()),
     };
     match Terminal::of_output() {
-        Some(terminal) => page(&terminal, input, name),
-        None => copy(input, &name),
+        Some(terminal) => page(&run, &terminal, input, name),
+        None => copy(&run, input, &name),
     }
 }
 
-/// Writes the error `message` to standard error and gives `status`.
-fn fail(status: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
-    ExitCode::from(status)
+/// Names of system things for completion, of which less takes none.
+fn nothing(_: Kind, _: &str) -> Vec<String> {
+    Vec::new()
+}
+
+/// Writes the error `message` to standard error and gives the status of
+/// a failure.
+fn fail(run: &Run, message: &str) -> ExitCode {
+    complain(&COMMAND, run, message);
+    ExitCode::from(FAILURE)
 }
 
 /// Copies `input` to standard output as it is.
-fn copy(mut input: Box<dyn Read + Send>, name: &str) -> ExitCode {
+fn copy(run: &Run, mut input: Box<dyn Read + Send>, name: &str) -> ExitCode {
     let mut out = std::io::stdout().lock();
     match std::io::copy(&mut input, &mut out).and_then(|_| out.flush()) {
         Ok(()) => ExitCode::from(SUCCESS),
-        Err(error) => fail(FAILURE, &format!("cannot copy {name}: {error}")),
+        Err(error) => fail(run, &format!("cannot copy {name}: {error}")),
     }
 }
 
 /// Pages `input` on `terminal` until q or a signal ends it.
-fn page(terminal: &Terminal, input: Box<dyn Read + Send>, name: String) -> ExitCode {
+fn page(run: &Run, terminal: &Terminal, input: Box<dyn Read + Send>, name: String) -> ExitCode {
     let shared = Arc::new(Shared {
         input: Mutex::new(Input {
             fresh: Vec::new(),
@@ -213,7 +198,7 @@ fn page(terminal: &Terminal, input: Box<dyn Read + Send>, name: String) -> ExitC
     terminal.restore();
     let error = shared.input.lock().map(|i| i.error.clone()).unwrap_or(None);
     match error {
-        Some(error) => fail(FAILURE, &error),
+        Some(error) => fail(run, &error),
         None => ExitCode::from(SUCCESS),
     }
 }

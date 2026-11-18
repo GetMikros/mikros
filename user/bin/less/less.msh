@@ -1,5 +1,7 @@
-# What `less` takes, for msh's completion and colours.
+# What `less` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
 extern less(
-    file?: file "the file to show, standard input when none is given",
-    --help: bool "show how to use less"
-)
+    file?: file "the file to show, standard input when none is named",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

@@ -4,26 +4,25 @@
 //! (MIKSPEC-0098.R29).
 
 use crate::action::{self, Action, COMMAND};
-use mikros_cli::{FAILURE, INVALID, SUCCESS};
+use mikros_cli::{FAILURE, INVALID, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{ControlClient, ShutdownKind};
-use std::io::Write;
 use std::process::ExitCode;
 
 const CONTROL: &str = "mikros.service.Control";
 const FOREVER: i64 = i64::MAX;
 
 pub fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let kind = match action::read(arguments) {
-        Action::Off => ShutdownKind::PowerOff,
-        Action::Restart => ShutdownKind::Restart,
-        Action::Help => {
-            let _ = std::io::stdout().write_all(COMMAND.help().as_bytes());
-            return ExitCode::from(SUCCESS);
-        }
-        Action::Invalid(reason) => return fail(INVALID, &reason),
+    let run = start(&COMMAND, &mikros_command::list);
+    let fail = |status: u8, message: &str| {
+        complain(&COMMAND, &run, message);
+        ExitCode::from(status)
+    };
+    let kind = match action::read(&run) {
+        Ok(Action::Off) => ShutdownKind::PowerOff,
+        Ok(Action::Restart) => ShutdownKind::Restart,
+        Err(reason) => return fail(INVALID, &reason),
     };
     let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
         return fail(FAILURE, "cannot reach the service directory");
@@ -40,10 +39,4 @@ pub fn main() -> ExitCode {
         Ok(Err(status)) => fail(FAILURE, &format!("Shutdown failed: {status:?}")),
         Err(error) => fail(FAILURE, &format!("Shutdown failed: {error:?}")),
     }
-}
-
-/// Writes the error `message` to standard error and gives `status`.
-fn fail(status: u8, message: &str) -> ExitCode {
-    eprintln!("{}", COMMAND.error(message));
-    ExitCode::from(status)
 }
