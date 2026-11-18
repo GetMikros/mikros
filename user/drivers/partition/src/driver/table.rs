@@ -72,14 +72,16 @@ impl<'a> Mapped<'a> {
 
     /// Reads `bytes` bytes from block `block` into the start of the
     /// buffer, in requests of at most `max` blocks of `block_size`
-    /// bytes, and returns them.
+    /// bytes, and returns a copy of them. The buffer is shared with the
+    /// disk's driver and its device, which may still write it, so what
+    /// is checked and parsed is the copy, never the buffer itself.
     async fn read(
         &self,
         block: u64,
         bytes: u64,
         block_size: u32,
         max: u32,
-    ) -> Result<&[u8], Status> {
+    ) -> Result<Vec<u8>, Status> {
         let count = bytes.div_ceil(u64::from(block_size));
         let mut done = 0;
         while done < count {
@@ -96,9 +98,13 @@ impl<'a> Mapped<'a> {
             }
             done += step;
         }
-        // SAFETY: the buffer is mapped at `at` for `size` bytes, and the
-        // reads above filled the bytes asked for.
-        Ok(unsafe { core::slice::from_raw_parts(self.at as *const u8, bytes as usize) })
+        let copy = (0..bytes)
+            // SAFETY: the buffer is mapped at `at` for `size` bytes, which
+            // cover the bytes asked for; volatile reads allow for others
+            // writing them meanwhile.
+            .map(|i| unsafe { core::ptr::read_volatile((self.at + i) as *const u8) })
+            .collect();
+        Ok(copy)
     }
 }
 
@@ -214,8 +220,7 @@ async fn read_bytes(
     let buffer = Mapped::new(disk, process, blocks * u64::from(size))
         .await
         .ok()?;
-    let read = buffer.read(block, bytes, size, max).await.ok()?;
-    Some(read.to_vec())
+    buffer.read(block, bytes, size, max).await.ok()
 }
 
 /// The partitions of the disk behind `disk`, which `info` describes, and
@@ -247,7 +252,7 @@ async fn read_one(
     let header: Header = {
         let buffer = Mapped::new(disk, process, u64::from(size)).await.ok()?;
         let block = buffer.read(lba, u64::from(size), size, max).await.ok()?;
-        crate::gpt::header(block, lba)?
+        crate::gpt::header(&block, lba)?
     };
     let bytes = header.entries_size();
     let blocks = bytes.div_ceil(u64::from(size));
@@ -265,7 +270,7 @@ async fn read_one(
         .read(header.entries_lba, bytes, size, max)
         .await
         .ok()?;
-    let partitions = header.partitions(entries)?;
+    let partitions = header.partitions(&entries)?;
     // Entries that do not lie on the disk are left out.
     let on_disk = |p: &Partition| p.first_lba <= p.last_lba && p.last_lba < info.block_count;
     Some(partitions.into_iter().filter(on_disk).collect())
