@@ -6,8 +6,9 @@ use crate::cmos::{
     DAY, Format, HOURS, MINUTES, MONTH, Registers, SECONDS, SET, STATUS_A, STATUS_B,
     UPDATE_IN_PROGRESS, WEEKDAY, YEAR,
 };
+use mikros_rt::hardware::IoPorts;
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::sys;
+use mikros_rt::objects::now;
 
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 /// How long an update may stay in progress: the clock's take under 2 ms.
@@ -15,43 +16,31 @@ const UPDATE_LIMIT: i64 = 10_000_000;
 /// How many reads may disagree with the one before them.
 const READS_MAX: u32 = 100;
 
-fn now() -> i64 {
-    let mut now = 0;
-    // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::clock_get_monotonic(&mut now) };
-    now
-}
+/// Port offsets: the index port, then the data port.
+const INDEX: u16 = 0;
+const DATA: u16 = 1;
 
-/// The clock, whose index port is `index` and data port the next, and
-/// the index of its century register, when it has one.
+/// The clock, whose index and data ports are `ports`, and the index of
+/// its century register, when it has one.
 pub struct Clock {
-    index: u16,
+    ports: IoPorts,
     century: Option<u8>,
 }
 
 impl Clock {
-    /// The clock at the ports from `index`, which the process may use.
-    pub fn new(index: u16, century: Option<u8>) -> Clock {
-        Clock { index, century }
+    /// The clock at `ports`, its index port and then its data port.
+    pub fn new(ports: IoPorts, century: Option<u8>) -> Clock {
+        Clock { ports, century }
     }
 
     fn read(&self, register: u8) -> u8 {
-        let value: u8;
-        // SAFETY: the process may use the clock's two ports, which only
-        // the hardware reads.
-        unsafe {
-            core::arch::asm!("out dx, al", in("dx") self.index, in("al") register, options(nomem, nostack, preserves_flags));
-            core::arch::asm!("in al, dx", out("al") value, in("dx") self.index + 1, options(nomem, nostack, preserves_flags));
-        }
-        value
+        self.ports.write8(INDEX, register);
+        self.ports.read8(DATA)
     }
 
     fn write(&self, register: u8, value: u8) {
-        // SAFETY: as for `read`.
-        unsafe {
-            core::arch::asm!("out dx, al", in("dx") self.index, in("al") register, options(nomem, nostack, preserves_flags));
-            core::arch::asm!("out dx, al", in("dx") self.index + 1, in("al") value, options(nomem, nostack, preserves_flags));
-        }
+        self.ports.write8(INDEX, register);
+        self.ports.write8(DATA, value);
     }
 
     /// Waits until no update is in progress: false when one lasts too long.

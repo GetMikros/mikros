@@ -37,8 +37,6 @@ use mikros_storage::{Mmio, PAGE, PciBus};
 mikros_rt::raw_main!(main);
 
 const KIND_DMA: u32 = 4;
-const INFO_RESOURCE: u32 = 5;
-const INFO_RESOURCE_SIZE: usize = 0x18;
 /// The BAR of the HBA's registers.
 const ABAR: u8 = 5;
 const DISK_ID: &str = "storage:disk";
@@ -329,8 +327,7 @@ async fn interrupts(
             if msi {
                 // Acknowledged before `IS` is read, so that a port that
                 // raises it meanwhile signals again.
-                // SAFETY: the call takes no pointers.
-                unsafe { sys::interrupt_ack(raw) };
+                let _ = mikros_rt::hardware::interrupt_ack(raw);
             }
             let pending = mmio.read32(crate::driver::hba::IS);
             for port in ports.iter().filter(|p| pending & 1 << p.number != 0) {
@@ -398,17 +395,7 @@ async fn add_disks(
 
 /// The kind of `resource`, if it is one.
 fn kind(resource: &OwnedHandle) -> Option<u32> {
-    let mut info = [0u8; INFO_RESOURCE_SIZE];
-    let mut len = 0;
-    // SAFETY: the pointers describe `info` and `len`.
-    let status = unsafe {
-        sys::object_get_info(
-            resource.raw(),
-            INFO_RESOURCE,
-            info.as_mut_ptr(),
-            info.len() as u64,
-            &mut len,
-        )
-    };
-    (status == mikros_rt::OK).then(|| u32::from_le_bytes([info[0], info[1], info[2], info[3]]))
+    mikros_rt::hardware::resource(resource.raw())
+        .ok()
+        .map(|r| r.kind)
 }

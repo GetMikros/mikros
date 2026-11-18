@@ -11,7 +11,7 @@
 mod hub;
 mod ports;
 use crate::driver::hub::{Hub, KeyboardLeds, NoLeds};
-use crate::driver::ports::IoPorts;
+use crate::driver::ports::ControllerPorts;
 use crate::ps2::controller::Controller;
 use crate::ps2::mouse::{self, Protocol};
 use crate::ps2::scancode::Decoder;
@@ -23,6 +23,7 @@ use mikros_evdev::codes::{EV_KEY, EV_LED, EV_REL, EV_SYN, REL_WHEEL, REL_X, REL_
 use mikros_evdev::{KEY_BYTES, set_bit};
 use mikros_inputdev::InputDevice;
 use mikros_rt::exec::{Executor, Reactor, Spawner};
+use mikros_rt::hardware::IoPorts;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
@@ -37,15 +38,14 @@ mikros_rt::raw_main!(main);
 
 const KIND_IOPORT: u32 = 2;
 const KIND_IRQ: u32 = 3;
-const INFO_RESOURCE: u32 = 5;
-const INFO_RESOURCE_SIZE: usize = 0x18;
 /// The offset of the command port from the data port when one resource
 /// covers both.
-const COMMAND_OFFSET: u64 = 4;
+const COMMAND_OFFSET: u16 = 4;
 const SIGNALED: u32 = 1 << 3;
 
-/// What the driver holds while it runs: the device's resources, the
-/// interrupt objects, and the controller with its devices.
+/// What the driver holds while it runs: the device's resources but its
+/// `IOPORT` ones, which the controller's ports hold, the interrupt
+/// objects, and the controller with its devices.
 struct Running {
     _resources: Vec<OwnedHandle>,
     _interrupts: Rc<Vec<OwnedHandle>>,
@@ -125,65 +125,41 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     })
 }
 
-/// The kind, base and size of `resource`.
-fn info(resource: &OwnedHandle) -> Option<(u32, u64, u64)> {
-    let mut info = [0u8; INFO_RESOURCE_SIZE];
-    let mut len = 0;
-    // SAFETY: the pointers describe `info` and `len`.
-    let status = unsafe {
-        sys::object_get_info(
-            resource.raw(),
-            INFO_RESOURCE,
-            info.as_mut_ptr(),
-            info.len() as u64,
-            &mut len,
-        )
-    };
-    if status != mikros_rt::OK {
-        return None;
-    }
-    let u64_at = |at: usize| u64::from_le_bytes(info[at..at + 8].try_into().unwrap());
-    let kind = u32::from_le_bytes(info[0..4].try_into().unwrap());
-    Some((kind, u64_at(0x08), u64_at(0x10)))
-}
-
-/// The data and command ports of the resources' `ports`, as (base,
-/// size), after enabling them for `process`.
+/// The data and command ports of `ports`, the device's `IOPORT`
+/// resources as (resource, base, size), after enabling them for
+/// `process`.
 fn enable_ports(
-    resources: &[OwnedHandle],
-    ports: &[(usize, u64, u64)],
+    ports: Vec<(OwnedHandle, u64, u64)>,
     process: sys::Handle,
-) -> Result<(u16, u16), Status> {
-    for &(at, base, size) in ports {
-        // SAFETY: the call takes no pointers.
-        let status =
-            unsafe { sys::process_ioports_enable(process, resources[at].raw(), base, size) };
-        if status != mikros_rt::OK {
-            return Err(Status::from_raw(status as i32));
-        }
+) -> Result<ControllerPorts, Status> {
+    let mut enabled = Vec::new();
+    let mut bases = Vec::new();
+    for (resource, base, size) in ports {
+        let (Ok(base), Ok(count)) = (u16::try_from(base), u16::try_from(size)) else {
+            return Err(Status::InvalidArgs);
+        };
+        let ports = IoPorts::enable(process, resource, base, count)
+            .map_err(|s| Status::from_raw(s as i32))?;
+        enabled.push(ports);
+        bases.push((base, count));
     }
-    let (data, command) = match ports {
-        [(_, base, size)] if *size > COMMAND_OFFSET => (*base, base + COMMAND_OFFSET),
-        [(_, a, _), (_, b, _), ..] => (*a.min(b), *a.max(b)),
+    let (data, command) = match bases[..] {
+        [(_, count)] if count > COMMAND_OFFSET => ((0, 0), (0, COMMAND_OFFSET)),
+        [(a, _), (b, _), ..] if a <= b => ((0, 0), (1, 0)),
+        [_, _, ..] => ((1, 0), (0, 0)),
         _ => return Err(Status::InvalidArgs),
     };
-    match (u16::try_from(data), u16::try_from(command)) {
-        (Ok(data), Ok(command)) => Ok((data, command)),
-        _ => Err(Status::InvalidArgs),
-    }
+    Ok(ControllerPorts {
+        enabled,
+        data,
+        command,
+    })
 }
 
 /// An interrupt object for `irq`, edge-triggered and active high.
 fn interrupt(resource: &OwnedHandle, irq: u64) -> Result<OwnedHandle, Status> {
     let irq = u32::try_from(irq).map_err(|_| Status::InvalidArgs)?;
-    let mut out = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe { sys::interrupt_create(resource.raw(), irq, 0, &mut out) };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    // SAFETY: the kernel just created the handle for us.
-    Ok(unsafe { OwnedHandle::from_raw(out) })
+    mikros_rt::hardware::interrupt(resource.raw(), irq, 0).map_err(|s| Status::from_raw(s as i32))
 }
 
 /// What the keyboard reports.
@@ -232,20 +208,23 @@ async fn start(
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<Running, Status> {
-    let resources = request.resources;
+    let mut resources = Vec::new();
     let mut ports = Vec::new();
     let mut irqs = Vec::new();
-    for (at, resource) in resources.iter().enumerate() {
-        match info(resource) {
-            Some((KIND_IOPORT, base, size)) => ports.push((at, base, size)),
-            Some((KIND_IRQ, base, _)) => irqs.push((at, base)),
-            _ => {}
+    for resource in request.resources {
+        match mikros_rt::hardware::resource(resource.raw()) {
+            Ok(r) if r.kind == KIND_IOPORT => ports.push((resource, r.base, r.size)),
+            Ok(r) if r.kind == KIND_IRQ => {
+                irqs.push((resources.len(), r.base));
+                resources.push(resource);
+            }
+            _ => resources.push(resource),
         }
     }
-    let (data, command) = enable_ports(&resources, &ports, process).inspect_err(|_| {
+    let ports = enable_ports(ports, process).inspect_err(|_| {
         mikros_rt::log!(Error, "ps2: the device has no usable I/O ports");
     })?;
-    let mut controller = Controller::new(IoPorts { data, command });
+    let mut controller = Controller::new(ports);
     let mut present = controller.init(&mut |_, _| {}).map_err(|e| {
         mikros_rt::log!(Error, "ps2: setting up the controller failed: {e:?}");
         Status::Io
@@ -323,7 +302,6 @@ async fn watch(hub: Rc<Hub>, interrupts: Rc<Vec<OwnedHandle>>, at: usize, reacto
     let raw = interrupts[at].raw();
     while reactor.signals(raw, SIGNALED).await.is_ok() {
         hub.drain();
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::interrupt_ack(raw) };
+        let _ = mikros_rt::hardware::interrupt_ack(raw);
     }
 }

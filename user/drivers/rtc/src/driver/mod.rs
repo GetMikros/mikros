@@ -12,6 +12,7 @@ mod clock;
 use crate::driver::clock::Clock;
 use alloc::rc::Rc;
 use mikros_rt::exec::{Executor, Reactor, Spawner};
+use mikros_rt::hardware::IoPorts;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
@@ -28,8 +29,6 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 mikros_rt::raw_main!(main);
 
 const KIND_IOPORT: u32 = 2;
-const INFO_RESOURCE: u32 = 5;
-const INFO_RESOURCE_SIZE: usize = 0x18;
 /// The service class that the driver publishes, and its protocol in the
 /// service directory.
 const CLASS: &str = "rtc";
@@ -59,24 +58,24 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = DriverAsyncServer::new(end, reactor.clone());
     let process = managed.header.process.raw();
-    // The ports' resource, which stays held while the driver runs, and
-    // the bus channel of the ACPI server, which the driver does not use
-    // but holds, and which `Reconnect` replaces.
-    let mut ports: Option<OwnedHandle> = None;
+    // The clock, which holds its ports' resource while the driver runs,
+    // and the bus channel of the ACPI server, which the driver does not
+    // use but holds, and which `Reconnect` replaces.
+    let mut clock: Option<Rc<Clock>> = None;
     let mut bus: Option<OwnedHandle> = None;
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
             let _ = match request {
                 DriverRequest::Start(mut request, responder) => {
-                    if ports.is_some() {
+                    if clock.is_some() {
                         let _ = responder.reply(s, Err(Status::BadState));
                         continue;
                     }
                     let channel = request.bus.take();
                     match start(request, process, &reactor, &spawner).await {
-                        Ok(resource) => {
-                            ports = Some(resource);
+                        Ok(started) => {
+                            clock = Some(started);
                             bus = channel;
                             responder.reply(s, Ok(DriverStartResponse {}))
                         }
@@ -88,7 +87,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     return 0;
                 }
                 // A restarted ACPI server gives a new bus channel.
-                DriverRequest::Reconnect(request, responder) => match ports {
+                DriverRequest::Reconnect(request, responder) => match clock {
                     Some(_) => {
                         bus = Some(request.bus);
                         responder.reply(s, Ok(DriverReconnectResponse {}))
@@ -110,28 +109,6 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     })
 }
 
-/// The kind, base and size of `resource`.
-fn info(resource: &OwnedHandle) -> Option<(u32, u64, u64)> {
-    let mut info = [0u8; INFO_RESOURCE_SIZE];
-    let mut len = 0;
-    // SAFETY: the pointers describe `info` and `len`.
-    let status = unsafe {
-        sys::object_get_info(
-            resource.raw(),
-            INFO_RESOURCE,
-            info.as_mut_ptr(),
-            info.len() as u64,
-            &mut len,
-        )
-    };
-    if status != mikros_rt::OK {
-        return None;
-    }
-    let u64_at = |at: usize| u64::from_le_bytes(info[at..at + 8].try_into().unwrap());
-    let kind = u32::from_le_bytes(info[0..4].try_into().unwrap());
-    Some((kind, u64_at(0x08), u64_at(0x10)))
-}
-
 /// The index of a `century` property: `0x` and lowercase hexadecimal
 /// digits.
 fn century(value: &str) -> Option<u8> {
@@ -145,14 +122,13 @@ fn century(value: &str) -> Option<u8> {
     u8::from_str_radix(digits, 16).ok()
 }
 
-/// Enables the clock's ports and publishes its service: the ports'
-/// resource.
+/// Enables the clock's ports and publishes its service: the clock.
 async fn start(
     request: DriverStartRequest,
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<OwnedHandle, Status> {
+) -> Result<Rc<Clock>, Status> {
     let century = match request.device.properties.iter().find(|p| p.key == CENTURY) {
         Some(p) => Some(century(&p.value).ok_or(Status::InvalidArgs)?),
         None => None,
@@ -163,19 +139,16 @@ async fn start(
             mikros_rt::log!(Error, "rtc: the device has no I/O ports");
             return Err(Status::InvalidArgs);
         };
-        match info(&resource) {
-            Some((KIND_IOPORT, base, size)) if size >= 2 && base < 0xFFFF => {
-                break (resource, base);
+        match mikros_rt::hardware::resource(resource.raw()) {
+            Ok(r) if r.kind == KIND_IOPORT && r.size >= 2 && r.base < 0xFFFF => {
+                break (resource, r.base);
             }
             _ => {}
         }
     };
-    // SAFETY: the call takes no pointers.
-    let enabled = unsafe { sys::process_ioports_enable(process, resource.raw(), base, 2) };
-    if enabled != mikros_rt::OK {
-        return Err(Status::from_raw(enabled as i32));
-    }
-    let clock = Rc::new(Clock::new(base as u16, century));
+    let ports = IoPorts::enable(process, resource, base as u16, 2)
+        .map_err(|s| Status::from_raw(s as i32))?;
+    let clock = Rc::new(Clock::new(ports, century));
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     let (client, server) = endpoints::<Provider>().map_err(|_| Status::NoResources)?;
     match manager.publish_service(CLASS.into(), client).await {
@@ -184,13 +157,13 @@ async fn start(
         Err(_) => return Err(Status::PeerClosed),
     }
     spawner.spawn(serve_provider(
-        clock,
+        clock.clone(),
         server,
         reactor.clone(),
         spawner.clone(),
         manager,
     ));
-    Ok(resource)
+    Ok(clock)
 }
 
 /// Serves the connections that `end` passes on to the driver. The device

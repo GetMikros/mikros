@@ -279,7 +279,7 @@ async fn read(hid: Rc<Hid>) {
         if reader.generation.get() != generation {
             return;
         }
-        let timestamp = crate::driver::usb::now();
+        let timestamp = mikros_rt::objects::now();
         for (device, input) in reader.devices.borrow().iter() {
             let events = device.borrow_mut().decode(&report);
             if !events.is_empty() {

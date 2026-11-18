@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
+use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockFlags, BlockInfo};
@@ -77,7 +78,7 @@ pub struct Disk {
 /// One pinned page for each request in flight: its mapping, its
 /// physical address, and which pages are free.
 struct Slots {
-    at: u64,
+    mapping: Mapping,
     pages: Vec<u64>,
     free: RefCell<Vec<usize>>,
     waiting: RefCell<Vec<Waker>>,
@@ -85,11 +86,9 @@ struct Slots {
     _pmt: OwnedHandle,
 }
 
-fn kernel(status: i64) -> Result<(), Status> {
-    match status {
-        mikros_rt::OK => Ok(()),
-        status => Err(Status::from_raw(status as i32)),
-    }
+/// The status of a system call that failed with `status`.
+fn kernel(status: sys::Status) -> Status {
+    Status::from_raw(status as i32)
 }
 
 fn read64(config: &Mmio, offset: u64) -> u64 {
@@ -156,21 +155,16 @@ impl Disk {
         };
         let count = (queue.size() / 2).clamp(1, SLOTS_MAX);
         let (mem, pmt) = pinned(&dma, transport.bti(), PAGE * u64::from(count))?;
-        let mut at = 0;
-        // SAFETY: the out pointer is valid; the kernel picks a free range.
-        kernel(unsafe {
-            sys::vm_map(
-                process,
-                PERM_READ | PERM_WRITE,
-                0,
-                mem.raw(),
-                0,
-                PAGE * u64::from(count),
-                &mut at,
-            )
-        })?;
+        let mapping = Mapping::new(
+            process,
+            PERM_READ | PERM_WRITE,
+            mem.raw(),
+            0,
+            PAGE * u64::from(count),
+        )
+        .map_err(kernel)?;
         let slots = Slots {
-            at,
+            mapping,
             pages: pages(&mem, u64::from(count))?,
             free: RefCell::new((0..usize::from(count)).collect()),
             waiting: RefCell::new(Vec::new()),
@@ -275,20 +269,15 @@ impl Disk {
         reply: u32,
     ) -> Result<Vec<u8>, Status> {
         let slot = self.take().await;
-        let (page, at) = (self.slots.pages[slot], self.slots.at + PAGE * slot as u64);
-        // SAFETY: the slot's page is mapped at `at`, and only this
+        // The slot's page is at `at` in the mapping, and only this
         // request uses it.
-        unsafe {
-            core::ptr::write_volatile(at as *mut u32, kind);
-            core::ptr::write_volatile((at + 4) as *mut u32, 0);
-            core::ptr::write_volatile((at + 8) as *mut u64, sector);
-            core::ptr::write_volatile((at + STATUS) as *mut u8, 0xFF);
-            core::ptr::copy_nonoverlapping(
-                payload.as_ptr(),
-                (at + PAYLOAD) as *mut u8,
-                payload.len(),
-            );
-        }
+        let (page, at) = (self.slots.pages[slot], PAGE * slot as u64);
+        let mapping = &self.slots.mapping;
+        mapping.write32(at, kind);
+        mapping.write32(at + 4, 0);
+        mapping.write64(at + 8, sector);
+        mapping.write8(at + STATUS, 0xFF);
+        mapping.write(at + PAYLOAD, payload);
         let mut buffers = vec![Buffer {
             address: page,
             len: 16,
@@ -315,13 +304,10 @@ impl Disk {
             device_writes: true,
         });
         self.queue.submit(&buffers).await;
-        // SAFETY: as above; the device is done with the slot.
-        let (status, replied) = unsafe {
-            let status = core::ptr::read_volatile((at + STATUS) as *const u8);
-            let replied =
-                core::slice::from_raw_parts((at + PAYLOAD) as *const u8, reply as usize).to_vec();
-            (status, replied)
-        };
+        // The device is done with the slot.
+        let status = mapping.read8(at + STATUS);
+        let mut replied = vec![0u8; reply as usize];
+        mapping.read(at + PAYLOAD, &mut replied);
         self.give_back(slot);
         match status {
             S_OK => Ok(replied),

@@ -9,7 +9,7 @@ use core::pin::Pin;
 use core::task::Poll;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::usb::{InterfaceAsyncClient, Setup};
-use mikros_rt::sys;
+use mikros_rt::objects::now;
 
 /// Requests to the interface: standard GET_DESCRIPTOR, and the class
 /// requests SET_REPORT, SET_IDLE and SET_PROTOCOL.
@@ -29,14 +29,6 @@ const REPORT_PROTOCOL: u16 = 1;
 const OUTPUT_REPORT: u16 = 2;
 /// How long a control request may take.
 const CONTROL_LIMIT: i64 = 1_000_000_000;
-
-/// The monotonic clock, in nanoseconds.
-pub fn now() -> i64 {
-    let mut now = 0;
-    // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::clock_get_monotonic(&mut now) };
-    now
-}
 
 /// The report descriptor length that the HID descriptor of interface
 /// `number`, alternate setting 0, gives in `configuration`.

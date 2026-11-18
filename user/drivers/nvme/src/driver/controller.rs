@@ -402,8 +402,7 @@ async fn interrupts(
                 while reactor.signals(raw, SIGNALED).await.is_ok() {
                     // Acknowledged first, so that a completion posted
                     // while the queues are read signals again.
-                    // SAFETY: the call takes no pointers.
-                    unsafe { sys::interrupt_ack(raw) };
+                    let _ = mikros_rt::hardware::interrupt_ack(raw);
                     for queue in &mine {
                         queue.process();
                     }

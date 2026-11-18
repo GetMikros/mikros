@@ -1,7 +1,7 @@
 //! The controller and the devices on its ports: reading the bytes they
 //! send and turning them into events.
 
-use crate::driver::ports::{IoPorts, now};
+use crate::driver::ports::ControllerPorts;
 use crate::ps2::controller::{Controller, Port};
 use crate::ps2::keyboard_leds;
 use crate::ps2::mouse;
@@ -13,13 +13,14 @@ use mikros_evdev::codes::EV_KEY;
 use mikros_evdev::{Event, group};
 use mikros_inputdev::{Backend, InputDevice};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::objects::now;
 
 /// The most bytes read for one interrupt, so that a device that never
 /// stops sending cannot hold the driver.
 const DRAIN_MAX: usize = 256;
 
 pub struct Hub {
-    pub controller: RefCell<Controller<IoPorts>>,
+    pub controller: RefCell<Controller<ControllerPorts>>,
     decoder: RefCell<Decoder>,
     pub keyboard: OnceCell<Weak<InputDevice<KeyboardLeds>>>,
     /// The mouse's packet decoder and device, once it is set up.
@@ -27,7 +28,7 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub fn new(controller: Controller<IoPorts>) -> Hub {
+    pub fn new(controller: Controller<ControllerPorts>) -> Hub {
         Hub {
             controller: RefCell::new(controller),
             decoder: RefCell::new(Decoder::new()),

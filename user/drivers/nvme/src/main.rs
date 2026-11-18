@@ -4,6 +4,7 @@
 
 #![cfg_attr(target_os = "mikros", no_std, no_main)]
 #![cfg_attr(not(target_os = "mikros"), allow(dead_code))]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
