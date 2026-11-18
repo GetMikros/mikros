@@ -5,12 +5,18 @@ use crate::{
     BELOW_4G, DEVICE_READ, DEVICE_WRITE, KIND_DMA, SIGNALED, TIMED_OUT, bti_create, bti_pin, close,
     grant, in_time, mem_read_at, mem_write_at, now, wait,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
 use mikros_rt::Startup;
 use mikros_rt::sys::{self, Handle};
-use mikros_test::{KIND_IOPORT, PAGE_SIZE, PERM_READ, PERM_WRITE, Result, check, ensure, sleep_ms};
+use mikros_test::{PAGE_SIZE, PERM_READ, PERM_WRITE, Result, check, ensure, sleep_ms};
 
-/// The PCI configuration ports.
-const CONFIG_PORTS: u64 = 0xCF8;
+/// The configuration space of bus 0 in the ECAM window of QEMU's q35
+/// machine, as OVMF places it and its MCFG table names it. The legacy
+/// configuration ports are the kernel's (MIKSPEC-0014.R28).
+const ECAM: u64 = 0xE000_0000;
+const BUS_SIZE: u64 = 1 << 20;
+/// Where `Edu::open` mapped bus 0's configuration space.
+static CONFIG: AtomicU64 = AtomicU64::new(0);
 /// The vendor and device IDs of `edu`.
 const EDU_ID: u32 = 0x11E8_1234;
 /// `edu` registers: DMA source, destination, length and command, and the
@@ -27,31 +33,26 @@ const TO_MEMORY: u64 = 1 << 1;
 /// The device address of `edu`'s DMA buffer.
 const BUFFER: u64 = 0x40000;
 
-fn config_address(dev: u8, offset: u8) -> u32 {
-    0x8000_0000 | u32::from(dev) << 11 | u32::from(offset & 0xFC)
+/// The configuration register at `offset` of function 0 of `dev` on bus
+/// 0, in the mapping of `Edu::open`.
+fn config_at(dev: u8, offset: u8) -> *mut u32 {
+    let at = CONFIG.load(Ordering::Relaxed) + (u64::from(dev) << 15) + u64::from(offset & 0xFC);
+    at as *mut u32
 }
 
 /// Reads the configuration register at `offset` of function 0 of `dev`
 /// on bus 0.
 fn config_read(dev: u8, offset: u8) -> u32 {
-    let value: u32;
-    // SAFETY: the process was granted the configuration ports, which
-    // only select and access configuration registers.
-    unsafe {
-        core::arch::asm!("out dx, eax", in("dx") 0xCF8u16, in("eax") config_address(dev, offset), options(nomem, nostack));
-        core::arch::asm!("in eax, dx", in("dx") 0xCFCu16, out("eax") value, options(nomem, nostack));
-    }
-    value
+    // SAFETY: `Edu::open` mapped bus 0's configuration space, which the
+    // register lies in.
+    unsafe { config_at(dev, offset).read_volatile() }
 }
 
 /// Writes the configuration register at `offset` of function 0 of `dev`
 /// on bus 0.
 fn config_write(dev: u8, offset: u8, value: u32) {
     // SAFETY: as in `config_read`.
-    unsafe {
-        core::arch::asm!("out dx, eax", in("dx") 0xCF8u16, in("eax") config_address(dev, offset), options(nomem, nostack));
-        core::arch::asm!("out dx, eax", in("dx") 0xCFCu16, in("eax") value, options(nomem, nostack));
-    }
+    unsafe { config_at(dev, offset).write_volatile(value) }
 }
 
 /// The device, with its requester ID and registers mapped into the test,
@@ -67,11 +68,25 @@ impl Edu {
     /// Finds `edu` on bus 0, turns on its memory space and bus mastering,
     /// and maps its registers.
     fn open(s: &Startup) -> Result<Edu> {
-        let ports = grant(s, KIND_IOPORT, CONFIG_PORTS, 8)?;
-        // SAFETY: the call takes no pointers.
-        check("granting the configuration ports", unsafe {
-            sys::process_ioports_enable(s.process, ports, CONFIG_PORTS, 8)
+        let mut config = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the configuration space object", unsafe {
+            sys::mem_create_physical(s.root_resource, ECAM, BUS_SIZE, 2, &mut config)
         })?;
+        let mut at = 0;
+        // SAFETY: the out pointer is valid; the kernel picks a free range.
+        check("mapping the configuration space", unsafe {
+            sys::vm_map(
+                s.process,
+                PERM_READ | PERM_WRITE,
+                0,
+                config,
+                0,
+                BUS_SIZE,
+                &mut at,
+            )
+        })?;
+        CONFIG.store(at, Ordering::Relaxed);
         let dev = (0..32).find(|&d| config_read(d, 0) == EDU_ID);
         ensure("finding the edu device", dev.is_some())?;
         let dev = dev.unwrap_or(0);
@@ -99,7 +114,7 @@ impl Edu {
             dev,
             rid: u64::from(dev) << 3,
             regs,
-            handles: [ports, mem, 0],
+            handles: [config, mem, 0],
         })
     }
 

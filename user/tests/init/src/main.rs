@@ -1277,9 +1277,10 @@ fn inputs_outside_user_memory(s: &Startup) -> Result {
 
 /// `resource_create` refuses ranges that overlap hardware the kernel
 /// keeps: the ports of the PICs, the PIT, its gate and the serial port,
-/// the register page of the I/O APIC and, as the kernel uses it under
-/// QEMU, the HPET, both at QEMU's addresses. A port next to them is
-/// granted.
+/// the legacy PCI configuration ports (MIKSPEC-0014.R28), the register
+/// page of the I/O APIC and, as the kernel uses it under QEMU, the HPET,
+/// both at QEMU's addresses. A free port and the reset register 0xCF9,
+/// between the configuration ports, are granted.
 fn reserved_hardware_refused(s: &Startup) -> Result {
     const KIND_MMIO: u32 = 1;
     let io = mikros_test::KIND_IOPORT;
@@ -1292,6 +1293,10 @@ fn reserved_hardware_refused(s: &Startup) -> Result {
         (io, 0x61, 1),
         (io, 0x3F8, 8),
         (io, 0x3FF, 4),
+        (io, 0xCF8, 4),
+        (io, 0xCF8, 1),
+        (io, 0xCFC, 4),
+        (io, 0xCFF, 1),
         (KIND_MMIO, 0xFEC0_0000, PAGE_SIZE),
         (KIND_MMIO, 0xFED0_0000, PAGE_SIZE),
     ];
@@ -1305,12 +1310,15 @@ fn reserved_hardware_refused(s: &Startup) -> Result {
             status == ACCESS_DENIED,
         )?;
     }
-    // SAFETY: the out pointer is valid for the call.
-    check("granting a free port", unsafe {
-        sys::resource_create(s.root_resource, io, 0x80, 1, 0, &mut resource)
-    })?;
-    // SAFETY: the call takes no pointers.
-    check("closing", unsafe { sys::handle_close(resource) })
+    for (port, what) in [(0x80, "granting a free port"), (0xCF9, "granting 0xCF9")] {
+        // SAFETY: the out pointer is valid for the call.
+        check(what, unsafe {
+            sys::resource_create(s.root_resource, io, port, 1, 0, &mut resource)
+        })?;
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(resource) })?;
+    }
+    Ok(())
 }
 
 /// The `RESOURCE` information topic reports a resource's kind, options,

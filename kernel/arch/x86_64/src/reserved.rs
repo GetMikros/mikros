@@ -7,8 +7,19 @@ use boot_protocol::{BootInfo, Kind, PAGE_SIZE};
 use kernel_core::object::resource::{KIND_IOPORT, KIND_MMIO};
 use kernel_core::sync::SpinLock;
 
-/// The I/O ports of the PICs, the PIT and the PIT gate.
-const PORTS: [(u64, u64); 4] = [(0x20, 0x22), (0xA0, 0xA2), (0x40, 0x44), (0x61, 0x62)];
+/// The I/O ports of the PICs, the PIT and the PIT gate, and of the
+/// legacy PCI configuration mechanism: its address register and its data
+/// register, but not the reset register 0xCF9 between them, which the
+/// ACPI server may need (MIKSPEC-0014.R28). A word or doubleword access
+/// at 0xCF8 covers the reserved port, so it is refused as a whole.
+const PORTS: [(u64, u64); 6] = [
+    (0x20, 0x22),
+    (0xA0, 0xA2),
+    (0x40, 0x44),
+    (0x61, 0x62),
+    (0xCF8, 0xCF9),
+    (0xCFC, 0xD00),
+];
 /// The ports of the debug serial port.
 const SERIAL_PORTS: (u64, u64) = (0x3F8, 0x400);
 
