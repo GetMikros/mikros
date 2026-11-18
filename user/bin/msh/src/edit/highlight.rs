@@ -2,14 +2,15 @@
 //! word, as it stands while it is typed, which may not parse yet: a word
 //! where a command goes is a command, plain when it is a keyword, a
 //! built-in command, a function or a program that is found, and crimson
-//! when it is not. Other words are arguments, mint green, and
-//! underlined when they name a file or folder that exists; one written
-//! as a path, from `/`, `~/`, `./` or `../`, that names nothing and that
-//! no entry of its folder starts as is crimson, as is one in a declared
-//! `folder`, `file` or `path` position that is nothing of its kind and
-//! that no entry of its kind starts as, such as the argument of `cd`
-//! that is no folder. Colours never run anything: they take only the
-//! declarations and what msh lists itself. Strings are
+//! when it is not; an alias takes the colour of the command it stands
+//! for, whose declaration its arguments take. Other words are arguments,
+//! mint green, and underlined when they name a file or folder that
+//! exists; one written as a path, from `/`, `~/`, `./` or `../`, that
+//! names nothing and that no entry of its folder starts as is crimson, as
+//! is one in a declared `folder`, `file` or `path` position that is
+//! nothing of its kind and that no entry of its kind starts as, such as
+//! the argument of `cd` that is no folder. Colours never run anything:
+//! they take only the declarations and what msh lists itself. Strings are
 //! orange, variables teal, operators mint green, `|`, `;`, `&` and
 //! redirections green, comments dark grey, and a closing bracket that
 //! closes nothing crimson. Those are the defaults of `$msh_colors`, a
@@ -219,6 +220,7 @@ fn reader<'a>(line: &'a str, sources: &'a dyn Sources) -> Reader<'a> {
         target: false,
         arguments: None,
         declaring: false,
+        literal: false,
         commands: Vec::new(),
     };
     reader.read();
@@ -243,6 +245,9 @@ struct Reader<'a> {
     /// Whether the statement read is an `extern` declaration, whose words
     /// are no commands.
     declaring: bool,
+    /// Whether the word before was `run` or `exec`, after which a
+    /// command's name is no alias.
+    literal: bool,
     /// The words where commands go, apart from keywords.
     commands: Vec<String>,
 }
@@ -280,6 +285,7 @@ impl Reader<'_> {
                     self.expression = false;
                     self.arguments = None;
                     self.declaring = false;
+                    self.literal = false;
                 }
                 '#' => {
                     let end = self.line[self.at..]
@@ -292,6 +298,7 @@ impl Reader<'_> {
                     command = true;
                     self.expression = false;
                     self.arguments = None;
+                    self.literal = false;
                 }
                 '>' | '<' => self.redirection(),
                 '2' if self.looking_at("2>") => self.redirection(),
@@ -341,6 +348,7 @@ impl Reader<'_> {
     fn word(&mut self, command: bool) -> bool {
         let start = self.at;
         let target = std::mem::take(&mut self.target);
+        let literal = std::mem::take(&mut self.literal);
         if command && self.starts_expression() {
             self.expression = true;
         }
@@ -384,12 +392,26 @@ impl Reader<'_> {
         let style = if plain && operator {
             Style::Operator
         } else if command && plain {
-            let style = self.command_style(&bare);
+            let mut style = self.command_style(&bare);
+            let alias = match literal || KEYWORDS.contains(&bare.as_str()) {
+                true => None,
+                false => self.sources.alias(&bare).filter(|w| !w.is_empty()),
+            };
             if KEYWORDS.contains(&bare.as_str()) {
                 self.arguments = None;
             } else if matches!(style, Style::Command | Style::Error) {
-                self.commands.push(bare.clone());
-                self.arguments = Some(Walk::new(&bare, self.sources));
+                // An alias is read as the words it stands for.
+                let words = alias.unwrap_or_else(|| vec![bare.clone()]);
+                if words[0] != bare {
+                    style = self.command_style(&words[0]);
+                }
+                self.commands.push(words[0].clone());
+                let mut walk = Walk::new(&words[0], self.sources);
+                for word in &words[1..] {
+                    walk.take(word, self.sources);
+                }
+                self.arguments = Some(walk);
+                self.literal = matches!(bare.as_str(), "run" | "exec");
             }
             style
         } else if !looked_up || never_missing(&typed) {
@@ -607,6 +629,15 @@ mod tests {
         fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
             declarations().subcommands(name, path)
         }
+        fn alias(&self, name: &str) -> Option<Vec<String>> {
+            let words: &[&str] = match name {
+                "ll" => &["ls", "-l"],
+                "gra" => &["vcs", "remote", "add"],
+                "bad" => &["nope", "x"],
+                _ => return None,
+            };
+            Some(words.iter().map(|w| w.to_string()).collect())
+        }
     }
 
     fn declarations() -> Declarations {
@@ -744,6 +775,20 @@ mod tests {
         assert_eq!(
             shown("svc anything --from whatever"),
             "EEE.aaaaaaaa.aaaaaa.aaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn colours_an_alias_as_the_words_it_stands_for() {
+        assert_eq!(shown("ll notes.txt"), "cc.ppppppppp");
+        assert_eq!(shown("bad x"), "EEE.a");
+        assert_eq!(shown("gra nope; gra src"), "EEE.EEEE|.EEE.ppp");
+        // After `run` and `exec`, a name is no alias.
+        assert_eq!(shown("run ll"), "ccc.EE");
+        assert_eq!(shown("exec ll"), "cccc.EE");
+        assert_eq!(
+            command_words("ll; gra x | bad", &Fake),
+            ["ls", "vcs", "nope"]
         );
     }
 

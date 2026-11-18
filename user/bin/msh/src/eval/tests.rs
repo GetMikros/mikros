@@ -1022,7 +1022,7 @@ fn completes_from_the_shell_on_tab() {
     s.system.programs.insert("/bin/tool".into(), tool);
     run(
         &mut s,
-        "extern tool(name: service) complete\nextern pick(x: from ([red green]))",
+        "extern tool(name: service) complete\nextern pick(x: from ([red green]))\nalias t = tool",
     )
     .unwrap();
     let texts = |c: crate::edit::complete::Completion| -> Vec<String> {
@@ -1032,6 +1032,7 @@ fn completes_from_the_shell_on_tab() {
         texts(complete_on_tab("tool t", 6, &mut s)),
         ["termsvc", "tx"]
     );
+    assert_eq!(texts(complete_on_tab("t t", 3, &mut s)), ["termsvc", "tx"]);
     assert_eq!(texts(complete_on_tab("pick g", 6, &mut s)), ["green"]);
     // Without Tab, only what msh lists itself.
     let runs = s.system.runs.len();

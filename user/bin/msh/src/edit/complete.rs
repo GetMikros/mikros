@@ -1,18 +1,19 @@
 //! What Tab completes, and the candidates for it: the word before the
 //! cursor, read in its command. The first word of a command, or one
 //! after `if`, `while`, `not`, `run` or `exec`, is a command name: a
-//! function, a built-in command or a program of `$env.PATH`, or a file
-//! when it holds a `/`. A word that starts with `$` is a variable, and
-//! one that starts with `-` an option that the command declares: a
-//! function's flags, a script's `param` options, a built-in command's
-//! own, or those that `extern` declares for the command and the
-//! subcommands its words name. Other words take what their declared
-//! type gives, and files where nothing is declared. A file or command
-//! name that would not stay one word is put on the line quoted, and a
-//! word that starts with a quote is completed inside it, which is closed
-//! once the name is complete. Only Tab runs what declarations name to
-//! give candidates: the pipelines of `from` types and programs declared
-//! with `complete`; suggestions and colours take what msh knows itself.
+//! function, a built-in command, an alias or a program of `$env.PATH`,
+//! or a file when it holds a `/`. A word that starts with `$` is a
+//! variable, and one that starts with `-` an option that the command
+//! declares: a function's flags, a script's `param` options, a built-in
+//! command's own, or those that `extern` declares for the command and the
+//! subcommands its words name. Other words take what their declared type
+//! gives, and files where nothing is declared. An alias at the start of
+//! a command is read as the words it stands for. A file or command name
+//! that would not stay one word is put on the line quoted, and a word
+//! that starts with a quote is completed inside it, which is closed once
+//! the name is complete. Only Tab runs what declarations name to give
+//! candidates: the pipelines of `from` types and programs declared with
+//! `complete`; suggestions and colours take what msh knows itself.
 
 use crate::ast::{Extern, Param, ParamType, Source, Thing};
 use std::rc::Rc;
@@ -77,6 +78,14 @@ pub trait Sources {
     /// The subcommands declared right below the subcommands `path` of
     /// the command `name`.
     fn subcommands(&self, _name: &str, _path: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+    /// The words that the alias `name` stands for, if it is one.
+    fn alias(&self, _name: &str) -> Option<Vec<String>> {
+        None
+    }
+    /// The names of the aliases.
+    fn aliases(&self) -> Vec<String> {
         Vec::new()
     }
     /// The names of the system's things of kind `thing`.
@@ -449,6 +458,10 @@ fn gather(line: &str, cursor: usize, sources: &dyn Sources) -> (Completion, Opti
     while first < index && COMMAND_KEYWORDS.contains(&words[first].1.as_str()) {
         first += 1;
     }
+    // After `run` and `exec`, a command's name is taken as it is.
+    let literal = words[..first]
+        .iter()
+        .any(|(_, w)| w == "run" || w == "exec");
     let mut requests = Vec::new();
     let candidates = if word.starts_with('$') && !word.contains('/') {
         // A variable whose value names a folder goes on with its `/`,
@@ -464,11 +477,14 @@ fn gather(line: &str, cursor: usize, sources: &dyn Sources) -> (Completion, Opti
         }
         found
     } else if index == first && !word.contains('/') {
-        quote_names(commands(&word, sources), open)
+        quote_names(commands(&word, sources, !literal), open)
     } else if index == first {
         files(&word, raw, sources, open)
     } else {
-        let command = &words[first..index];
+        let command = match literal {
+            true => words[first..index].to_vec(),
+            false => unaliased(&words[first..index], sources),
+        };
         let mut walk = Walk::new(&command[0].1, sources);
         for (_, arg) in &command[1..] {
             walk.take(arg, sources);
@@ -483,7 +499,7 @@ fn gather(line: &str, cursor: usize, sources: &dyn Sources) -> (Completion, Opti
             });
         }
         if word.starts_with('-') {
-            let mut found = options(&word, command, sources);
+            let mut found = options(&word, &command, sources);
             if let Some(declared) = &declared {
                 found.extend(declared_options(&word, declared));
             }
@@ -491,7 +507,7 @@ fn gather(line: &str, cursor: usize, sources: &dyn Sources) -> (Completion, Opti
         } else {
             let kind = match &declared {
                 Some(_) => walk.next_type(),
-                None => option_type(command, sources),
+                None => option_type(&command, sources),
             };
             let mut found: Vec<Candidate> = walk
                 .subcommands(sources)
@@ -515,6 +531,19 @@ fn gather(line: &str, cursor: usize, sources: &dyn Sources) -> (Completion, Opti
         open,
     });
     (Completion { start, candidates }, pending)
+}
+
+/// The words `command`, with its first, when it names an alias, as the
+/// words the alias stands for.
+fn unaliased(command: &[(usize, String)], sources: &dyn Sources) -> Vec<(usize, String)> {
+    let Some(((at, name), rest)) = command.split_first() else {
+        return Vec::new();
+    };
+    let Some(words) = sources.alias(name).filter(|w| !w.is_empty()) else {
+        return command.to_vec();
+    };
+    let words = words.into_iter().map(|w| (*at, w));
+    words.chain(rest.iter().cloned()).collect()
 }
 
 /// The options of `declared` that start as `word` does, long and short,
@@ -552,7 +581,7 @@ fn by_type(
             .filter(|c| !c.done)
             .collect(),
         ParamType::File | ParamType::Path | ParamType::Bool => files(word, raw, sources, open),
-        ParamType::Command => quote_names(commands(word, sources), open),
+        ParamType::Command => quote_names(commands(word, sources, false), open),
         ParamType::Choices(choices) => choices
             .iter()
             .filter(|c| c.starts_with(word))
@@ -606,13 +635,21 @@ fn variables(word: &str, sources: &dyn Sources) -> Vec<Candidate> {
     found
 }
 
-fn commands(word: &str, sources: &dyn Sources) -> Vec<Candidate> {
+/// The commands whose names start with `word`, with the aliases when
+/// `aliases`.
+fn commands(word: &str, sources: &dyn Sources, aliases: bool) -> Vec<Candidate> {
     let named = |name: String, what: &str| candidate(name.clone(), name, Some(what), true);
+    let aliases = match aliases {
+        true => sources.aliases(),
+        false => Vec::new(),
+    };
     let functions = sources.functions().into_iter().map(|(n, _)| n);
     let builtins = crate::eval::builtins::names().into_iter().map(String::from);
     let programs = sources.programs();
-    functions
-        .map(|n| named(n, "function"))
+    aliases
+        .into_iter()
+        .map(|n| named(n, "alias"))
+        .chain(functions.map(|n| named(n, "function")))
         .chain(builtins.map(|n| named(n, "built-in")))
         .chain(programs.into_iter().map(|n| named(n, "program")))
         .filter(|c| c.text.starts_with(word))
@@ -805,6 +842,18 @@ extern tool stop(name: service, --force(-f): bool "do it anyway") complete
         fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
             Declarations::parse(DECLARED).subcommands(name, path)
         }
+        fn alias(&self, name: &str) -> Option<Vec<String>> {
+            let words: &[&str] = match name {
+                "gr" => &["vcs", "remote"],
+                "ts" => &["tool", "stop"],
+                "p2" => &["printf", "%s"],
+                _ => return None,
+            };
+            Some(words.iter().map(|w| w.to_string()).collect())
+        }
+        fn aliases(&self) -> Vec<String> {
+            vec!["gr".into(), "ts".into(), "p2".into()]
+        }
         fn things(&self, thing: Thing) -> Vec<String> {
             let names: &[&str] = match thing {
                 Thing::Service => &["logsvc", "termsvc", "time svc"],
@@ -909,6 +958,12 @@ extern tool stop(name: service, --force(-f): bool "do it anyway") complete
         }
         fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
             Fake.subcommands(name, path)
+        }
+        fn alias(&self, name: &str) -> Option<Vec<String>> {
+            Fake.alias(name)
+        }
+        fn aliases(&self) -> Vec<String> {
+            Fake.aliases()
         }
         fn things(&self, thing: Thing) -> Vec<String> {
             Fake.things(thing)
@@ -1114,6 +1169,29 @@ extern tool stop(name: service, --force(-f): bool "do it anyway") complete
         assert!(tab("too").1.is_empty());
         assert!(tab("tool $sta").1.is_empty());
         assert!(tab("vcs remote add ").1.is_empty());
+    }
+
+    #[test]
+    fn reads_an_alias_as_the_words_it_stands_for() {
+        let c = complete("g", 1, &Fake);
+        let gr = c.candidates.iter().find(|c| c.text == "gr").unwrap();
+        assert_eq!(gr.description.as_deref(), Some("alias"));
+        assert_eq!(texts("gr "), ["add"]);
+        assert_eq!(texts("gr add -"), ["--verbose", "-C", "-f", "-v"]);
+        let (_, asked) = tab("ts l");
+        assert_eq!(
+            asked,
+            [Request::Program {
+                name: "tool".into(),
+                words: vec!["stop".into(), "l".into()],
+            }]
+        );
+        assert_eq!(texts("ts l"), ["logsvc"]);
+        // After `run` and `exec`, and as a value, a name is no alias.
+        assert!(!texts("run gr").contains(&"gr".to_string()));
+        assert!(texts("gr").contains(&"gr".to_string()));
+        assert!(texts("run gr ").contains(&"notes.txt".to_string()));
+        assert!(!texts("pick red notes.txt g").contains(&"gr".to_string()));
     }
 
     #[test]

@@ -21,6 +21,16 @@ fn shown(name: &str, words: &[String]) -> String {
 }
 
 impl<S: System> Shell<S> {
+    /// The words that the alias `name` stands for, if there is one.
+    pub fn alias_of(&self, name: &str) -> Option<&[String]> {
+        self.aliases.get(name).map(Vec::as_slice)
+    }
+
+    /// The aliases, by name, with their words.
+    pub fn aliases(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
+        self.aliases.iter()
+    }
+
     /// Defines the aliases of `DEFAULT_ALIASES`.
     pub fn define_default_aliases(&mut self) {
         for (name, words) in DEFAULT_ALIASES {

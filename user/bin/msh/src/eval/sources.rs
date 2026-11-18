@@ -1,5 +1,5 @@
 //! The shell as the source of what Tab completes: its functions with
-//! their flags, its variables and environment, the programs of
+//! their flags, its variables, environment and aliases, the programs of
 //! `$env.PATH`, folders, the options that scripts declare, the names of
 //! the system's things, and what completion runs. Folders are listed
 //! through the listings the shell keeps between keys, and the system's
@@ -79,6 +79,14 @@ impl<S: System> Sources for Shell<S> {
 
     fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
         Shell::subcommands(self, name, path)
+    }
+
+    fn alias(&self, name: &str) -> Option<Vec<String>> {
+        self.alias_of(name).map(<[String]>::to_vec)
+    }
+
+    fn aliases(&self) -> Vec<String> {
+        Shell::aliases(self).map(|(name, _)| name.clone()).collect()
     }
 
     fn things(&self, thing: Thing) -> Vec<String> {
@@ -174,6 +182,14 @@ impl<S: System> Sources for WithoutWaiting<'_, S> {
 
     fn subcommands(&self, name: &str, path: &[String]) -> Vec<String> {
         self.0.subcommands(name, path)
+    }
+
+    fn alias(&self, name: &str) -> Option<Vec<String>> {
+        Sources::alias(self.0, name)
+    }
+
+    fn aliases(&self) -> Vec<String> {
+        Sources::aliases(self.0)
     }
 
     /// Only the names listed for the line already: listing them anew
