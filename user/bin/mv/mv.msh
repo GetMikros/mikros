@@ -1,0 +1,14 @@
+# What `mv` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern mv(
+    ...path: path "the sources, then the target unless -t names it",
+    --force(-f): bool "replace destinations without asking",
+    --interactive(-i): bool "ask before replacing a destination",
+    --no-clobber(-n): bool "never replace a destination",
+    --update(-u): bool "move only over destinations older than their source",
+    --verbose(-v): bool "name each file as it is moved",
+    --target-directory(-t): folder "move every source into this folder",
+    --no-target-directory(-T): bool "take the target as the destination, even a folder",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

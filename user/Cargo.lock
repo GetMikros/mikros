@@ -778,6 +778,14 @@ name = "msh-check"
 version = "0.0.0"
 
 [[package]]
+name = "mv"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "namespace-probe"
 version = "0.0.0"
 dependencies = [
