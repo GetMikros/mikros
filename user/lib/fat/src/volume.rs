@@ -283,6 +283,11 @@ impl<D: Device> Volume<D> {
             (c, i) if c >= 2 && i <= index => (c, i),
             _ => (first, 0),
         };
+        // The first cluster comes from a directory entry, which the FAT's
+        // checks of the chain do not cover.
+        if !self.layout.is_data(cluster) {
+            return Err(Error::Io);
+        }
         while at < index {
             cluster = table::next(&mut self.disk, &self.layout, cluster)?.ok_or(Error::Io)?;
             at += 1;
@@ -300,6 +305,9 @@ impl<D: Device> Volume<D> {
             Dir::Root if slot < self.layout.root_entries => Ok(Some(self.layout.root_start + byte)),
             Dir::Root => Ok(None),
             Dir::Cluster(first) => {
+                if !self.layout.is_data(first) {
+                    return Err(Error::Io);
+                }
                 let size = u64::from(self.layout.cluster_size);
                 let mut cluster = first;
                 for _ in 0..byte / size {

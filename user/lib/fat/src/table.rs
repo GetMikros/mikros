@@ -130,12 +130,16 @@ pub(crate) fn count_free<D: Device>(disk: &mut Disk<D>, layout: &Layout) -> Resu
     Ok(free)
 }
 
-/// What FAT entry `cluster` says.
+/// What FAT entry `cluster` says: `Io` for a cluster outside the
+/// volume's data clusters.
 pub(crate) fn get<D: Device>(
     disk: &mut Disk<D>,
     layout: &Layout,
     cluster: u32,
 ) -> Result<Entry, Error> {
+    if !layout.is_data(cluster) {
+        return Err(Error::Io);
+    }
     let value = raw(disk, layout, cluster)?;
     let (bad, end) = match layout.fat_type {
         FatType::Fat12 => (0xFF7, 0xFF8),
@@ -151,13 +155,17 @@ pub(crate) fn get<D: Device>(
     })
 }
 
-/// Makes FAT entry `cluster` say `entry`.
+/// Makes FAT entry `cluster` say `entry`: `Io` for a cluster outside the
+/// volume's data clusters.
 pub(crate) fn set<D: Device>(
     disk: &mut Disk<D>,
     layout: &Layout,
     cluster: u32,
     entry: Entry,
 ) -> Result<(), Error> {
+    if !layout.is_data(cluster) {
+        return Err(Error::Io);
+    }
     let value = match entry {
         Entry::Free => 0,
         Entry::Next(next) => next,

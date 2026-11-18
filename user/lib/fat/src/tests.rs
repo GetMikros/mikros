@@ -227,6 +227,46 @@ fn reads_volumes_of_each_type() {
     }
 }
 
+/// Puts `cluster` in the short entry `name` of the root directory of the
+/// FAT16 volume `bytes`.
+fn set_first_cluster(bytes: &mut [u8], name: &[u8; 11], cluster: u32) {
+    let layout = Layout::parse(&bytes[..512], bytes.len() as u64).unwrap();
+    let root = layout.root_start as usize;
+    let at = (0..layout.root_entries as usize)
+        .map(|i| root + i * 32)
+        .find(|&at| &bytes[at..at + 11] == name)
+        .unwrap();
+    bytes[at + 20..at + 22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+    bytes[at + 26..at + 28].copy_from_slice(&(cluster as u16).to_le_bytes());
+}
+
+#[test]
+fn refuses_entries_with_clusters_outside_the_volume() {
+    let size = 8 << 20;
+    let bytes = image(size, fatfs::FatType::Fat16, |root| {
+        root.create_file("A.TXT")
+            .unwrap()
+            .write_all(&[7; 1500])
+            .unwrap();
+        root.create_dir("D").unwrap();
+    });
+    let clusters = Layout::parse(&bytes[..512], size as u64).unwrap().clusters;
+    for cluster in [1, clusters + 2, 0xFFFF] {
+        let mut bytes = bytes.clone();
+        set_first_cluster(&mut bytes, b"A       TXT", cluster);
+        set_first_cluster(&mut bytes, b"D          ", cluster);
+        let mut volume = Volume::mount(Mem(bytes), size as u64, false).unwrap();
+        let root = volume.root();
+        let mut file = volume.find(root, "A.TXT").unwrap();
+        let mut buf = [0u8; 2048];
+        assert_eq!(volume.read(&mut file, 0, &mut buf), Err(Error::Io));
+        assert_eq!(volume.read(&mut file, 1024, &mut buf), Err(Error::Io));
+        let dir = volume.find(root, "D").unwrap().as_dir(root).unwrap();
+        assert_eq!(volume.list(dir, 0, 10).map(|_| ()), Err(Error::Io));
+        assert_eq!(volume.allocated(cluster), Err(Error::Io));
+    }
+}
+
 // Writing files.
 
 fn volume_bytes(volume: Volume<Mem>) -> Vec<u8> {
