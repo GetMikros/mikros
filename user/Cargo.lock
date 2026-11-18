@@ -170,6 +170,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cat"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "cc"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,12 @@
+# What `cat` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern cat(
+    ...file: file "the files to copy, - for standard input",
+    --number(-n): bool "number every line",
+    --number-nonblank(-b): bool "number the lines that are not empty, over -n",
+    --squeeze-blank(-s): bool "write one empty line for several",
+    --show-all(-A): bool "as -v, with $ at the end of each line and tabs as ^I",
+    --show-nonprinting(-v): bool "show control characters as ^ and bytes above 127 as M-",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
