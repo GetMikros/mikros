@@ -1009,6 +1009,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "realpath"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

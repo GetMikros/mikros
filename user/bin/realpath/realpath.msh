@@ -1,0 +1,12 @@
+# What `realpath` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern realpath(
+    ...path: path "the paths to resolve",
+    --canonicalize-existing(-e): bool "fail unless every component exists",
+    --canonicalize-missing(-m): bool "let any component be missing",
+    --strip(-s): bool "do not resolve links, only . and ..",
+    --zero(-z): bool "end each path with NUL, not a newline",
+    --relative-to: folder "write the paths relative to this folder",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
