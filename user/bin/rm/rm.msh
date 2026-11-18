@@ -1,0 +1,14 @@
+# What `rm` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern rm(
+    ...path: path "the files and folders to remove",
+    --force(-f): bool "ignore paths that do not exist and never ask",
+    -i: bool "ask before each removal",
+    -I: bool "ask once before removing more than three paths or recursively",
+    --recursive(-r): bool "remove folders and what they hold",
+    -R: bool "the same as -r",
+    --dir(-d): bool "remove empty folders",
+    --verbose(-v): bool "name each entry removed",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

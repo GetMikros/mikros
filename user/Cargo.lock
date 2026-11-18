@@ -1001,6 +1001,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rm"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "rtc"
 version = "0.0.0"
 dependencies = [
