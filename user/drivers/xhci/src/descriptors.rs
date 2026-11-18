@@ -187,6 +187,27 @@ pub fn string(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// What a hub descriptor says: its port count, its characteristics, and
+/// how long its ports take to have power, in milliseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hub {
+    pub ports: u8,
+    pub characteristics: u16,
+    pub power_good_ms: u16,
+}
+
+/// The hub or SuperSpeed hub descriptor in `bytes`, at least 7 of them.
+pub fn hub(bytes: &[u8]) -> Option<Hub> {
+    if bytes.len() < 7 {
+        return None;
+    }
+    Some(Hub {
+        ports: bytes[2],
+        characteristics: u16::from_le_bytes([bytes[3], bytes[4]]),
+        power_good_ms: 2 * u16::from(bytes[5]),
+    })
+}
+
 /// The language IDs of string descriptor 0 in `bytes`.
 pub fn languages(bytes: &[u8]) -> Vec<u16> {
     if bytes.len() < 2 || bytes[1] != STRING {

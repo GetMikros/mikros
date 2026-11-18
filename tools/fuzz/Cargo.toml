@@ -11,6 +11,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 midl-tests = { path = "../midl-tests" }
+mikros-fat = { path = "../../user/lib/fat" }
+mikros-exfat = { path = "../../user/lib/exfat" }
 
 [build-dependencies]
 midlc = { path = "../midlc" }
@@ -34,6 +36,34 @@ bench = false
 [[bin]]
 name = "grants"
 path = "fuzz_targets/grants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "usb_descriptors"
+path = "fuzz_targets/usb_descriptors.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hid_report"
+path = "fuzz_targets/hid_report.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "partition_tables"
+path = "fuzz_targets/partition_tables.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fat_volume"
+path = "fuzz_targets/fat_volume.rs"
 test = false
 doc = false
 bench = false

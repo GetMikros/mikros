@@ -222,12 +222,9 @@ async fn set_up(hub: &UsbDevice) -> Result<u8, Status> {
     };
     let request = setup(0xA0, GET_DESCRIPTOR, kind << 8, 0, 12);
     let descriptor = hub.slot.control(request, &[], deadline()).await?;
-    if descriptor.len() < 7 {
-        return Err(Status::Internal);
-    }
-    let ports = descriptor[2];
-    let characteristics = u16::from_le_bytes([descriptor[3], descriptor[4]]);
-    let power_good = i64::from(descriptor[5]) * 2 * MS;
+    let found = crate::descriptors::hub(&descriptor).ok_or(Status::Internal)?;
+    let (ports, characteristics) = (found.ports, found.characteristics);
+    let power_good = i64::from(found.power_good_ms) * MS;
     let interfaces = &hub.configuration.interfaces;
     let multi_tt = interfaces
         .iter()

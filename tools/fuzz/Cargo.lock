@@ -96,6 +96,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-exfat"
+version = "0.0.0"
+dependencies = [
+ "mikros-fat",
+]
+
+[[package]]
+name = "mikros-fat"
+version = "0.0.0"
+dependencies = [
+ "mikros-tz",
+]
+
+[[package]]
+name = "mikros-tz"
+version = "0.0.0"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -191,6 +209,8 @@ dependencies = [
  "libfuzzer-sys",
  "midl-tests",
  "midlc",
+ "mikros-exfat",
+ "mikros-fat",
 ]
 
 [[package]]

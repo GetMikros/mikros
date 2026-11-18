@@ -1,7 +1,11 @@
 //! Host fuzz targets of user space (MIKSPEC-0017.R25): the decoding of
 //! the requests of every protocol in `midl/` through the bindings that
 //! midlc generates, here against the mock kernel of midl-tests, and the
-//! permission broker's store of grants.
+//! permission broker's store of grants. And the drivers' parsers of what
+//! hot-pluggable devices and media report (MIKSPEC-0017.R26,
+//! MIKSPEC-0025.R67): xhci's USB descriptors, usbhid's report
+//! descriptors, the partition driver's tables and probes, and FAT and
+//! exFAT volumes, each from its driver's own source.
 
 extern crate alloc;
 
@@ -16,6 +20,42 @@ pub mod midl {
 #[allow(dead_code)]
 #[path = "../../../user/services/permbroker/src/permissions/mod.rs"]
 pub mod permissions;
+
+/// xhci's USB descriptors, from its own source.
+#[allow(dead_code)]
+#[path = "../../../user/drivers/xhci/src/descriptors.rs"]
+pub mod usb;
+
+/// usbhid's report descriptors, from its own source.
+#[allow(dead_code)]
+#[path = "../../../user/drivers/usbhid/src/hid/descriptor.rs"]
+pub mod hid;
+
+/// The partition driver's GPT, MBR and file system probes, from its own
+/// source.
+#[allow(dead_code)]
+#[path = "../../../user/drivers/partition/src/gpt/mod.rs"]
+pub mod gpt;
+
+/// A disk image in memory for the FAT and exFAT volumes.
+pub struct Image(pub Vec<u8>);
+
+impl mikros_fat::Device for Image {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), mikros_fat::Error> {
+        let at = usize::try_from(offset).map_err(|_| mikros_fat::Error::Io)?;
+        let end = at.checked_add(buf.len()).ok_or(mikros_fat::Error::Io)?;
+        buf.copy_from_slice(self.0.get(at..end).ok_or(mikros_fat::Error::Io)?);
+        Ok(())
+    }
+
+    fn write(&mut self, _offset: u64, _data: &[u8]) -> Result<(), mikros_fat::Error> {
+        Err(mikros_fat::Error::ReadOnly)
+    }
+
+    fn flush(&mut self) -> Result<(), mikros_fat::Error> {
+        Ok(())
+    }
+}
 
 use midl::__midl::{OwnedHandle, ServerEnd};
 
