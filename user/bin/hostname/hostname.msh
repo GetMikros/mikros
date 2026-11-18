@@ -1,0 +1,7 @@
+# What `hostname` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern hostname(
+    --short(-s): bool "only the part before the first dot",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

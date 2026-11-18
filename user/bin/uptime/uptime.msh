@@ -1,0 +1,9 @@
+# What `uptime` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern uptime(
+    --pretty(-p): bool "only how long the system has run, in words",
+    --since(-s): bool "only the time the system started",
+    --json: bool "write an object with the time, the seconds up and the start",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

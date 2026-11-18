@@ -486,6 +486,14 @@ name = "hello-std"
 version = "0.0.0"
 
 [[package]]
+name = "hostname"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1518,6 +1526,14 @@ name = "union-probe"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
+]
+
+[[package]]
+name = "uptime"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
 ]
 
 [[package]]
