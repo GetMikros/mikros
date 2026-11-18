@@ -1446,6 +1446,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "timeout"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "timesvc"
 version = "0.0.0"
 dependencies = [

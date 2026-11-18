@@ -1,0 +1,12 @@
+# What `timeout` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern timeout(
+    duration: string "how long the command may run: a number with s, m, h or d, 0 for ever",
+    ...command: command "the command to run and its arguments",
+    --signal(-s): string "the signal to send when the time is up, TERM without",
+    --kill-after(-k): string "send KILL this long after the signal, if it still runs",
+    --preserve-status: bool "exit with the command's status also when the time was up",
+    --foreground: bool "signal only the command, which may then read the terminal",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
