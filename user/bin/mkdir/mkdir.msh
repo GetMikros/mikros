@@ -1,0 +1,10 @@
+# What `mkdir` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern mkdir(
+    ...folder: folder "the folders to create",
+    --parents(-p): bool "create the folders above too, and accept folders that exist",
+    --verbose(-v): bool "name each folder created",
+    --mode(-m): string "the mode, octal or symbolic as chmod takes it, such as 755 or u=rwx,go=rx",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

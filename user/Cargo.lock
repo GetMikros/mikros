@@ -767,6 +767,14 @@ name = "mikros-yaml"
 version = "0.0.0"
 
 [[package]]
+name = "mkdir"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "msh"
 version = "0.0.0"
 dependencies = [
