@@ -18,7 +18,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
+use mikros_rt::interfaces::mikros::driver::{DeviceManagerAsyncClient, Property};
 use mikros_storage::{MS, now};
 
 /// Standard requests.
@@ -344,7 +344,11 @@ impl Usb {
                 alternate: Cell::new(0),
                 id: Cell::new(0),
             });
-            match self.manager.add_device(name, ids, vec![], vec![]).await {
+            let properties = vec![Property {
+                key: "location".into(),
+                value: location(&device.slot.place),
+            }];
+            match self.manager.add_device(name, ids, properties, vec![]).await {
                 Ok(Ok(response)) => {
                     added.id.set(response.id);
                     self.interfaces
@@ -480,6 +484,19 @@ fn name(place: &Place) -> String {
         route >>= 4;
     }
     name
+}
+
+/// The `location` of an interface device's USB device at `place`
+/// (MIKSPEC-0025.R70): `usb-` and the root hub port, then `/usb-` and the
+/// hub port at each tier below it, all counted from 1.
+fn location(place: &Place) -> String {
+    let mut location = format!("usb-{}", place.root_port);
+    let mut route = place.route;
+    while route & 0xF != 0 {
+        location.push_str(&format!("/usb-{}", route & 0xF));
+        route >>= 4;
+    }
+    location
 }
 
 /// A standard GET_DESCRIPTOR request for `length` bytes of descriptor

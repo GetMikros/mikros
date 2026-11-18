@@ -28,7 +28,7 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
     DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
-    DriverStopResponse,
+    DriverStopResponse, Property,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
@@ -226,8 +226,9 @@ async fn start(
     Ok((controller, namespaces, manager))
 }
 
-/// Adds each namespace's device, as `disk-<nsid>` and `storage:disk`,
-/// and publishes and serves its raw access service. Keeps the device
+/// Adds each namespace's device, as `disk-<nsid>` and `storage:disk`
+/// with the `location` `nvme-<nsid>` (MIKSPEC-0025.R70), and publishes
+/// and serves its raw access service. Keeps the device
 /// manager's channel open for as long as the driver runs.
 async fn add_disks(
     namespaces: Vec<Rc<Namespace>>,
@@ -240,7 +241,11 @@ async fn add_disks(
     for namespace in &namespaces {
         let name = format!("disk-{}", namespace.nsid);
         let info = mikros_storage::Disk::info(&**namespace);
-        let properties = mikros_storage::disk_properties(&info);
+        let mut properties = mikros_storage::disk_properties(&info);
+        properties.push(Property {
+            key: "location".into(),
+            value: format!("nvme-{}", namespace.nsid),
+        });
         let device = manager
             .add_device(name, vec![DISK_ID.into()], properties, vec![])
             .await;

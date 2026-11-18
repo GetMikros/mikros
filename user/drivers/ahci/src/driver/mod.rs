@@ -27,7 +27,7 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
     DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
-    DriverStopResponse,
+    DriverStopResponse, Property,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
@@ -354,8 +354,9 @@ async fn interrupts(
     Ok(())
 }
 
-/// Adds each disk's device, as `disk-<port>` and `storage:disk`, and
-/// publishes and serves its raw access service. Keeps the device
+/// Adds each disk's device, as `disk-<port>` and `storage:disk` with the
+/// `location` `sata-<port>` (MIKSPEC-0025.R70), and publishes and serves
+/// its raw access service. Keeps the device
 /// manager's channel open for as long as the driver runs.
 async fn add_disks(
     disks: Vec<Rc<Disk>>,
@@ -368,7 +369,11 @@ async fn add_disks(
     for disk in &disks {
         let name = format!("disk-{}", disk.port.number);
         let info = mikros_storage::Disk::info(&**disk);
-        let properties = mikros_storage::disk_properties(&info);
+        let mut properties = mikros_storage::disk_properties(&info);
+        properties.push(Property {
+            key: "location".into(),
+            value: format!("sata-{}", disk.port.number),
+        });
         let device = manager
             .add_device(name, vec![DISK_ID.into()], properties, vec![])
             .await;
