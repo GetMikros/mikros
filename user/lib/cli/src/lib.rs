@@ -4,10 +4,13 @@
 //! `Command` is the older form, which the utilities leave as they move
 //! to the tables.
 
+#![cfg_attr(target_os = "mikros", feature(mikros_handles))]
+
 extern crate alloc;
 
 pub mod colour;
 pub mod complete;
+mod pager;
 pub mod size;
 pub mod spec;
 mod start;

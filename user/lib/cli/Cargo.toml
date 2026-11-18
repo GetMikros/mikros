@@ -8,6 +8,14 @@ publish = false
 [dependencies]
 mikros-tz = { path = "../tz" }
 
+# The terminal service, for the size that paged help needs.
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+
 # It needs the standard library, which every program that uses it has.
 [package.metadata.mikros]
 runtime = "std"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

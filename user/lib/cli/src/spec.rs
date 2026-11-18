@@ -222,6 +222,9 @@ pub struct Spec {
     /// Whether options end at the first operand, for commands whose
     /// operands are a command to run.
     pub stops: bool,
+    /// Whether `--help` that does not fit the terminal goes through
+    /// less: for every command but less itself.
+    pub pages_help: bool,
 }
 
 impl Spec {
@@ -234,6 +237,7 @@ impl Spec {
             options: &[],
             subcommands: &[],
             stops: false,
+            pages_help: true,
         }
     }
 }

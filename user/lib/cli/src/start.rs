@@ -13,9 +13,10 @@ const COMPLETE: &str = "MSH_COMPLETE";
 
 /// The run that `spec` reads from the process's arguments. In
 /// completion mode, writes the candidates and exits with 0; with
-/// `--help`, writes the help and exits with 0; with invalid arguments,
-/// writes the reason and exits with 2. `list` names the system things
-/// that completion offers.
+/// `--help`, writes the help, through less when it does not fit the
+/// terminal unless the command is less, and exits with 0; with invalid
+/// arguments, writes the reason and exits with 2. `list` names the
+/// system things that completion offers.
 pub fn start(spec: &'static Spec, list: Lister) -> Run {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if std::env::var(COMPLETE).is_ok_and(|v| v == "1") {
@@ -31,7 +32,13 @@ pub fn start(spec: &'static Spec, list: Lister) -> Run {
     match spec.parse(arguments) {
         Parsed::Run(run) => run,
         Parsed::Help(path) => {
-            let _ = std::io::stdout().write_all(spec.help(&path).as_bytes());
+            let help = spec.help(&path);
+            match spec.pages_help {
+                true => crate::pager::show(&help),
+                false => {
+                    let _ = std::io::stdout().write_all(help.as_bytes());
+                }
+            }
             std::process::exit(i32::from(SUCCESS));
         }
         Parsed::Invalid(why) => {
