@@ -1,0 +1,12 @@
+# What `readlink` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern readlink(
+    ...path: path "the links to read",
+    --canonicalize(-f): bool "write the path resolved; all but the last component must exist",
+    --canonicalize-existing(-e): bool "write the path resolved; every component must exist",
+    --canonicalize-missing(-m): bool "write the path resolved; any component may be missing",
+    --no-newline(-n): bool "write no newline after a single target",
+    --zero(-z): bool "end each target with NUL, not a newline",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete

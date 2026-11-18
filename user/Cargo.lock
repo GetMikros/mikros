@@ -1009,6 +1009,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "readlink"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "realpath"
 version = "0.0.0"
 dependencies = [
