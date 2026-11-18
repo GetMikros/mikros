@@ -776,7 +776,18 @@ pub fn channel_call(
     let value = channel.value;
     let endpoint: Arc<Endpoint> = object(channel);
     let process = current_process()?;
-    let id = endpoint.begin_call(Some(process.budget()))?;
+    // The request's handles go on every failure before the request is
+    // written but those about the handles themselves, so that the caller
+    // never holds them after the call (MIKSPEC-0009.R36).
+    let unwritten = |e: Error| {
+        if !matches!(e, Error::InvalidArgs | Error::AccessDenied) {
+            close_handles(&process, UserIn::new(field(0x10)), wr_count);
+        }
+        e
+    };
+    let id = endpoint
+        .begin_call(Some(process.budget()))
+        .map_err(unwritten)?;
     let request = send(
         &endpoint,
         value,
@@ -785,7 +796,8 @@ pub fn channel_call(
         UserIn::new(field(0x10)),
         wr_count,
         Some(id),
-    );
+    )
+    .map_err(unwritten);
     let reply =
         request.and_then(|()| crate::wait::wait_call(&endpoint, &process, value, id, deadline));
     let reply = match reply {
@@ -828,6 +840,25 @@ pub fn channel_call(
             end_undelivered(outputs, e, len, count, &mut work);
             Err(e)
         }
+    }
+}
+
+/// Closes those of the `count` handles at `handles` that are still in the
+/// caller's table, at most `HANDLES_MAX`; none when they cannot be read.
+fn close_handles(process: &Arc<Process>, handles: UserIn<Handle>, count: u64) {
+    let count = (count as usize).min(HANDLES_MAX);
+    let mut values = [0; HANDLES_MAX];
+    if handles.read_into(&mut values[..count]).is_err() {
+        return;
+    }
+    for &h in &values[..count] {
+        // One at a time, as `handle_close` does: an object that goes with
+        // its entry is destroyed with no lock held.
+        let Ok(entry) = process.handles().lock().remove(h) else {
+            continue;
+        };
+        crate::wait::handle_closed(process, h);
+        drop(entry);
     }
 }
 

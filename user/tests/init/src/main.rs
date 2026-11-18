@@ -958,8 +958,41 @@ fn channel_calls(s: &Startup) -> Result {
     let (status, _, reply, _) = call(server, b"again", None, 64, now() + 2_000_000_000);
     ensure("calling again", status == 0 && &reply[4..9] == b"again")?;
 
+    // A call takes the request's handles also when it fails before it
+    // writes, unless the failure is about them (MIKSPEC-0009.R36).
+    let kept = create_memory(PAGE_SIZE)?;
+    let mut untransferable = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("dropping TRANSFER", unsafe {
+        sys::handle_replace(kept, right::READ | right::WRITE, &mut untransferable)
+    })?;
+    let (status, _, _, _) = call(
+        server,
+        b"kept",
+        Some(untransferable),
+        64,
+        now() + 2_000_000_000,
+    );
+    ensure(
+        "refusing a handle without TRANSFER",
+        status == ACCESS_DENIED,
+    )?;
+    ensure(
+        "leaving that handle with the caller",
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::handle_close(untransferable) } == 0,
+    )?;
+
     let (status, _, _, _) = call(server, b"quit", None, 64, now() + 2_000_000_000);
-    ensure("ending on a closed peer", status == -24)
+    ensure("ending on a closed peer", status == -24)?;
+    let taken = create_memory(PAGE_SIZE)?;
+    let (status, _, _, _) = call(server, b"gone", Some(taken), 64, now() + 2_000_000_000);
+    ensure("failing on the closed peer", status == -24)?;
+    ensure(
+        "closing the handle of the unwritten request",
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::handle_close(taken) } == BAD_HANDLE,
+    )
 }
 
 /// `STOP` sent to a process stops its thread, which spins in user mode,

@@ -7,10 +7,9 @@ use alloc::vec::Vec;
 
 pub const SHOULD_WAIT: i32 = -22;
 pub const PEER_CLOSED: i32 = -24;
+const INVALID_ARGS: Status = -10;
+const ACCESS_DENIED: Status = -13;
 const BUFFER_TOO_SMALL: Status = -15;
-const TIMED_OUT: Status = -21;
-const INTERRUPTED: Status = -27;
-const PEER_CLOSED_STATUS: Status = PEER_CLOSED as Status;
 
 /// The largest message, in bytes and in handles.
 const BYTES_MAX: usize = 65536;
@@ -170,16 +169,15 @@ pub fn channel_call(
     };
     match s {
         crate::OK => {}
-        // The request was written, so its handles are gone.
-        BUFFER_TOO_SMALL | TIMED_OUT | INTERRUPTED => return Err(s as i32),
-        // The peer may have closed before or after the request was
-        // written. The handles stay open rather than risk closing
-        // numbers the kernel has given to other handles since.
-        PEER_CLOSED_STATUS => return Err(s as i32),
-        _ => {
+        // Failures about the handles themselves leave them with the
+        // caller, whose handles this call consumes.
+        INVALID_ARGS | ACCESS_DENIED => {
             close_all(handles);
             return Err(s as i32);
         }
+        // On every other failure the kernel took them: it wrote them, or
+        // closed them when it did not (MIKSPEC-0009.R36).
+        _ => return Err(s as i32),
     }
     reply.truncate(out[0] as usize);
     reply_handles.truncate(out[1] as usize);
