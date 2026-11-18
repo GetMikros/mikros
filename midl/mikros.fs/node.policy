@@ -36,6 +36,7 @@ Node.ConnectSocket: data-dependent:mikros_acl::permits
 Node.GetRevocableMemoryObject: data-dependent:mikros_acl::permits
 Node.SetOwner: data-dependent:mikros_acl::permits
 Node.GetAcl: public
+Node.Access: public
 Node.SetAcl: data-dependent:mikros_acl::midl::may_manage
 Node.Restrict: public
 Node.Exchange: data-dependent:mikros_acl::permits

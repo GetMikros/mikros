@@ -158,6 +158,13 @@ impl<F: Format> Connection<F> {
             R::SetOwner(_, r) => {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
+            // Without lists, the connection's rights alone decide.
+            R::Access(_, r) => r.reply(
+                s,
+                Ok(NodeAccessResponse {
+                    rights: self.rights,
+                }),
+            ),
             R::GetAcl(q, r) => {
                 let entries = self.fs.attributes(self.target).and_then(|a| {
                     mikros_acl::midl::of_mode(a.mode, a.r#type == NodeType::Directory, q.default)

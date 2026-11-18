@@ -171,6 +171,7 @@ impl Connection {
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::SetOwner(q, r) => r.reply(s, self.set_owner(q.owner)),
             R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default)),
+            R::Access(_, r) => r.reply(s, self.access()),
             R::SetAcl(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Restrict(q, r) => r.reply(s, self.restrict(q)),
             R::Exchange(q, r) => r.reply(s, self.exchange(q).map(|()| NodeExchangeResponse {})),
@@ -216,6 +217,19 @@ impl Connection {
     /// The owner of the nodes the connection makes.
     fn new_owner(&self) -> u32 {
         mikros_acl::new_owner(self.subject.as_ref())
+    }
+
+    /// The rights with which the connection's operations would be
+    /// allowed: its own, as far as the node's access list grants them
+    /// to its subject (MIKSPEC-0049.R36).
+    fn access(&self) -> Result<NodeAccessResponse, Error> {
+        let tree = self.fs.tree.borrow();
+        let node = tree.get(self.node).ok_or(Error::NotFound)?;
+        let subject = self.subject.as_ref();
+        let rights = mikros_acl::access(subject, node.acl.as_deref(), node.owner, self.rights.0);
+        Ok(NodeAccessResponse {
+            rights: Rights(rights),
+        })
     }
 
     /// The node's access list, or with `default` a directory's default

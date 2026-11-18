@@ -227,6 +227,22 @@ pub fn permits(
     }
 }
 
+/// Which of `rights`, a connection's rights, a connection with `subject`
+/// may use on a node owned by `owner` whose access list is `entries`, if
+/// it has an extended one, as `permits` decides each of them
+/// (MIKSPEC-0049.R36).
+pub fn access(
+    subject: Option<&Subject>,
+    entries: Option<&[Entry]>,
+    owner: u32,
+    rights: u32,
+) -> u32 {
+    [READ, WRITE, EXECUTE]
+        .into_iter()
+        .filter(|&r| rights & r != 0 && permits(subject, entries, owner, r))
+        .fold(0, |all, r| all | r)
+}
+
 /// Whether a connection with `subject` needs `admin.acls.manage` to set
 /// the lists of a node owned by `owner`: unless it has no subject, or
 /// one of user 0 or the owner.

@@ -213,6 +213,7 @@ impl Connection {
                 r.reply(s, self.fs.durable(set).await)
             }
             R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default)),
+            R::Access(_, r) => r.reply(s, self.access()),
             R::SetAcl(q, r) => {
                 let set = self.set_acl(q).await;
                 r.reply(

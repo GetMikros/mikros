@@ -10,9 +10,9 @@ use super::{FOREVER, Given};
 use mikros_mika::format::{Entry, Kind, Package};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
-    Attributes, DirEntry, Error, FilesystemInfo, MemoryFlags, Node, NodeCloneResponse,
-    NodeGetAttributesResponse, NodeGetMemoryObjectResponse, NodeOpenRequest, NodeOpenResponse,
-    NodeQueryFilesystemResponse, NodeReadDirectoryResponse, NodeReadLinkResponse,
+    Attributes, DirEntry, Error, FilesystemInfo, MemoryFlags, Node, NodeAccessResponse,
+    NodeCloneResponse, NodeGetAttributesResponse, NodeGetMemoryObjectResponse, NodeOpenRequest,
+    NodeOpenResponse, NodeQueryFilesystemResponse, NodeReadDirectoryResponse, NodeReadLinkResponse,
     NodeReadNextResponse, NodeReadResponse, NodeRequest, NodeRestrictResponse, NodeSeekResponse,
     NodeServer, NodeSyncResponse, NodeType, OpenFlags, Rights, SeekOrigin,
 };
@@ -473,6 +473,8 @@ fn serve(opened: &Arc<Opened>, end: ServerEnd<Node>, path: String, rights: Right
             ),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetAcl(_, r) => r.reply(s, Err(Error::NotSupported)),
+            // Without lists, the connection's rights alone decide.
+            R::Access(_, r) => r.reply(s, Ok(NodeAccessResponse { rights })),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),

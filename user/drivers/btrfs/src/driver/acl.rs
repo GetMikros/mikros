@@ -128,6 +128,19 @@ impl Connection {
 
     /// The node's access list, or with `default` a directory's default
     /// list (MIKSPEC-0049.R31).
+    /// The rights with which the connection's operations would be
+    /// allowed: its own, as far as the node's access list grants them
+    /// to its subject (MIKSPEC-0049.R36).
+    pub(crate) fn access(&self) -> Result<NodeAccessResponse, Error> {
+        let lists = self.open.lists()?;
+        let owner = self.open.attributes()?.owner;
+        let subject = self.subject.as_ref();
+        let rights = mikros_acl::access(subject, lists.access.as_deref(), owner, self.rights.0);
+        Ok(NodeAccessResponse {
+            rights: Rights(rights),
+        })
+    }
+
     pub(crate) fn get_acl(&self, default: bool) -> Result<NodeGetAclResponse, Error> {
         let lists = self.open.lists()?;
         let directory = self.open.is_directory()?;

@@ -1,4 +1,4 @@
-// MIKSPEC-0049.R34, MIKSPEC-0049.R17, MIKSPEC-0049.R27
+// MIKSPEC-0049.R34, MIKSPEC-0049.R17, MIKSPEC-0049.R27, MIKSPEC-0049.R36
 
 library mikros.fs;
 using mikros.base;
@@ -147,4 +147,5 @@ protocol Node {
                  node server_end<Node>) -> () error Error;
     @40 Exchange(name string<255>, target base.Token,
                  other_name string<255>) -> () error Error;
+    @41 Access() -> (rights Rights) error Error;
 };

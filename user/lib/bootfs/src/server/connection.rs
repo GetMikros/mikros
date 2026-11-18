@@ -89,6 +89,13 @@ impl Connection {
             R::SetOwner(_, r) => {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
+            // Without lists, the connection's rights alone decide.
+            R::Access(_, r) => r.reply(
+                s,
+                Ok(NodeAccessResponse {
+                    rights: self.rights,
+                }),
+            ),
             R::GetAcl(q, r) => {
                 let a = self.attributes(self.node);
                 let entries =

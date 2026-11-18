@@ -216,6 +216,7 @@ impl Connection {
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::SetOwner(q, r) => r.reply(s, flat(b.set_owner(q.owner).await)),
             R::GetAcl(q, r) => r.reply(s, flat(b.get_acl(q.default).await)),
+            R::Access(_, r) => r.reply(s, flat(b.access().await)),
             R::SetAcl(q, r) => r.reply(s, flat(b.set_acl(q.default, q.entries).await)),
             R::Restrict(q, r) => r.reply(s, self.restrict(q).await),
             R::Exchange(q, r) => r.reply(s, flat(b.exchange(q.name, q.target, q.other_name).await)),

@@ -402,6 +402,8 @@ async fn serve(
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             // The directory stores no owner and no lists.
             R::SetOwner(_, r) => r.reply(s, Err(not_stored(rights))),
+            // Without lists, the connection's rights alone decide.
+            R::Access(_, r) => r.reply(s, Ok(NodeAccessResponse { rights })),
             R::GetAcl(q, r) => r.reply(
                 s,
                 mikros_acl::midl::of_mode(directory_attributes(1).mode, true, q.default)

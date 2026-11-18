@@ -127,6 +127,25 @@ fn only_subjects_other_than_user_0_meet_extended_lists() {
 }
 
 #[test]
+fn access_keeps_the_rights_that_the_list_grants() {
+    let list = owner_user_app();
+    let all = READ | WRITE | EXECUTE;
+    // Rights alone without a subject, as user 0, or without a list.
+    assert_eq!(access(None, Some(&list), 1000, all), all);
+    assert_eq!(access(Some(&subject(0, 0)), Some(&list), 1000, READ), READ);
+    assert_eq!(
+        access(Some(&subject(1002, 0)), None, 1000, READ | WRITE),
+        READ | WRITE
+    );
+    // A subject the list names only for reading keeps only that.
+    assert_eq!(
+        access(Some(&subject(1001, 0)), Some(&list), 1000, all),
+        READ
+    );
+    assert_eq!(access(Some(&subject(1001, 0)), Some(&list), 1000, WRITE), 0);
+}
+
+#[test]
 fn others_than_the_owner_and_user_0_need_the_permission() {
     assert!(!needs_manage(None, 1000));
     assert!(!needs_manage(Some(&subject(0, 0)), 1000));

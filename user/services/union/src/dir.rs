@@ -75,6 +75,7 @@ impl Connection {
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::SetOwner(q, r) => r.reply(s, self.set_owner(q.owner).await),
             R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default).await),
+            R::Access(_, r) => r.reply(s, self.access().await),
             R::SetAcl(q, r) => r.reply(s, self.set_acl(q).await),
             R::Restrict(q, r) => r.reply(s, self.restrict(q).await),
             // A view cannot swap names of several layers in one step.
@@ -264,6 +265,16 @@ impl Connection {
         }
         self.dir.view.spawner.spawn(serve(dir, q.node, self.rights));
         Ok(NodeRestrictResponse {})
+    }
+
+    /// What the first layer allows its connection, as far as the view's
+    /// connection has the rights; the first layer's list is the folder's.
+    async fn access(&self) -> Result<NodeAccessResponse, Error> {
+        let (_, first) = self.dir.first().ok_or(Error::NotFound)?;
+        let layer = flat(first.access().await)?;
+        Ok(NodeAccessResponse {
+            rights: Rights(layer.rights.0 & self.rights.0),
+        })
     }
 
     async fn get_acl(&self, default: bool) -> Result<NodeGetAclResponse, Error> {

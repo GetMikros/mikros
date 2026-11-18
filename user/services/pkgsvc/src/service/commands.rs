@@ -14,10 +14,10 @@ use mikros_mika::manifest::Manifest;
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{
-    Attributes, DirEntry, Error, FilesystemInfo, Node, NodeClient, NodeCloneResponse,
-    NodeGetAttributesResponse, NodeOpenRequest, NodeOpenResponse, NodeQueryFilesystemResponse,
-    NodeReadDirectoryResponse, NodeRequest, NodeRestrictResponse, NodeServer, NodeSyncResponse,
-    NodeType, OpenFlags, Rights,
+    Attributes, DirEntry, Error, FilesystemInfo, Node, NodeAccessResponse, NodeClient,
+    NodeCloneResponse, NodeGetAttributesResponse, NodeOpenRequest, NodeOpenResponse,
+    NodeQueryFilesystemResponse, NodeReadDirectoryResponse, NodeRequest, NodeRestrictResponse,
+    NodeServer, NodeSyncResponse, NodeType, OpenFlags, Rights,
 };
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use std::collections::BTreeMap;
@@ -368,6 +368,8 @@ fn serve(shared: &Arc<Shared>, end: ServerEnd<Node>, rights: Rights, subject: Op
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::GetAcl(_, r) => r.reply(s, Err(Error::NotSupported)),
+            // Without lists, the connection's rights alone decide.
+            R::Access(_, r) => r.reply(s, Ok(NodeAccessResponse { rights })),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
