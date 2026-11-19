@@ -1738,6 +1738,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wc"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "whoami"
 version = "0.0.0"
 dependencies = [

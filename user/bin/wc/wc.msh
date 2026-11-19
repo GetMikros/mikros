@@ -1,0 +1,13 @@
+# What `wc` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern wc(
+    ...file: file "the files to count, or - for standard input",
+    --lines(-l): bool "count lines",
+    --words(-w): bool "count words",
+    --chars(-m): bool "count characters",
+    --bytes(-c): bool "count bytes",
+    --max-line-length(-L): bool "show the width of the longest line",
+    --json: bool "write the counts as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
