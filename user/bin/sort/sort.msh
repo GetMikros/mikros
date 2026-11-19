@@ -1,0 +1,21 @@
+# What `sort` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern sort(
+    ...file: file "the files to sort, or - for standard input",
+    --numeric-sort(-n): bool "compare as decimal numbers",
+    --human-numeric-sort(-h): bool "compare as sizes, such as 2K and 1G",
+    --version-sort(-V): bool "compare as version numbers",
+    --reverse(-r): bool "reverse the order",
+    --unique(-u): bool "write only the first of equal lines",
+    --ignore-case(-f): bool "compare without regard to case",
+    --ignore-leading-blanks(-b): bool "ignore blanks at the start of keys",
+    --stable(-s): bool "keep equal lines in their order",
+    --merge(-m): bool "merge files that are already sorted",
+    --check(-c): bool "check that the input is sorted",
+    --key(-k): string "compare by a key: field[.char][options][,field[.char][options]]",
+    --field-separator(-t): string "the character between fields, blanks when absent",
+    --output(-o): file "write to this file",
+    --zero-terminated(-z): bool "lines end with a NUL byte",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
