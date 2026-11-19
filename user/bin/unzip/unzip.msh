@@ -1,0 +1,18 @@
+# What `unzip` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern unzip(
+    archive: file "the zip archive",
+    ...name: string "the entries to take, as wildcard patterns; every one when none is named",
+    -d: folder "extract into this folder instead of the current one",
+    -l: bool "list each entry's size, modified time and name",
+    -t: bool "check every entry's CRC-32 without writing anything",
+    -p: bool "write the contents to standard output",
+    -q: bool "print nothing but errors",
+    -j: bool "extract without the entries' folders",
+    -o: bool "overwrite existing files without asking",
+    -n: bool "never overwrite existing files",
+    -x: string "leave out the entries that this pattern matches",
+    --json: bool "with -l, write the entries as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
