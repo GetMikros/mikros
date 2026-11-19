@@ -2,17 +2,12 @@
 //! `user/ports/<name>/port.toml` with its Mikros changes beside it:
 //!
 //! - `[source]`: the `url` of the archive of its source, the archive's
-//!   `sha256`, the directory `dir` that holds the source once it is
-//!   unpacked, and `rewrites`, pairs of texts: the first of each is
-//!   replaced with the second in every file of the source when it is
+//!   `sha256`, and the directory `dir` that holds the source once it is
 //!   unpacked;
-//! - `[[crate]]`: for a Rust project, each crate it depends on that needs
-//!   changes too, by `name`, `version` and `sha256`, and whether the
-//!   rewrites apply to it, `rewritten`;
 //! - `[build]`: the `options` that a Meson project is configured with;
 //! - `[tests]`: `data`, the directories of its source that its tests read.
 //!
-//! The changes that are not rewrites are patch files, in `patches/`. The
+//! Its changes are patch files, in `patches/`. The
 //! Meson projects are built here, the others by modules of their own.
 
 use anyhow::{Context, Result, bail};
@@ -30,22 +25,11 @@ pub struct Port {
     pub sha256: String,
     /// The directory that holds the source once it is unpacked.
     pub source: String,
-    pub rewrites: Vec<(String, String)>,
-    pub crates: Vec<Crate>,
     /// The options it is configured with.
     pub options: Vec<String>,
     /// The directories of its source, relative to it, that its tests
     /// read.
     pub test_data: Vec<String>,
-}
-
-/// A crate that a ported Rust project depends on, which needs changes.
-pub struct Crate {
-    pub name: String,
-    pub version: String,
-    pub sha256: String,
-    /// Whether the port's rewrites apply to it.
-    pub rewritten: bool,
 }
 
 /// The port `name`, from its `port.toml`.
@@ -58,40 +42,12 @@ pub fn load(name: &str) -> Result<Port> {
 
 fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
     let table: toml::Table = text.parse()?;
-    only(&table, "the file", &["source", "crate", "build", "tests"])?;
+    only(&table, "the file", &["source", "build", "tests"])?;
     let source = table
         .get("source")
         .and_then(|s| s.as_table())
         .context("no [source] table")?;
-    only(source, "[source]", &["url", "sha256", "dir", "rewrites"])?;
-    let mut rewrites = Vec::new();
-    for pair in array(source, "rewrites")? {
-        match pair.as_array().map(|p| p.as_slice()) {
-            Some([toml::Value::String(from), toml::Value::String(to)]) => {
-                rewrites.push((from.clone(), to.clone()));
-            }
-            _ => bail!("a rewrite is not a pair of strings"),
-        }
-    }
-    let mut crates = Vec::new();
-    if let Some(list) = table.get("crate") {
-        for c in list
-            .as_array()
-            .context("`crate` is not an array of tables")?
-        {
-            let c = c.as_table().context("a [[crate]] is not a table")?;
-            only(c, "[[crate]]", &["name", "version", "sha256", "rewritten"])?;
-            crates.push(Crate {
-                name: string(c, "name")?,
-                version: string(c, "version")?,
-                sha256: string(c, "sha256")?,
-                rewritten: c
-                    .get("rewritten")
-                    .and_then(|r| r.as_bool())
-                    .context("a [[crate]] does not say whether it is `rewritten`")?,
-            });
-        }
-    }
+    only(source, "[source]", &["url", "sha256", "dir"])?;
     let section = |key: &str, keys: &[&str]| -> Result<Vec<String>> {
         match table.get(key) {
             None => Ok(Vec::new()),
@@ -110,8 +66,6 @@ fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
         url: string(source, "url")?,
         sha256: string(source, "sha256")?,
         source: string(source, "dir")?,
-        rewrites,
-        crates,
         options: section("build", &["options"])?,
         test_data: section("tests", &["data"])?,
     })
@@ -217,7 +171,7 @@ mod tests {
         assert!(parse("x", PathBuf::new(), ok).is_ok());
         let typo = "[source]\nurl = \"u\"\nsha265 = \"s\"\ndir = \"d\"\n";
         assert!(parse("x", PathBuf::new(), typo).is_err());
-        let rewrite = format!("{ok}rewrites = [[\"a\"]]\n");
-        assert!(parse("x", PathBuf::new(), &rewrite).is_err());
+        let crates = format!("{ok}[[crate]]\nname = \"a\"\n");
+        assert!(parse("x", PathBuf::new(), &crates).is_err());
     }
 }

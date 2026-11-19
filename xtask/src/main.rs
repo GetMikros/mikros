@@ -11,10 +11,6 @@ mod check;
 mod cmake;
 mod components;
 mod console;
-// The uutils port, which nothing builds since the switch; it goes with
-// its port.
-#[allow(dead_code)]
-mod coreutils;
 mod debug;
 mod debug_build;
 mod debuginfo;
