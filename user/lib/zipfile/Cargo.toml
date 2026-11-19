@@ -1,0 +1,10 @@
+[package]
+name = "mikros-zip"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+# It needs the standard library, which every program that uses it has.
+[package.metadata.mikros]
+runtime = "std"
