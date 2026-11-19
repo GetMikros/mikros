@@ -43,7 +43,8 @@ fn toolchain_library() -> Result<PathBuf> {
 }
 
 /// The patched copy of the standard library source, made again from
-/// the toolchain's whenever the toolchain or the patches changed. Cargo
+/// the toolchain's whenever the toolchain, the patches or the rewrites
+/// of the libc crate changed. Cargo
 /// does not see changes in it, so the target directories of everything
 /// built with it, the user workspace's programs with std and coreutils,
 /// are removed then as well.
@@ -51,10 +52,12 @@ pub fn source() -> Result<PathBuf> {
     let root = crate::workspace_root();
     let toolchain = toolchain_library()?;
     let patches = crate::port::patches(&root.join("user/runtime/std/patches"))?;
+    // The rewrites of the libc crate count too, as patches do.
     let stamp = format!(
-        "{}\n{}\n",
+        "{}\n{}\n{:?}\n",
         toolchain.display(),
-        crate::port::stamp(&patches)?
+        crate::port::stamp(&patches)?,
+        (LIBC_CFGS, LIBC_BUILD, LIBC_STAT)
     );
     let library = dir().join("library");
     if fs::read_to_string(dir().join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
@@ -147,6 +150,16 @@ const LIBC_BUILD: [(&str, &str); 2] = [
     ),
 ];
 
+/// The file of the `libc` crate with musl's `struct stat` on x86_64, and
+/// the replacement that gives it the creation time that the Mikros C
+/// library keeps in two of its unused words (MIKSPEC-0033.R41), by the
+/// names the BSDs use, which std reads (MIKSPEC-0060.R14).
+const LIBC_STAT_FILE: &str = "src/unix/linux_like/linux/musl/b64/x86_64/mod.rs";
+const LIBC_STAT: (&str, &str) = (
+    "        __unused: Padding<[c_long; 3]>,\n",
+    "        pub st_birthtime: crate::time_t,\n        pub st_birthtime_nsec: c_long,\n        __unused: Padding<[c_long; 1]>,\n",
+);
+
 /// Ports the `libc` crate at `crate_dir` to `mikros`.
 fn port_libc(crate_dir: &Path) -> Result<()> {
     for file in rust_files(&crate_dir.join("src"))? {
@@ -156,6 +169,16 @@ fn port_libc(crate_dir: &Path) -> Result<()> {
             fs::write(&file, ported)?;
         }
     }
+    let stat = crate_dir.join(LIBC_STAT_FILE);
+    let text = fs::read_to_string(&stat)?;
+    let (from, to) = LIBC_STAT;
+    if text.matches(from).count() != 1 {
+        bail!(
+            "{} has no single `struct stat` padding to replace",
+            stat.display()
+        );
+    }
+    fs::write(&stat, text.replace(from, to))?;
     let build = crate_dir.join("build.rs");
     let mut text = fs::read_to_string(&build)?;
     for (from, to) in LIBC_BUILD {

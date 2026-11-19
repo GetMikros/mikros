@@ -1,4 +1,5 @@
-//! `stat`, `lstat`, `fstat` and `fstatat`, from the attributes of a node.
+//! `stat`, `lstat`, `fstat`, `fstatat` and `statx`, from the attributes
+//! of a node, with its creation time.
 //!
 //! The file type comes from the node's type and the permission bits from
 //! its stored mode. Each namespace entry is a device of its own, the
@@ -42,7 +43,10 @@ pub struct Kstat {
     blksize: i64,
     blocks: i64,
     times: [i64; 6],
-    unused: [i64; 3],
+    /// `st_birthtim`, in the first two of musl's three unused words
+    /// (MIKSPEC-0033.R41).
+    birth: [i64; 2],
+    unused: [i64; 1],
 }
 
 /// The `S_IF` file type bits of `kind`.
@@ -65,6 +69,7 @@ fn from_attributes(a: &Attributes, device: u64) -> Kstat {
     let [atime, atime_ns] = split(a.accessed);
     let [mtime, mtime_ns] = split(a.modified);
     let [ctime, ctime_ns] = split(a.changed);
+    let [btime, btime_ns] = split(a.created);
     Kstat {
         dev: device,
         ino: a.inode,
@@ -77,6 +82,7 @@ fn from_attributes(a: &Attributes, device: u64) -> Kstat {
         blksize: BLOCK_SIZE,
         blocks: a.allocated.div_ceil(512) as i64,
         times: [atime, atime_ns, mtime, mtime_ns, ctime, ctime_ns],
+        birth: [btime, btime_ns],
         ..Kstat::default()
     }
 }
@@ -172,4 +178,97 @@ pub fn fstatat(dirfd: i64, path: *const u8, out: *mut Kstat, flag: i64) -> i64 {
                 .and_then(|c| attributes(&c.node, c.device)),
         });
     store(out, st)
+}
+
+/// A time of `struct statx`.
+#[repr(C)]
+#[derive(Default)]
+pub struct StatxTime {
+    sec: i64,
+    nsec: u32,
+    reserved: i32,
+}
+
+/// `struct statx` as musl and Linux define it.
+#[repr(C)]
+#[derive(Default)]
+pub struct Statx {
+    mask: u32,
+    blksize: u32,
+    attributes: u64,
+    nlink: u32,
+    uid: u32,
+    gid: u32,
+    mode: u16,
+    spare0: u16,
+    ino: u64,
+    size: u64,
+    blocks: u64,
+    attributes_mask: u64,
+    atime: StatxTime,
+    btime: StatxTime,
+    ctime: StatxTime,
+    mtime: StatxTime,
+    rdev_major: u32,
+    rdev_minor: u32,
+    dev_major: u32,
+    dev_minor: u32,
+    spare2: [u64; 14],
+}
+
+/// The basic facts that `statx` gives, and the creation time.
+const STATX_BASIC_STATS: u32 = 0x7ff;
+const STATX_BTIME: u32 = 0x800;
+
+/// `statx`: the facts of `fstatat`, with the creation time
+/// (MIKSPEC-0033.R41), whatever `mask` asks for.
+pub fn statx(dirfd: i64, path: *const u8, flag: i64, _mask: u32, out: *mut Statx) -> i64 {
+    if out.is_null() {
+        return -errno::EFAULT;
+    }
+    // Only the flags that fstatat knows; the sync ones change nothing.
+    const AT_STATX_SYNC_TYPE: i64 = 0x6000;
+    let mut st = Kstat::default();
+    let done = fstatat(dirfd, path, &mut st, flag & !AT_STATX_SYNC_TYPE);
+    if done != 0 {
+        return done;
+    }
+    let time = |sec: i64, nsec: i64| StatxTime {
+        sec,
+        nsec: nsec as u32,
+        reserved: 0,
+    };
+    let [atime, atime_ns, mtime, mtime_ns, ctime, ctime_ns] = st.times;
+    let x = Statx {
+        mask: STATX_BASIC_STATS | STATX_BTIME,
+        blksize: st.blksize as u32,
+        nlink: st.nlink as u32,
+        uid: st.uid,
+        gid: st.gid,
+        mode: st.mode as u16,
+        ino: st.ino,
+        size: st.size as u64,
+        blocks: st.blocks as u64,
+        atime: time(atime, atime_ns),
+        btime: time(st.birth[0], st.birth[1]),
+        ctime: time(ctime, ctime_ns),
+        mtime: time(mtime, mtime_ns),
+        rdev_major: major(st.rdev),
+        rdev_minor: minor(st.rdev),
+        dev_major: major(st.dev),
+        dev_minor: minor(st.dev),
+        ..Statx::default()
+    };
+    // SAFETY: musl passes a `struct statx` to fill.
+    unsafe { out.write(x) };
+    0
+}
+
+/// The major and minor numbers of a device number, as Linux splits it.
+fn major(dev: u64) -> u32 {
+    (((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff)) as u32
+}
+
+fn minor(dev: u64) -> u32 {
+    ((dev & 0xff) | ((dev >> 12) & !0xff)) as u32
 }

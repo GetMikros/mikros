@@ -1,0 +1,20 @@
+diff --git a/std/src/sys/fs/unix.rs b/std/src/sys/fs/unix.rs
+index 76560a8..66ba5b3 100644
+--- a/std/src/sys/fs/unix.rs
++++ b/std/src/sys/fs/unix.rs
+@@ -651,6 +651,7 @@ impl FileAttr {
+         target_os = "openbsd",
+         target_vendor = "apple",
+         target_os = "cygwin",
++        target_os = "mikros",
+     ))]
+     pub fn created(&self) -> io::Result<SystemTime> {
+         SystemTime::new(self.stat.st_birthtime as i64, self.stat.st_birthtime_nsec as i64)
+@@ -662,6 +663,7 @@ impl FileAttr {
+         target_os = "vita",
+         target_vendor = "apple",
+         target_os = "cygwin",
++        target_os = "mikros",
+     )))]
+     pub fn created(&self) -> io::Result<SystemTime> {
+         cfg_has_statx! {

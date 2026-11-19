@@ -127,6 +127,7 @@ const SYS_FCHMODAT2: i64 = 452;
 const SYS_UNAME: i64 = 63;
 const SYS_SETHOSTNAME: i64 = 170;
 const SYS_FACCESSAT2: i64 = 439;
+const SYS_STATX: i64 = 332;
 
 const PROT_READ: i64 = 1;
 const PROT_WRITE: i64 = 2;
@@ -249,6 +250,7 @@ extern "C" fn __mikros_syscall(
         SYS_FCHOWN => files::fchown(a1, a2 as u32, a3 as u32),
         SYS_FCHOWNAT => files::fchownat(a1, a2 as *const u8, a3 as u32, a4 as u32, a5),
         SYS_NEWFSTATAT => stat::fstatat(a1, a2 as *const u8, a3 as *mut stat::Kstat, a4),
+        SYS_STATX => stat::statx(a1, a2 as *const u8, a3, a4 as u32, a5 as *mut stat::Statx),
         SYS_GETDENTS64 => dir::getdents(a1, a2 as *mut u8, a3 as u64),
         SYS_GETCWD => fs::getcwd(a1 as *mut u8, a2 as u64),
         SYS_CHDIR => fs::chdir(a1 as *const u8),

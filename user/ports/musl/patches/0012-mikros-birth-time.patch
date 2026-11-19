@@ -1,0 +1,11 @@
+--- a/arch/x86_64/bits/stat.h
++++ b/arch/x86_64/bits/stat.h
+@@ -18,5 +18,7 @@
+ 	struct timespec st_atim;
+ 	struct timespec st_mtim;
+ 	struct timespec st_ctim;
+-	long __unused[3];
++	/* Mikros: the node's creation time, in two of the unused words. */
++	struct timespec st_birthtim;
++	long __unused[1];
+ };
