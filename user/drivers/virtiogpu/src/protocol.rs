@@ -3,16 +3,8 @@
 
 use alloc::vec::Vec;
 
-/// `VIRTIO_GPU_F_VIRGL`, `VIRTIO_GPU_F_EDID`, `VIRTIO_GPU_F_RESOURCE_BLOB`
-/// and `VIRTIO_GPU_F_CONTEXT_INIT`.
-pub const F_VIRGL: u64 = 1 << 0;
+/// `VIRTIO_GPU_F_EDID`, the only feature the driver asks for.
 pub const F_EDID: u64 = 1 << 1;
-pub const F_RESOURCE_BLOB: u64 = 1 << 3;
-pub const F_CONTEXT_INIT: u64 = 1 << 4;
-
-/// The control and cursor queues.
-pub const CONTROL_QUEUE: u16 = 0;
-pub const CURSOR_QUEUE: u16 = 1;
 
 /// The device configuration: `events_read`, `events_clear` and
 /// `num_scanouts`, and the display event.
