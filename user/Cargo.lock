@@ -1605,6 +1605,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tr"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "true"
 version = "0.0.0"
 dependencies = [

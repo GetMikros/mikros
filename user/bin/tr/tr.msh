@@ -1,0 +1,11 @@
+# What `tr` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern tr(
+    set1: string "the characters to find",
+    set2?: string "the characters to put in their place",
+    --complement(-c): bool "use the characters not in set1",
+    --delete(-d): bool "delete the characters of set1",
+    --squeeze-repeats(-s): bool "write a run of one character of the last set once",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
