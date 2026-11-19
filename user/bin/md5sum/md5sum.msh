@@ -1,0 +1,17 @@
+# What `md5sum` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern md5sum(
+    ...file: file "the files to hash, or the lists to check, or - for standard input",
+    --binary(-b): bool "mark the files as read in binary mode, with *",
+    --text(-t): bool "mark the files as read in text mode, the default",
+    --zero(-z): bool "end each line with NUL, not line feed, and do not escape names",
+    --tag: bool "write lines in the BSD form: MD5 (name) = sum",
+    --check(-c): bool "read sums from the files and check them",
+    --quiet: bool "with -c, do not print OK for each file that matches",
+    --status: bool "with -c, print nothing: the exit status tells",
+    --strict: bool "with -c, fail on lines that are not lines of sums",
+    --warn(-w): bool "with -c, warn about lines that are not lines of sums",
+    --json: bool "write the sums as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
