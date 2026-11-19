@@ -1572,6 +1572,15 @@ name = "system"
 version = "0.0.0"
 
 [[package]]
+name = "tail"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+ "mikros-rt",
+]
+
+[[package]]
 name = "tee"
 version = "0.0.0"
 dependencies = [
