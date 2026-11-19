@@ -1,0 +1,7 @@
+# What `yes` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern yes(
+    ...text: string "the text of each line, y when there is none",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
