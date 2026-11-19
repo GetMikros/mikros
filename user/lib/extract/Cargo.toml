@@ -1,0 +1,14 @@
+[package]
+name = "mikros-extract"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[features]
+# The helpers of `testing`, for the tests of the commands.
+testing = []
+
+# It needs the standard library, which every program that uses it has.
+[package.metadata.mikros]
+runtime = "std"
