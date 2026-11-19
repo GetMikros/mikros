@@ -29,6 +29,11 @@ use std::time::{Duration, Instant};
 
 const SEAT: &str = "sessionmgr: gave the console the display";
 const SETUP_DONE: &str = "sessionmgr: setup exited";
+/// What the service manager logs once the console asked for setup's
+/// terminal. Keys typed before it exists go to the login prompt that
+/// follows setup, not to setup, and on a loaded host the terminal
+/// service can start several seconds after the console got the display.
+const SETUP_TERMINAL: &str = "started service termsvc";
 /// What ada's msh runs first: global-check, which installs packages for
 /// every user and exits with the number of the check that failed.
 const GLOBAL_CHECK: &str = "g l o b a l minus c h e c k ret";
@@ -450,7 +455,11 @@ pub fn run_setup(
             Kind::Fuzz => SETUP_TIMES_FUZZ,
             _ => SETUP_TIMES,
         };
-    let mut steps = vec![Step::Wait(SEAT), Step::Sleep(SETTLE)];
+    let mut steps = vec![
+        Step::Wait(SEAT),
+        Step::Wait(SETUP_TERMINAL),
+        Step::Sleep(SETTLE),
+    ];
     for keys in SETUP_KEYS {
         steps.extend([Step::Keys(keys), Step::Sleep(QUESTION)]);
     }
