@@ -851,6 +851,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-sums"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+]
+
+[[package]]
 name = "mikros-test"
 version = "0.0.0"
 dependencies = [
