@@ -1,7 +1,7 @@
 //! date on Mikros: the time comes from the standard library's clock or a
 //! file's modified time, local times and their zones from the C
-//! library's `localtime_r` and `mktime`, in the system time zone of
-//! `/system/config/localtime` unless `TZ` names another, and `-s` sets
+//! library's `localtime_r` and `mktime`, in the system's time zone unless
+//! `TZ` names another (MIKSPEC-0033.R42), and `-s` sets
 //! the time with the time service's `SetUtc` (MIKSPEC-0054), which asks
 //! for `admin.time.set` itself.
 
@@ -20,9 +20,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CLOCK: &str = "mikros.time.Clock";
 const FOREVER: i64 = i64::MAX;
 const NANOS: i64 = 1_000_000_000;
-/// The system time zone (MIKSPEC-0054), which the C library does not
-/// look for itself.
-const LOCALTIME: &str = "/system/config/localtime";
 
 /// The C library's `struct tm`.
 #[repr(C)]
@@ -54,10 +51,6 @@ pub fn main() -> ExitCode {
         Ok(request) => request,
         Err(why) => return fail(&run, (INVALID, why)),
     };
-    if std::env::var_os("TZ").is_none() {
-        // SAFETY: no other thread runs yet.
-        unsafe { std::env::set_var("TZ", LOCALTIME) };
-    }
     let (seconds, nanos) = match when(&request) {
         Ok(when) => when,
         Err(failure) => return fail(&run, failure),

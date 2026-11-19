@@ -1,8 +1,7 @@
 //! uptime on Mikros: how long the system has run is the monotonic clock
 //! (MIKSPEC-0008.R21), which the C library's `CLOCK_MONOTONIC` reads,
 //! and local times come from the C library's `localtime_r`, in the
-//! system time zone of `/system/config/localtime` unless `TZ` names
-//! another.
+//! system's time zone unless `TZ` names another (MIKSPEC-0033.R42).
 
 use crate::since::{self, COMMAND, Civil, Show};
 use mikros_cli::{FAILURE, INVALID, Paint, SUCCESS, complain, start, time};
@@ -12,9 +11,6 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 
 const CLOCK_MONOTONIC: c_int = 1;
-/// The system time zone (MIKSPEC-0054), which the C library does not
-/// look for itself.
-const LOCALTIME: &str = "/system/config/localtime";
 
 #[repr(C)]
 struct Timespec {
@@ -52,10 +48,6 @@ pub fn main() -> ExitCode {
             return ExitCode::from(INVALID);
         }
     };
-    if std::env::var_os("TZ").is_none() {
-        // SAFETY: no other thread runs yet.
-        unsafe { std::env::set_var("TZ", LOCALTIME) };
-    }
     let mut now = Timespec {
         seconds: 0,
         nanoseconds: 0,
