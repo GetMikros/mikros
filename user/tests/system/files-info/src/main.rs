@@ -46,10 +46,9 @@ fn main() {
     }
 }
 
-/// Where the system installs the rewrite of `command`, beside the port's
-/// until the switch.
+/// Where the system installs `command`.
 pub fn utility(command: &str) -> String {
-    format!("/system/utilities/{command}")
+    format!("/system/bin/{command}")
 }
 
 /// Runs `program` with `arguments` until it exits.

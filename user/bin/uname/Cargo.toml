@@ -12,11 +12,11 @@ mikros-cli = { path = "../../lib/cli" }
 mikros-command = { path = "../../lib/command" }
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 
-# A rewrite of a command of the uutils port, beside it until the switch.
+# One of the commands that replaced the uutils port (MIKSPEC-0098.R4).
 # The booted version comes from bootsvc, which needs no permission, so
 # it has no program manifest.
 [package.metadata.mikros]
-kind = "utility"
+kind = "program"
 image = "system"
 completions = "uname.msh"
 

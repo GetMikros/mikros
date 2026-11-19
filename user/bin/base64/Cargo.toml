@@ -11,9 +11,9 @@ mikros-cli = { path = "../../lib/cli" }
 [target.'cfg(target_os = "mikros")'.dependencies]
 mikros-command = { path = "../../lib/command" }
 
-# A rewrite of a command of the uutils port, beside it until the switch.
+# One of the commands that replaced the uutils port (MIKSPEC-0098.R4).
 [package.metadata.mikros]
-kind = "utility"
+kind = "program"
 image = "system"
 completions = "base64.msh"
 

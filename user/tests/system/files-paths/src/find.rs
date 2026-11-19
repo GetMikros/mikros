@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 
 const FIND: &str = "/system/bin/find";
-const BASENAME: &str = "/system/utilities/basename";
+const BASENAME: &str = "/system/bin/basename";
 
 /// A tree `name` in `dir`: `a.txt` of five bytes, `b.log` empty,
 /// `sub/c.txt` of 2000 bytes, an empty folder `sub/empty` and a link

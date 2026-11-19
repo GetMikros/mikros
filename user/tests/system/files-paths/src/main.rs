@@ -11,12 +11,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const PWD: &str = "/system/utilities/pwd";
-const REALPATH: &str = "/system/utilities/realpath";
-const READLINK: &str = "/system/utilities/readlink";
-const BASENAME: &str = "/system/utilities/basename";
-const DIRNAME: &str = "/system/utilities/dirname";
-const MKTEMP: &str = "/system/utilities/mktemp";
+const PWD: &str = "/system/bin/pwd";
+const REALPATH: &str = "/system/bin/realpath";
+const READLINK: &str = "/system/bin/readlink";
+const BASENAME: &str = "/system/bin/basename";
+const DIRNAME: &str = "/system/bin/dirname";
+const MKTEMP: &str = "/system/bin/mktemp";
 
 /// What failed, and the exit status of the command, or -1 when it did
 /// not exit.

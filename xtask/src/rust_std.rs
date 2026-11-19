@@ -44,10 +44,9 @@ fn toolchain_library() -> Result<PathBuf> {
 
 /// The patched copy of the standard library source, made again from
 /// the toolchain's whenever the toolchain, the patches or the rewrites
-/// of the libc crate changed. Cargo
-/// does not see changes in it, so the target directories of everything
-/// built with it, the user workspace's programs with std and coreutils,
-/// are removed then as well.
+/// of the libc crate changed. Cargo does not see changes in it, so the
+/// target directory of everything built with it, the user workspace's
+/// programs with std, is removed then as well.
 pub fn source() -> Result<PathBuf> {
     let root = crate::workspace_root();
     let toolchain = toolchain_library()?;
@@ -63,7 +62,7 @@ pub fn source() -> Result<PathBuf> {
     if fs::read_to_string(dir().join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
         return Ok(library);
     }
-    for stale in [dir(), target_dir(), crate::coreutils::target_dir()] {
+    for stale in [dir(), target_dir()] {
         if stale.exists() {
             fs::remove_dir_all(&stale).with_context(|| format!("removing {}", stale.display()))?;
         }

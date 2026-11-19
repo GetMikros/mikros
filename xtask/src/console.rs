@@ -44,8 +44,8 @@ const GLOBAL_ASKS: Duration = Duration::from_secs(10);
 /// with a service, its last check but one.
 const GLOBAL_DONE: &str = "the service org.example.daemon.idle of a package was removed";
 /// How many times the run's timeout the setup run may take. Its msh
-/// session also pages with more and less, asks for authorization twelve
-/// times, and runs global-check, files-c and coreutils-check: in a debug
+/// session also pages with less, asks for authorization twelve times,
+/// and runs global-check and files-c: in a debug
 /// build under KVM the run takes about 600 s from boot to power-off,
 /// which the test init allows 780 s, and a fuzz build is about 3.3 times
 /// slower.
@@ -83,9 +83,7 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// without end, Ctrl-C, which must reach it while the console draws its
 /// output, and Ctrl-L, which clears the screen, so that what follows
 /// does not scroll the whole screen line by line, which is slow in a
-/// debug build; then `ls /system/bin | more`, which must page its input
-/// with keys read from the terminal, `q`, which quits it, and
-/// `if $status != 0 { exit 8 }`; then `ls /system/bin | less`, Space, which
+/// debug build; then `ls /system/bin | less`, Space, which
 /// shows its next screen, `/less` and Enter, which searches, `q` and
 /// `if $status != 0 { exit 10 }`; then `power off`, Escape on the
 /// `[y/N]` question and `if $status != 1 { exit 11 }`, which records
@@ -113,29 +111,16 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// which finds ada's home folder through the C library,
 /// `try { files-c . } catch e { exit 5 }`, which makes, changes and
 /// removes files in ada's home,
-/// `try { coreutils-check . } catch e { exit 6 }`, which runs the
-/// command-line utilities there,
 /// `cd /; if ((print /*) !~ 'users') { exit 4 }` and
 /// `exit ($n + 6 + $status)`, which exits with 7 when msh listed the one
 /// job, the kill worked, the host name is the one setup wrote, msh
 /// started in ada's home, the history gives that home as the folder of
-/// its first entry, files-c's and coreutils-check's checks
-/// passed, and `/`, which no namespace entry covers, is a folder that
+/// its first entry, files-c's checks passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `users`.
-const MSH_KEYS: [(&str, Duration); 55] = [
+const MSH_KEYS: [(&str, Duration); 51] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
-    (
-        "l s spc slash s y s t e m slash b i n spc shift-backslash spc m o r e ret",
-        JOB_START,
-    ),
-    ("q", QUESTION),
-    (
-        "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
-         shift-bracket_left spc e x i t spc 8 spc shift-bracket_right ret",
-        QUESTION,
-    ),
     (
         "l s spc slash s y s t e m slash b i n spc shift-backslash spc l e s s ret",
         JOB_START,
@@ -271,12 +256,6 @@ const MSH_KEYS: [(&str, Duration); 55] = [
     (
         "t r y spc shift-bracket_left spc f i l e s minus c spc dot spc shift-bracket_right spc \
          c a t c h spc e spc shift-bracket_left spc e x i t spc 5 spc shift-bracket_right ret",
-        QUESTION,
-    ),
-    (
-        "t r y spc shift-bracket_left spc c o r e u t i l s minus c h e c k spc dot spc \
-         shift-bracket_right spc c a t c h spc e spc shift-bracket_left spc e x i t spc 6 spc \
-         shift-bracket_right ret",
         QUESTION,
     ),
     (

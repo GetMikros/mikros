@@ -16,8 +16,7 @@ const LOGS: &str = "/system/bin/logs";
 const SERVICES: &str = "/system/bin/services";
 const PERMISSIONS: &str = "/system/bin/permissions";
 const ACCOUNTS: &str = "/system/bin/accounts";
-/// The rewrite of ls, beside the port's until the switch.
-const LS: &str = "/system/utilities/ls";
+const LS: &str = "/system/bin/ls";
 /// An app ID that no program has, whose grants the checks set.
 const NO_APP: &str = "system.no-such-app";
 /// A file that every system holds with devices.

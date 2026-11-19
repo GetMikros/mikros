@@ -302,7 +302,6 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", hello.display());
-            let coreutils_check = crate::rust_std::build("coreutils-check", kind)?;
             let global_check = crate::rust_std::build("global-check", kind)?;
             let forge_probe = crate::rust_std::build("forge-probe", kind)?;
             let forge_manifest =
@@ -1848,7 +1847,6 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     (sessions_manifest, test_sessions_manifest.as_path()),
                     ("system/bin/spawn-std", spawn_std.as_path()),
                     ("system/bin/files-c", files_c.as_path()),
-                    ("system/bin/coreutils-check", coreutils_check.as_path()),
                     ("system/bin/global-check", global_check.as_path()),
                     ("system/bin/forge-probe", forge_probe.as_path()),
                     (
@@ -1972,10 +1970,6 @@ fn login_members(
             let program = component_build(&component, kind)?;
             members.extend(component.members(kind, &program)?);
         }
-    }
-    // The command-line utilities, each its own program.
-    for (name, program) in crate::coreutils::build()? {
-        members.push((format!("system/bin/{name}"), program));
     }
     members.extend([
         (

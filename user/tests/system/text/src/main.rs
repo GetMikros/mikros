@@ -15,9 +15,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// Where the rewrites of the port's commands are, beside the port's
-/// until the switch.
-const UTILITIES: &str = "/system/utilities";
+/// Where the system installs the commands.
+const UTILITIES: &str = "/system/bin";
 
 /// The argument with which the test, run again, only sleeps for three
 /// seconds, as a process for `tail --pid` to outlive.

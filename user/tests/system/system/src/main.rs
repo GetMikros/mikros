@@ -1,8 +1,8 @@
 //! The system commands as a system test: each check runs one from where
-//! the system installs it, beside the uutils port until the switch, and
-//! looks at its exit status and what it wrote. It exits with 0 when every
-//! check passed, and otherwise with the number, from 1, of the first that
-//! failed, after writing its name and failure to standard error.
+//! the system installs it, and looks at its exit status and what it
+//! wrote. It exits with 0 when every check passed, and otherwise with the
+//! number, from 1, of the first that failed, after writing its name and
+//! failure to standard error.
 //!
 //! `true` and `false` fail in no other way than by their status, so they
 //! have no check of an error.
@@ -11,16 +11,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const DATE: &str = "/system/utilities/date";
-const ENV: &str = "/system/utilities/env";
-const SLEEP: &str = "/system/utilities/sleep";
-const TRUE: &str = "/system/utilities/true";
-const FALSE: &str = "/system/utilities/false";
-const TIMEOUT: &str = "/system/utilities/timeout";
-const UPTIME: &str = "/system/utilities/uptime";
-const HOSTNAME: &str = "/system/utilities/hostname";
-const UNAME: &str = "/system/utilities/uname";
-const WHOAMI: &str = "/system/utilities/whoami";
+const DATE: &str = "/system/bin/date";
+const ENV: &str = "/system/bin/env";
+const SLEEP: &str = "/system/bin/sleep";
+const TRUE: &str = "/system/bin/true";
+const FALSE: &str = "/system/bin/false";
+const TIMEOUT: &str = "/system/bin/timeout";
+const UPTIME: &str = "/system/bin/uptime";
+const HOSTNAME: &str = "/system/bin/hostname";
+const UNAME: &str = "/system/bin/uname";
+const WHOAMI: &str = "/system/bin/whoami";
 
 /// What failed, and the exit status of the command, or -1 when it did not
 /// exit.

@@ -13,12 +13,12 @@ mikros-tz = { path = "../../lib/tz" }
 mikros-command = { path = "../../lib/command" }
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 
-# A rewrite of a command of the uutils port, beside it until the switch.
+# One of the commands that replaced the uutils port (MIKSPEC-0098.R4).
 # It has no program manifest: setting the time needs admin.time.set,
 # for which the time service asks, and a command manifest would have to
 # name a program in /system/bin.
 [package.metadata.mikros]
-kind = "utility"
+kind = "program"
 image = "system"
 completions = "date.msh"
 
