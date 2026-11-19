@@ -1,0 +1,11 @@
+# What `head` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern head(
+    ...file: file "the files to read, or - for standard input",
+    --lines(-n): string "write the first count lines, 10 when absent, or with -count all but the last",
+    --bytes(-c): string "write the first size bytes, or with -size all but the last",
+    --quiet(-q): bool "write no names above the files",
+    --verbose(-v): bool "write the name above each file",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
