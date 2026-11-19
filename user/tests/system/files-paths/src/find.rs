@@ -99,6 +99,15 @@ pub fn sizes_and_empty(dir: &Folder) -> Result<(), Failure> {
     found(&run_, &root, "-size in bytes", &["/a.txt"])?;
     let run_ = run(FIND, &[&root, "-empty"])?;
     found(&run_, &root, "-empty", &["/b.log", "/sub/empty"])?;
+    // tmpfs keeps times since boot, so the files are given the time of
+    // now first.
+    for file in ["a.txt", "b.log", "sub/c.txt"] {
+        let stamped = std::fs::File::options()
+            .write(true)
+            .open(format!("{root}/{file}"))
+            .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+        stamped.map_err(|_| crate::failed("setting a modified time"))?;
+    }
     let run_ = run(FIND, &[&root, "-type", "f", "-mmin", "-60", "-mtime", "0"])?;
     found(
         &run_,
