@@ -1,0 +1,157 @@
+diff --git a/meson.build b/meson.build
+index ef34ba4..d31eaff 100644
+--- a/meson.build
++++ b/meson.build
+@@ -69,30 +69,22 @@ endif
+ config_h.set10('HAVE_BROKEN_MSG_CMSG_CLOEXEC', have_broken_msg_cmsg_cloexec)
+ 
+ if get_option('libraries')
+-	if host_machine.system() in ['freebsd', 'openbsd']
+-		# When building for FreeBSD, epoll(7) is provided by a userspace
+-		# wrapper around kqueue(2).
+-		epoll_dep = dependency('epoll-shim')
+-	else
+-		# Otherwise, assume that epoll(7) is supported natively.
+-		epoll_dep = []
+-	endif
++	# On Mikros only the client library is built, which needs neither
++	# epoll, signalfd nor timerfd.
+ 	ffi_dep = dependency('libffi')
+ 
+ 	decls = [
+-		{ 'header': 'sys/signalfd.h', 'symbol': 'SFD_CLOEXEC' },
+-		{ 'header': 'sys/timerfd.h', 'symbol': 'TFD_CLOEXEC' },
+ 		{ 'header': 'time.h', 'symbol': 'CLOCK_MONOTONIC' },
+ 	]
+ 
+ 	foreach d: decls
+-		if not cc.has_header_symbol(d['header'], d['symbol'], dependencies: epoll_dep, args: cc_args)
++		if not cc.has_header_symbol(d['header'], d['symbol'], args: cc_args)
+ 			error('@0@ is needed to compile Wayland libraries'.format(d['symbol']))
+ 		endif
+ 	endforeach
+ 
+ 	rt_dep = []
+-	if not cc.has_function('clock_gettime', prefix: '#include <time.h>')
++	if not cc.has_function('clock_gettime', prefix: '#include <time.h>', args: cc_args)
+ 		rt_dep = cc.find_library('rt')
+ 		if not cc.has_function('clock_gettime', prefix: '#include <time.h>', dependencies: rt_dep, args: cc_args)
+ 			error('clock_gettime not found')
+@@ -115,10 +107,6 @@ src_inc = include_directories('src')
+ 
+ subdir('src')
+ 
+-if get_option('libraries')
+-	subdir('cursor')
+-	subdir('egl')
+-endif
+ if get_option('tests')
+ 	subdir('tests')
+ endif
+diff --git a/src/meson.build b/src/meson.build
+index 984e34a..06724c1 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -99,7 +99,7 @@ if get_option('libraries')
+ 			'connection.c',
+ 			'wayland-os.c'
+ 		],
+-		dependencies: [ epoll_dep, ffi_dep, rt_dep ]
++		dependencies: [ ffi_dep, rt_dep ]
+ 	)
+ 
+ 	wayland_private_dep = declare_dependency(
+@@ -108,16 +108,6 @@ if get_option('libraries')
+ 	)
+ 
+ 	generated_headers = [
+-		{
+-			'scanner_args': ['server-header'],
+-			'output': 'wayland-server-protocol.h',
+-			'install': true,
+-		},
+-		{
+-			'scanner_args': ['server-header', '-c'],
+-			'output': 'wayland-server-protocol-core.h',
+-			'install': false,
+-		},
+ 		{
+ 			'scanner_args': ['client-header'],
+ 			'output': 'wayland-client-protocol.h',
+@@ -170,59 +160,6 @@ if get_option('libraries')
+ 		error('We probably need to bump the SONAME of libwayland-server and -client')
+ 	endif
+ 
+-	wayland_server = library(
+-		'wayland-server',
+-		sources: [
+-			wayland_server_protocol_core_h,
+-			wayland_server_protocol_h,
+-			wayland_protocol_c,
+-			'wayland-server.c',
+-			'wayland-shm.c',
+-			'event-loop.c'
+-		],
+-		# To avoid an unnecessary SONAME bump, wayland 1.x.y produces
+-		# libwayland-server.so.0.x.y.
+-		version: '.'.join(['0', wayland_version[1], wayland_version[2]]),
+-		dependencies: [
+-			epoll_dep,
+-			ffi_dep,
+-			wayland_private_dep,
+-			wayland_util_dep,
+-			mathlib_dep,
+-			threads_dep,
+-			rt_dep
+-		],
+-		include_directories: root_inc,
+-		install: true
+-	)
+-
+-	wayland_server_dep = declare_dependency(
+-		link_with: wayland_server,
+-		include_directories: [ root_inc, include_directories('.') ],
+-		dependencies: [ epoll_dep, ffi_dep, mathlib_dep, threads_dep ],
+-		sources: [
+-			wayland_server_protocol_core_h,
+-			wayland_server_protocol_h
+-		]
+-	)
+-
+-	pkgconfig.generate(
+-		wayland_server,
+-		name: 'Wayland Server',
+-		description: 'Server side implementation of the Wayland protocol',
+-		version: meson.project_version(),
+-		filebase: 'wayland-server',
+-		libraries: mathlib_dep,
+-		variables: [
+-			'datarootdir=' + join_paths('${prefix}', get_option('datadir')),
+-			'pkgdatadir=' + join_paths('${pc_sysrootdir}${datarootdir}', meson.project_name())
+-		]
+-	)
+-
+-	if meson.version().version_compare('>= 0.54.0')
+-		meson.override_dependency('wayland-server', wayland_server_dep)
+-	endif
+-
+ 	wayland_client = library(
+ 		'wayland-client',
+ 		sources: [
+@@ -235,7 +172,6 @@ if get_option('libraries')
+ 		# libwayland-client.so.0.x.y.
+ 		version: '.'.join(['0', wayland_version[1], wayland_version[2]]),
+ 		dependencies: [
+-			epoll_dep,
+ 			ffi_dep,
+ 			wayland_private_dep,
+ 			wayland_util_dep,
+@@ -274,8 +210,6 @@ if get_option('libraries')
+ 
+ 	install_headers([
+ 		'wayland-util.h',
+-		'wayland-server.h',
+-		'wayland-server-core.h',
+ 		'wayland-client.h',
+ 		'wayland-client-core.h',
+ 	])

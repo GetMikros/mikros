@@ -41,8 +41,9 @@ pub fn stamp(patches: &[PathBuf]) -> Result<String> {
 /// The file in a patched source that records which patches it has.
 pub const STAMP: &str = ".mikros-patches";
 
-/// The source `dir/<source>`, extracted from the gzip-compressed tar
-/// `archive`, with every patch in `patches` applied. It is extracted
+/// The source `dir/<source>`, extracted from the gzip- or, when its
+/// name ends in `.xz`, xz-compressed tar `archive`, with every patch in
+/// `patches` applied. It is extracted
 /// again whenever the patches changed, and the directories `stale`,
 /// built from the older source, are removed then.
 pub fn patched_source(
@@ -64,10 +65,18 @@ pub fn patched_source(
         }
     }
     println!("extracting {}", archive.display());
-    let gz = flate2::read::GzDecoder::new(File::open(archive)?);
-    tar::Archive::new(gz)
-        .unpack(dir)
-        .with_context(|| format!("extracting {}", archive.display()))?;
+    let unpacked = if archive.extension().is_some_and(|e| e == "xz") {
+        let mut tarball = Vec::new();
+        lzma_rs::xz_decompress(
+            &mut std::io::BufReader::new(File::open(archive)?),
+            &mut tarball,
+        )
+        .map_err(|e| anyhow::anyhow!("decompressing {}: {e}", archive.display()))?;
+        tar::Archive::new(tarball.as_slice()).unpack(dir)
+    } else {
+        tar::Archive::new(flate2::read::GzDecoder::new(File::open(archive)?)).unpack(dir)
+    };
+    unpacked.with_context(|| format!("extracting {}", archive.display()))?;
     for patch in &patches {
         run(Command::new("patch")
             .args(["-p1", "-s", "-d"])

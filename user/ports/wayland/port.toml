@@ -1,0 +1,33 @@
+# libwayland's client library, as libwayland.dlib, which needs neither
+# sockets nor libffi. wayland-scanner runs on the build host, built from
+# the same source. The options are those of the build for Mikros; the
+# host's scanner build has its own. The patches:
+# - 0001: only the client library is built, without the server, cursor
+#   and EGL libraries and their checks for epoll, signalfd and timerfd;
+#   clock_gettime is looked for with the project's arguments, as the C
+#   library has no librt.
+# - 0002: the connection is a kernel channel. A flush packs whole
+#   messages, recorded with the number of their file descriptors, into
+#   channel messages of at most 65536 bytes and 64 handles, each with the
+#   handles of its descriptors; a read takes one channel message, keeping
+#   what does not fit for the next, and makes received handles descriptors
+#   of the kind of their object type.
+# - 0003: wl_display_connect reaches the compositor through the service
+#   directory's wayland protocol, and the socket functions are removed.
+# - 0004: listeners are called directly, on the x86-64 System V ABI,
+#   instead of through libffi.
+
+[source]
+url = "https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.24.0/downloads/wayland-1.24.0.tar.xz"
+sha256 = "82892487a01ad67b334eca83b54317a7c86a03a89cfadacfef5211f11a5d0536"
+dir = "wayland-1.24.0"
+
+[build]
+options = [
+    "-Dlibraries=true",
+    "-Dscanner=false",
+    "-Dtests=false",
+    "-Ddocumentation=false",
+    "-Ddtd_validation=false",
+    "-Ddefault_library=static",
+]
