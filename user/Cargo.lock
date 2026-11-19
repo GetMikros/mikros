@@ -1502,6 +1502,14 @@ name = "system"
 version = "0.0.0"
 
 [[package]]
+name = "tee"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "term-probe"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,10 @@
+# What `tee` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern tee(
+    ...file: file "the files to write besides standard output",
+    --append(-a): bool "add to the files rather than replace them",
+    --ignore-interrupts(-i): bool "ignore the interrupt signal",
+    -p: bool "go on when a pipe closes, and name only errors of other outputs",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
