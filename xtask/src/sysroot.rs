@@ -6,11 +6,12 @@
 //! `<mikros/services.h>` and
 //! `<mikros/startup.h>` in `include/mikros/`;
 //! `libc.slib`, `libc.dlib`, the dynamic linker `ld-mikros.dlib`, which
-//! is the same file, `crt1.o`, `crti.o`, `crtn.o` and LLVM's static
-//! unwinder `libunwind.slib` in `lib/`, with
+//! is the same file, `crt1.o`, `crti.o`, `crtn.o`, and LLVM's C++
+//! runtimes, libunwind, libc++abi and libc++, as `.dlib` and `.slib` in
+//! `lib/`, with their headers in `include/c++/v1`, with
 //! `lib/pkgconfig/`, and the Clang driver configuration file
-//! `x86_64-unknown-mikros.cfg`, which selects the target, its CPU level
-//! and this sysroot. The Clang that `crate::llvm` builds, which knows the
+//! `x86_64-unknown-mikros.cfg`, which selects the target, its CPU level,
+//! this sysroot and the C++ headers. The Clang that `crate::llvm` builds, which knows the
 //! target, is used with it as
 //! `clang --config=<sysroot>/x86_64-unknown-mikros.cfg`.
 //!
@@ -134,8 +135,8 @@ fn make() -> Result<PathBuf> {
     .context("adding the ABI note to crti.o")?;
     keep_if_unchanged(&crti)?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
-    copy(&llvm::build_unwinder(&cfg)?, &lib.join("libunwind.slib"))?;
     assemble(&cfg, "user/runtime/libc/crt/crt1.S", &lib.join("crt1.o"))?;
+    llvm::build_cxx_runtimes(&cmake_toolchain_file(), &sysroot)?;
     Ok(sysroot)
 }
 
@@ -450,6 +451,8 @@ fn driver_config() -> String {
         &format!("--target={TRIPLE}"),
         "-march=x86-64-v3",
         "--sysroot=<CFGDIR>",
+        // libc++'s headers, which come before the C library's.
+        "-cxx-isystem <CFGDIR>/include/c++/v1",
         "",
     ]
     .join("\n")
@@ -466,6 +469,7 @@ mod tests {
             "--target=x86_64-unknown-mikros",
             "-march=x86-64-v3",
             "--sysroot=<CFGDIR>",
+            "-cxx-isystem <CFGDIR>/include/c++/v1",
         ] {
             assert!(cfg.lines().any(|l| l == option), "{option}");
         }

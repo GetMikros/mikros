@@ -65,7 +65,7 @@ diff -ruN a/clang/lib/Basic/Targets.cpp b/clang/lib/Basic/Targets.cpp
 diff -ruN a/clang/lib/Basic/Targets/OSTargets.h b/clang/lib/Basic/Targets/OSTargets.h
 --- a/clang/lib/Basic/Targets/OSTargets.h
 +++ b/clang/lib/Basic/Targets/OSTargets.h
-@@ -1139,6 +1139,27 @@
+@@ -1139,6 +1139,30 @@
    }
  };
  
@@ -80,6 +80,9 @@ diff -ruN a/clang/lib/Basic/Targets/OSTargets.h b/clang/lib/Basic/Targets/OSTarg
 +    DefineStd(Builder, "unix", Opts);
 +    if (Opts.POSIXThreads)
 +      Builder.defineMacro("_REENTRANT");
++    // libc++ uses the C library's extensions, as on Linux.
++    if (Opts.CPlusPlus)
++      Builder.defineMacro("_GNU_SOURCE");
 +  }
 +
 +public:

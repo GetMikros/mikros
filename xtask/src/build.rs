@@ -324,6 +324,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", wayland_c.display());
+            let cxx_dynamic = c_build("cxx", &["user/tests/cxx/cxx.cpp"], Linking::Dynamic, &[])?;
+            println!("built    {}", cxx_dynamic.display());
+            let cxx_static = c_build(
+                "cxx-static",
+                &["user/tests/cxx/cxx.cpp"],
+                Linking::Static,
+                &[],
+            )?;
+            println!("built    {}", cxx_static.display());
+            let sysroot_lib = crate::sysroot::dir().join("lib");
             let global_check = crate::rust_std::build("global-check", kind)?;
             let forge_probe = crate::rust_std::build("forge-probe", kind)?;
             let forge_manifest =
@@ -488,6 +498,20 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         wayland.library.as_path(),
                     ),
                     ("system/bin/wayland-c", wayland_c.as_path()),
+                    ("system/bin/cxx", cxx_dynamic.as_path()),
+                    ("system/bin/cxx-static", cxx_static.as_path()),
+                    (
+                        "system/libraries/libc++.dlib",
+                        &sysroot_lib.join("libc++.dlib"),
+                    ),
+                    (
+                        "system/libraries/libc++abi.dlib",
+                        &sysroot_lib.join("libc++abi.dlib"),
+                    ),
+                    (
+                        "system/libraries/libunwind.dlib",
+                        &sysroot_lib.join("libunwind.dlib"),
+                    ),
                     ("system/bin/library-user", library_user.as_path()),
                     ("system/libraries/libgreet.1.dlib", greet.as_path()),
                     ("system/share/decoy/libgreet.1.dlib", decoy.as_path()),
@@ -2017,6 +2041,22 @@ fn login_members(
             wayland.to_path_buf(),
         ),
     ]);
+    // The C++ runtimes, shared.
+    let lib = crate::sysroot::dir().join("lib");
+    members.extend([
+        (
+            "system/libraries/libc++.dlib".into(),
+            lib.join("libc++.dlib"),
+        ),
+        (
+            "system/libraries/libc++abi.dlib".into(),
+            lib.join("libc++abi.dlib"),
+        ),
+        (
+            "system/libraries/libunwind.dlib".into(),
+            lib.join("libunwind.dlib"),
+        ),
+    ]);
     let keymap_data = keymaps.install.join("share/xkeyboard-config-2");
     let mut keymap_files = Vec::new();
     crate::port_tests::collect(&keymap_data, &mut keymap_files)?;
@@ -2343,7 +2383,10 @@ fn c_build(name: &str, sources: &[&str], linking: Linking, args: &[String]) -> R
     let sysroot = crate::sysroot::build()?;
     let dir = c_dir(name);
     fs::create_dir_all(&dir)?;
-    let mut command = Command::new(crate::llvm::tool("clang"));
+    // C++ sources are built and linked as C++, with the C++ runtimes.
+    let cxx = sources.iter().any(|s| s.ends_with(".cpp"));
+    let compiler = if cxx { "clang++" } else { "clang" };
+    let mut command = Command::new(crate::llvm::tool(compiler));
     command.arg(format!(
         "--config={}",
         crate::sysroot::config(&sysroot).display()

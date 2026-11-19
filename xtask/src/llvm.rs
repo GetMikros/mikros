@@ -1,8 +1,8 @@
 //! The pinned LLVM release whose Clang and LLD build C and C++ code for
 //! Mikros: fetching its source, applying the Mikros patches in
 //! `tools/llvm/patches/`, and building and installing Clang and LLD in
-//! `target/llvm/install`, with the compiler-rt builtins and libunwind for
-//! Mikros.
+//! `target/llvm/install`, with the compiler-rt builtins and the C++
+//! runtimes for Mikros.
 
 use crate::tools::Version;
 use anyhow::{Context, Result};
@@ -158,55 +158,105 @@ pub fn build_builtins(sysroot: &Path) -> Result<()> {
         .context("building the compiler-rt builtins")
 }
 
-/// Builds LLVM's libunwind as a static library for the Mikros target
-/// with the installed Clang and the sysroot's driver configuration
-/// `cfg`, and returns its path. It finds a program's unwind tables
-/// through `dl_iterate_phdr` and `PT_GNU_EH_FRAME`, its default on ELF
-/// systems that it has no special case for.
-pub fn build_unwinder(cfg: &Path) -> Result<PathBuf> {
-    let build = dir().join("unwind");
-    // musl declares `Dl_info` only for `_GNU_SOURCE`.
-    let flags = format!("--config={} -D_GNU_SOURCE", cfg.display());
-    let args = [
-        "-DLLVM_ENABLE_RUNTIMES=libunwind".to_owned(),
-        format!("-DCMAKE_C_COMPILER={}", tool("clang").display()),
-        format!("-DCMAKE_CXX_COMPILER={}", tool("clang++").display()),
-        format!("-DCMAKE_ASM_COMPILER={}", tool("clang").display()),
-        format!("-DCMAKE_AR={}", tool("llvm-ar").display()),
-        format!("-DCMAKE_RANLIB={}", tool("llvm-ranlib").display()),
-        format!("-DCMAKE_C_FLAGS={flags}"),
-        format!("-DCMAKE_CXX_FLAGS={flags}"),
-        format!("-DCMAKE_ASM_FLAGS={flags}"),
-        "-DCMAKE_BUILD_TYPE=Release".to_owned(),
-        "-DCMAKE_SYSTEM_NAME=Generic".to_owned(),
-        "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY".to_owned(),
-        "-DLIBUNWIND_ENABLE_SHARED=OFF".to_owned(),
-        "-DLIBUNWIND_ENABLE_STATIC=ON".to_owned(),
-        "-DLIBUNWIND_USE_COMPILER_RT=ON".to_owned(),
-        "-DLIBUNWIND_INCLUDE_TESTS=OFF".to_owned(),
-        // These are part of the C library. The checks would find them
-        // anyway, since nothing is linked when they run.
-        "-DLIBUNWIND_HAS_DL_LIB=OFF".to_owned(),
-        "-DLIBUNWIND_HAS_PTHREAD_LIB=OFF".to_owned(),
-        "-DLLVM_INCLUDE_TESTS=OFF".to_owned(),
-    ];
+/// The CMake options of the C++ runtimes for Mikros: libunwind,
+/// libc++abi and libc++, each shared and static, the shared ones linking
+/// each other and libunwind.dlib rather than holding them, so that a
+/// process has one unwinder, on the C library's threads, files and time.
+const CXX_RUNTIME_OPTIONS: [&str; 35] = [
+    "-DLLVM_ENABLE_RUNTIMES=libunwind;libcxxabi;libcxx",
+    "-DCMAKE_BUILD_TYPE=Release",
+    // musl declares `Dl_info`, which libunwind uses, only for _GNU_SOURCE.
+    "-DCMAKE_C_FLAGS=-D_GNU_SOURCE",
+    "-DCMAKE_CXX_FLAGS=-D_GNU_SOURCE",
+    "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
+    "-DLLVM_INCLUDE_TESTS=OFF",
+    "-DLIBUNWIND_ENABLE_SHARED=ON",
+    "-DLIBUNWIND_ENABLE_STATIC=ON",
+    "-DLIBUNWIND_USE_COMPILER_RT=ON",
+    "-DLIBUNWIND_INCLUDE_TESTS=OFF",
+    "-DLIBUNWIND_HAS_DL_LIB=OFF",
+    "-DLIBUNWIND_HAS_PTHREAD_LIB=OFF",
+    "-DLIBCXXABI_USE_LLVM_UNWINDER=ON",
+    "-DLIBCXXABI_USE_COMPILER_RT=ON",
+    "-DLIBCXXABI_ENABLE_SHARED=ON",
+    "-DLIBCXXABI_ENABLE_STATIC=ON",
+    "-DLIBCXXABI_STATICALLY_LINK_UNWINDER_IN_SHARED_LIBRARY=OFF",
+    "-DLIBCXXABI_STATICALLY_LINK_UNWINDER_IN_STATIC_LIBRARY=OFF",
+    "-DLIBCXXABI_INCLUDE_TESTS=OFF",
+    "-DLIBCXX_CXX_ABI=libcxxabi",
+    "-DLIBCXX_HAS_MUSL_LIBC=ON",
+    "-DLIBCXX_USE_COMPILER_RT=ON",
+    "-DLIBCXX_ENABLE_SHARED=ON",
+    "-DLIBCXX_ENABLE_STATIC=ON",
+    "-DLIBCXX_STATICALLY_LINK_ABI_IN_SHARED_LIBRARY=OFF",
+    "-DLIBCXX_STATICALLY_LINK_ABI_IN_STATIC_LIBRARY=OFF",
+    "-DLIBCXX_INCLUDE_TESTS=OFF",
+    "-DLIBCXX_INCLUDE_BENCHMARKS=OFF",
+    "-DLIBCXX_INSTALL_MODULES=OFF",
+    // The driver links libc++abi and libunwind itself, and a linker script
+    // would take the library's own name.
+    "-DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF",
+    // The C library has them, and libc++ does not tell its threads from
+    // the target's name. The checks for libraries of their own would
+    // find them, since nothing is linked when they run.
+    "-DLIBCXX_HAS_PTHREAD_LIB=OFF",
+    "-DLIBCXX_HAS_RT_LIB=OFF",
+    "-DLIBCXX_HAS_ATOMIC_LIB=OFF",
+    "-DLIBCXXABI_HAS_PTHREAD_LIB=OFF",
+    "-DLIBCXX_HAS_PTHREAD_API=ON",
+];
+
+/// Builds LLVM's C++ runtimes for Mikros with the CMake that
+/// `crate::cmake` builds and the sysroot's toolchain file `toolchain`,
+/// which names their shared libraries `libunwind.dlib`, `libc++abi.dlib`
+/// and `libc++.dlib` with those sonames, and installs them in the
+/// sysroot `sysroot`: the headers in `include/c++/v1` and the libraries,
+/// shared and static, in `lib`.
+pub fn build_cxx_runtimes(toolchain: &Path, sysroot: &Path) -> Result<()> {
+    let cmake = crate::cmake::build()?;
+    let build = dir().join("cxx");
+    let mut args: Vec<String> = CXX_RUNTIME_OPTIONS.iter().map(|s| s.to_string()).collect();
+    args.push(format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()));
+    args.push(format!("-DCMAKE_INSTALL_PREFIX={}", sysroot.display()));
+    args.push("-DCMAKE_INSTALL_LIBDIR=lib".to_owned());
+    // Configured again when the options, the toolchain or the CMake
+    // patches change.
+    let stamp = format!(
+        "{}\n{}\n{}",
+        args.join("\n"),
+        fs::read_to_string(toolchain).unwrap_or_default(),
+        crate::cmake::patches_stamp(),
+    );
     let configured = build.join(".mikros-cmake-options");
-    if fs::read_to_string(&configured).ok() != Some(args.join("\n")) {
+    if fs::read_to_string(&configured).ok() != Some(stamp.clone()) {
+        if build.exists() {
+            fs::remove_dir_all(&build)?;
+        }
         fs::create_dir_all(&build)?;
         crate::port::run(
-            Command::new("cmake")
+            Command::new(&cmake)
                 .args(["-G", "Ninja", "-S"])
                 .arg(dir().join(SOURCE).join("runtimes"))
                 .arg("-B")
                 .arg(&build)
                 .args(&args),
         )
-        .context("configuring libunwind")?;
-        fs::write(&configured, args.join("\n"))?;
+        .context("configuring the C++ runtimes")?;
+        fs::write(&configured, stamp)?;
     }
-    crate::port::run(Command::new("ninja").current_dir(&build).arg("unwind"))
-        .context("building libunwind")?;
-    Ok(build.join("lib/libunwind.a"))
+    // The driver configuration names the installed headers for C++, and
+    // libc++'s headers would find them as the next of their own names, so
+    // they go while the runtimes are built, and are installed again.
+    let headers = sysroot.join("include/c++");
+    if headers.exists() {
+        fs::remove_dir_all(&headers).with_context(|| format!("removing {}", headers.display()))?;
+    }
+    crate::port::run(
+        Command::new("ninja")
+            .current_dir(&build)
+            .args(["--quiet", "install"]),
+    )
+    .context("building the C++ runtimes")
 }
 
 /// The source with every patch applied, extracted again from `archive`

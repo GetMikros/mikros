@@ -132,7 +132,7 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.h b/clang/lib/Driver/ToolChains/M
 diff -ruN a/clang/lib/Driver/ToolChains/Mikros.cpp b/clang/lib/Driver/ToolChains/Mikros.cpp
 --- a/clang/lib/Driver/ToolChains/Mikros.cpp
 +++ b/clang/lib/Driver/ToolChains/Mikros.cpp
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,195 @@
 +//===--- Mikros.cpp - Mikros ToolChain Implementation -----------*- C++ -*-===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -229,13 +229,19 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.cpp b/clang/lib/Driver/ToolChains
 +  addLinkerCompressDebugSectionsOption(TC, Args, CmdArgs);
 +
 +  // LLD looks for lib<Name>.so and lib<Name>.a only, so each -l<Name>
-+  // becomes the path of lib<Name>.dlib or lib<Name>.slib.
++  // becomes the path of lib<Name>.dlib or lib<Name>.slib, the latter
++  // also between -Bstatic and -Bdynamic.
 +  ArgStringList InputArgs;
 +  AddLinkerInputs(TC, Inputs, Args, InputArgs, JA);
++  bool StaticNow = IsStatic;
 +  for (const char *A : InputArgs) {
 +    llvm::StringRef S(A);
++    if (S == "-Bstatic" || S == "--Bstatic")
++      StaticNow = true;
++    else if (S == "-Bdynamic" || S == "--Bdynamic")
++      StaticNow = IsStatic;
 +    if (S.starts_with("-l") && !S.starts_with("-l:")) {
-+      std::string Path = TC.findLibrary(Args, S.drop_front(2), IsStatic);
++      std::string Path = TC.findLibrary(Args, S.drop_front(2), StaticNow);
 +      if (!Path.empty()) {
 +        CmdArgs.push_back(Args.MakeArgString(Path));
 +        continue;

@@ -14,8 +14,9 @@
 //! `/system/bin/hello-std`, a Rust program that uses the standard library,
 //! with a stream as their standard output, and checks what they print,
 //! runs `/system/bin/memfd-c` and `/system/bin/handles-c`, which check
-//! memory, channel and handle descriptors, and `/system/bin/wayland-c`,
-//! which checks libwayland.dlib,
+//! memory, channel and handle descriptors, `/system/bin/wayland-c`,
+//! which checks libwayland.dlib, and `/system/bin/cxx` and
+//! `/system/bin/cxx-static`, which check the C++ runtimes,
 //! runs `/system/bin/msh-check`, which runs msh's scripts and checks what
 //! they do, and reads more than the process manager's small heap blocks hold of
 //! `/system/bin/hello` with one `Read`.
@@ -101,6 +102,9 @@ const HANDLES_C: &str = "/system/bin/handles-c";
 /// A dynamic C program that checks libwayland.dlib against a compositor
 /// of its own on a channel.
 const WAYLAND_C: &str = "/system/bin/wayland-c";
+/// A C++ program that checks the C++ runtimes, linked to libc++.dlib and
+/// linked statically.
+const CXX: [&str; 2] = ["/system/bin/cxx", "/system/bin/cxx-static"];
 const APP_RAW_SYSCALL: &str = "/apps/test/bin/raw-syscall";
 /// A Rust program that starts processes with `std::process::Command`.
 const SPAWN_STD: &str = "/system/bin/spawn-std";
@@ -1026,6 +1030,13 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             "talking Wayland over a channel with libwayland",
             code == Some(0),
         )?;
+        for program in CXX {
+            let (_, code) = run_c(l, program).await;
+            if code != Some(0) {
+                mikros_rt::log!(Error, "launcher probe: {program} exited with {code:?}");
+            }
+            check("running C++ on the C++ runtimes", code == Some(0))?;
+        }
         // The gate turns the instruction into a protection fault, which
         // ends the program with SEGV.
         let gated = spawn(l, &[], |r| {
