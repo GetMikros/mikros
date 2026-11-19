@@ -5,6 +5,8 @@
 //! directory.
 
 use crate::errno::{self, EAGAIN, EFAULT, EINTR, EINVAL, EIO};
+use crate::lock::Lock;
+use alloc::string::String;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
@@ -245,7 +247,9 @@ fn acquire() -> Result<u64, i64> {
     fetched
 }
 
-fn fetch_time_page() -> Result<u64, i64> {
+/// A new connection to the time service through the process's
+/// directory.
+fn connect_clock() -> Result<ClockClient, i64> {
     let raw = DIRECTORY.load(Ordering::Relaxed);
     if raw == 0 {
         return Err(EAGAIN);
@@ -269,7 +273,11 @@ fn fetch_time_page() -> Result<u64, i64> {
         Ok(Err(status)) => return Err(errno::from_status(i64::from(status.into_raw()))),
         Err(_) => return Err(EIO),
     }
-    let clock = ClockClient::new(ClientEnd::new(ours));
+    Ok(ClockClient::new(ClientEnd::new(ours)))
+}
+
+fn fetch_time_page() -> Result<u64, i64> {
+    let clock = connect_clock()?;
     let page = clock.get_time_page(FOREVER).map_err(|_| EIO)?.page;
     // The mapping keeps the page alive once its handle is closed.
     map(PROCESS.load(Ordering::Relaxed), page.raw()).ok_or(EIO)
@@ -303,4 +311,41 @@ fn cpu_time(handle: Handle, topic: u32) -> Result<i64, i64> {
     Ok(i64::from_le_bytes(
         record[at..at + 8].try_into().expect("8 bytes"),
     ))
+}
+
+/// The name of the system's time zone, once the time service gave it.
+static TIMEZONE: Lock<Option<String>> = Lock::new(None);
+
+/// `__mikros_timezone`: writes the name of the system's time zone from the
+/// time service's `GetTimezone` (MIKSPEC-0033.R42), with a NUL after it,
+/// into the `len` bytes at `name`, asking again when `refresh` is not 0
+/// and the first time, and returns 0; returns -1 when the service gives
+/// no name, a name that would leave the zone folder, or one that does
+/// not fit.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __mikros_timezone(name: *mut u8, len: usize, refresh: i32) -> i32 {
+    let mut known = TIMEZONE.lock();
+    if refresh != 0 || known.is_none() {
+        let asked = connect_clock()
+            .ok()
+            .and_then(|clock| clock.get_timezone(FOREVER).ok())
+            .map(|r| r.name);
+        *known = Some(asked.unwrap_or_default());
+    }
+    let zone = known.as_deref().unwrap_or("");
+    let safe = !zone.is_empty()
+        && !zone.starts_with('/')
+        && zone
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if !safe || zone.len() >= len || name.is_null() {
+        return -1;
+    }
+    // SAFETY: musl passes `len` bytes at `name`, of which the zone's
+    // name and its NUL take fewer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(zone.as_ptr(), name, zone.len());
+        name.add(zone.len()).write(0);
+    }
+    0
 }

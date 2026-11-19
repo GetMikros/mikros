@@ -1,0 +1,44 @@
+--- a/src/time/__tz.c
++++ b/src/time/__tz.c
+@@ -123,6 +123,15 @@
+ 	return y;
+ }
+ 
++/* Mikros: writes the name of the system's time zone, which the time
++ * service gives, in a buffer of the given size, asking it again when the
++ * last argument is not 0, and returns 0, or -1 without a usable name. */
++hidden int __mikros_timezone(char *, size_t, int);
++
++/* Mikros: whether the next zone without TZ asks the time service again,
++ * as the first one does and one after each tzset. */
++static int mikros_refresh = 1;
++
+ static void do_tzset()
+ {
+ 	char buf[NAME_MAX+25], *pathname=buf+24;
+@@ -133,7 +142,16 @@
+ 		"/usr/share/zoneinfo/\0/share/zoneinfo/\0/etc/zoneinfo/\0";
+ 
+ 	s = getenv("TZ");
+-	if (!s) s = "/etc/localtime";
++	if (!s) {
++		/* Mikros: the system's zone, from the zone files, or UTC. */
++		static char mikros_zone[23 + 65] = "/system/share/zoneinfo/";
++		char *name = mikros_zone + 23;
++		if (__mikros_timezone(name, sizeof mikros_zone - 23, mikros_refresh))
++			s = __utc;
++		else
++			s = mikros_zone;
++		mikros_refresh = 0;
++	}
+ 	if (!*s) s = __utc;
+ 
+ 	if (old_tz && !strcmp(s, old_tz)) return;
+@@ -420,6 +438,7 @@
+ static void __tzset()
+ {
+ 	LOCK(lock);
++	mikros_refresh = 1;
+ 	do_tzset();
+ 	UNLOCK(lock);
+ }
