@@ -1,6 +1,7 @@
 //! The render instance: `Render` connections whose buffers are anonymous
 //! memory objects that the driver creates and hands out whatever the
-//! flags, shared between connections through tokens, with sync objects
+//! flags, or memory objects of the clients' own that cannot fault when
+//! mapped, shared between connections through tokens, with sync objects
 //! that are only registered. The clients draw into the memory
 //! themselves, so the instance runs no GPU work: driver commands are
 //! refused, and priorities are checked but change nothing.
@@ -15,8 +16,8 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::gpu::{
     Capabilities, DeviceInfo, DisplayAsyncServer, MemoryInfo, Render, RenderAsyncServer,
     RenderCreateBufferResponse, RenderExportBufferResponse, RenderGetMemoryInfoResponse,
-    RenderImportBufferResponse, RenderImportSyncResponse, RenderPriority, RenderRequest,
-    RenderSetPriorityResponse,
+    RenderImportBufferResponse, RenderImportMemoryResponse, RenderImportSyncResponse,
+    RenderPriority, RenderRequest, RenderSetPriorityResponse,
 };
 use mikros_rt::{midl, objects};
 
@@ -53,6 +54,9 @@ pub struct RenderDevice {
     spawner: Spawner,
     /// The exported buffers by their token's object ID.
     exported: RefCell<BTreeMap<u64, Weak<Memory>>>,
+    /// Every buffer by its memory object's ID, so that a memory object
+    /// imported again is the same buffer and counts once.
+    memories: RefCell<BTreeMap<u64, Weak<Memory>>>,
     held: Rc<Cell<u64>>,
     system: u64,
 }
@@ -110,6 +114,7 @@ impl RenderDevice {
             reactor,
             spawner,
             exported: RefCell::new(BTreeMap::new()),
+            memories: RefCell::new(BTreeMap::new()),
             held: Rc::new(Cell::new(0)),
             system: objects::system_memory(),
         }
@@ -132,6 +137,14 @@ impl RenderDevice {
         let handle = objects::memory(size, 0).map_err(|_| Status::NoMemory)?;
         let client =
             objects::duplicate(handle.raw(), SAME_RIGHTS).map_err(|_| Status::NoResources)?;
+        let memory = self.register(handle, size).ok_or(Status::NoResources)?;
+        Ok((connection.insert(memory, true), client))
+    }
+
+    /// The buffer of the memory object `handle` of `size` bytes, counted
+    /// among the instance's buffers.
+    fn register(&self, handle: OwnedHandle, size: u64) -> Option<Rc<Memory>> {
+        let koid = midl::koid(handle.raw())?;
         self.held.set(self.held.get() + size);
         let memory = Rc::new(Memory {
             handle,
@@ -139,7 +152,29 @@ impl RenderDevice {
             token: RefCell::new(None),
             held: self.held.clone(),
         });
-        Ok((connection.insert(memory, true), client))
+        let mut memories = self.memories.borrow_mut();
+        memories.retain(|_, memory| memory.strong_count() > 0);
+        memories.insert(koid, Rc::downgrade(&memory));
+        Some(memory)
+    }
+
+    /// The buffer of a client's memory object `handle`, and its size: the
+    /// object must be one whose mapping cannot fault. An object that is
+    /// already a buffer gives that buffer.
+    fn import_memory(
+        &self,
+        connection: &mut Connection,
+        handle: OwnedHandle,
+    ) -> Result<(u32, u64), Status> {
+        let size = objects::mappable_size(handle.raw()).ok_or(Status::InvalidArgs)?;
+        let koid = midl::koid(handle.raw()).ok_or(Status::InvalidArgs)?;
+        let known = self.memories.borrow().get(&koid).and_then(Weak::upgrade);
+        let memory = match known {
+            Some(memory) => memory,
+            None => self.register(handle, size).ok_or(Status::NoResources)?,
+        };
+        let size = memory.size;
+        Ok((connection.insert(memory, false), size))
     }
 
     /// The token of `buffer`, the same event each time it is exported.
@@ -249,7 +284,13 @@ impl RenderDevice {
                         info: self.memory_info(&connection),
                     },
                 ),
-                RenderRequest::ImportMemory(_, r) => r.reply(s, Err(Status::NotSupported)),
+                RenderRequest::ImportMemory(q, r) => {
+                    let imported = self.import_memory(&mut connection, q.memory);
+                    r.reply(
+                        s,
+                        imported.map(|(buffer, size)| RenderImportMemoryResponse { buffer, size }),
+                    )
+                }
             };
         }
     }

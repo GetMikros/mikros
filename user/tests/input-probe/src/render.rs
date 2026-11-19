@@ -2,7 +2,8 @@
 //! makes buffers of memory objects that it hands out, shares them
 //! through tokens that only it knows, refuses driver commands and, for a
 //! client without the permission, high priority, and tells the memory
-//! that buffers take. Its tokens are not the display instance's.
+//! that buffers take. It makes buffers of the probe's own memory objects
+//! that cannot shrink. Its tokens are not the display instance's.
 
 use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
@@ -15,12 +16,14 @@ use mikros_rt::interfaces::mikros::gpu::{
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::objects;
 
-use crate::display::open;
+use crate::display::{RESIZABLE, open};
 use crate::failed;
 
 const XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 const PAGE_SIZE: u64 = 4096;
 const SAME_RIGHTS: u32 = 1 << 31;
+/// The seal `SHRINK`.
+const SEAL_SHRINK: u32 = 1 << 1;
 /// The bytes that the probe writes through one connection's memory
 /// object and reads through the other's.
 const PATTERN: [u8; 4] = *b"MKRS";
@@ -141,6 +144,44 @@ pub async fn works(
     let after = memory_info(&render).await?;
     if after.connection_used != 0 || after.system_used + 2 * PAGE_SIZE != before {
         return failed("freeing a buffer that no connection has");
+    }
+    imports_memory(&render).await
+}
+
+/// Checks that `render` makes buffers of the probe's own memory objects
+/// that cannot shrink, once each, and refuses one that may.
+async fn imports_memory(render: &RenderAsyncClient) -> Option<()> {
+    let size = 3 * PAGE_SIZE;
+    let own = objects::memory(size, 0).ok()?;
+    let again = objects::duplicate(own.raw(), SAME_RIGHTS).ok()?;
+    let Ok(Ok(imported)) = render.import_memory(own).await else {
+        return failed("ImportMemory");
+    };
+    let before = memory_info(render).await?;
+    let Ok(Ok(twice)) = render.import_memory(again).await else {
+        return failed("ImportMemory of the same object again");
+    };
+    let after = memory_info(render).await?;
+    if imported.buffer == 0
+        || imported.size != size
+        || twice.size != size
+        || after.system_used != before.system_used
+        || after.connection_used != 0
+    {
+        return failed("the imported memory object's buffer");
+    }
+    let resizable = objects::memory(size, RESIZABLE).ok()?;
+    if !matches!(
+        render.import_memory(resizable).await,
+        Ok(Err(Status::InvalidArgs))
+    ) {
+        return failed("refusing a memory object that may shrink");
+    }
+    let sealed = objects::memory(size, RESIZABLE).ok()?;
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { mikros_rt::sys::mem_seal(sealed.raw(), SEAL_SHRINK) };
+    if status != mikros_rt::OK || !matches!(render.import_memory(sealed).await, Ok(Ok(_))) {
+        return failed("ImportMemory of a resizable object sealed against shrinking");
     }
     Some(())
 }

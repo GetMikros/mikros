@@ -2,7 +2,7 @@
 //! one owner,
 //! a commit that refuses another mode, one that fills the top half of
 //! the screen from a dumb buffer, imports of memory objects that do not
-//! hold their image refused, and a commit that fills the bottom half
+//! hold their image or may shrink refused, and a commit that fills the bottom half
 //! from an imported memory object.
 
 use alloc::vec;
@@ -25,6 +25,8 @@ pub const PAINT: u32 = 0x0012_3456;
 const PERM_READ: u32 = 1 << 0;
 const PERM_WRITE: u32 = 1 << 1;
 const SAME_RIGHTS: u32 = 1 << 31;
+/// The memory object option `RESIZABLE`.
+pub const RESIZABLE: u32 = 1 << 0;
 const COMPLETE_LIMIT: i64 = 5_000_000_000;
 const PAGE_SIZE: u64 = 4096;
 
@@ -255,6 +257,16 @@ pub async fn paint(
         .await;
     if !matches!(short, Ok(Err(Status::InvalidArgs))) {
         return failed("refusing a stride shorter than a line");
+    }
+    // A resizable object that may still shrink could fault when mapped.
+    let Ok(resizable) = mikros_rt::objects::memory(size, RESIZABLE) else {
+        return failed("creating a resizable memory object");
+    };
+    let shrinkable = display
+        .import_memory(resizable, mode.width, bottom, XRGB8888, stride, PAGE_SIZE)
+        .await;
+    if !matches!(shrinkable, Ok(Err(Status::InvalidArgs))) {
+        return failed("refusing a memory object that may shrink");
     }
     let imported = display
         .import_memory(memory, mode.width, bottom, XRGB8888, stride, PAGE_SIZE)

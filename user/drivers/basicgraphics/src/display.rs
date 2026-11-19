@@ -203,10 +203,8 @@ impl Display {
     }
 
     /// Makes a buffer of the XRGB8888 image of `q` in its memory object,
-    /// mapping only the pages that hold it. The kernel refuses a mapping
-    /// that runs past the object's end, which is how an image that does
-    /// not fit is found: the handle has no right to read the object's
-    /// size.
+    /// mapping only the pages that hold it, once the object is one whose
+    /// mapping cannot fault and the image fits in it.
     fn import_memory(&self, q: DisplayImportMemoryRequest) -> Result<u32, Status> {
         let line = q.width.checked_mul(4).ok_or(Status::InvalidArgs)?;
         if q.format != XRGB8888
@@ -220,6 +218,10 @@ impl Display {
         }
         let len = u64::from(q.stride) * u64::from(q.height);
         let end = q.offset.checked_add(len).ok_or(Status::InvalidArgs)?;
+        let size = mikros_rt::objects::mappable_size(q.memory.raw()).ok_or(Status::InvalidArgs)?;
+        if end > size {
+            return Err(Status::InvalidArgs);
+        }
         let first = q.offset & !(PAGE_SIZE - 1);
         let mapping = Mapping::new(self.process, PERM_READ, q.memory.raw(), first, end - first)
             .map_err(|_| Status::InvalidArgs)?;

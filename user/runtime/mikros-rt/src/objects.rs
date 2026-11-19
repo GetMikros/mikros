@@ -60,6 +60,36 @@ pub fn memory(size: u64, options: u32) -> Result<OwnedHandle, Status> {
     created(s, out)
 }
 
+/// The memory information record, and what of it tells whether a mapping
+/// of the object can fault: its kind, the `RESIZABLE` option and the
+/// `SHRINK` seal.
+const INFO_MEMORY: u32 = 4;
+const INFO_MEMORY_SIZE: usize = 0x18;
+const KIND_ANONYMOUS: u32 = 1;
+const KIND_CONTIGUOUS: u32 = 3;
+const KIND_PINNED: u32 = 4;
+const RESIZABLE: u32 = 1 << 0;
+const SEAL_SHRINK: u32 = 1 << 1;
+
+/// The size of the memory object `memory`, which another process gave,
+/// when no access through a mapping of it can fault: it is anonymous,
+/// contiguous or pinned, and, when it was created resizable, sealed
+/// against shrinking. `None` otherwise, or when `memory` cannot be
+/// inspected.
+pub fn mappable_size(memory: Handle) -> Option<u64> {
+    let mut record = [0u8; INFO_MEMORY_SIZE];
+    let len = info(memory, INFO_MEMORY, &mut record).ok()?;
+    if len < INFO_MEMORY_SIZE {
+        return None;
+    }
+    let at = |i: usize| u32::from_le_bytes(record[i..i + 4].try_into().expect("4 bytes"));
+    let size = u64::from_le_bytes(record[..8].try_into().expect("8 bytes"));
+    let (kind, options, seals) = (at(0x08), at(0x0C), at(0x10));
+    let kinds = [KIND_ANONYMOUS, KIND_CONTIGUOUS, KIND_PINNED];
+    let fixed = options & RESIZABLE == 0 || seals & SEAL_SHRINK != 0;
+    (kinds.contains(&kind) && fixed).then_some(size)
+}
+
 /// The bytes of memory that the kernel's frame allocator manages.
 pub fn system_memory() -> u64 {
     let mut record = [0u8; 16];
