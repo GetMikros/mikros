@@ -34,6 +34,12 @@ fn dir() -> PathBuf {
 /// Fetches, patches, builds and installs CMake, and returns the path of
 /// the installed `cmake`. A build that is up to date only checks the
 /// patches and runs Ninja.
+/// The record of the patches that CMake was built with, so that projects
+/// are configured again when they change.
+pub fn patches_stamp() -> String {
+    std::fs::read_to_string(dir().join(SOURCE).join(crate::port::STAMP)).unwrap_or_default()
+}
+
 pub fn build() -> Result<PathBuf> {
     let archive = dir().join(format!("{SOURCE}.tar.gz"));
     crate::fetch::cached(&format!("CMake {CMAKE} source"), URL, SHA256, &archive)?;

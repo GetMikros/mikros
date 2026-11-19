@@ -15,6 +15,13 @@ const URL: &str =
 const SHA256: &str = "ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743";
 const SOURCE: &str = "meson-1.12.1";
 
+/// The record of the patches that Meson was built with, so that projects
+/// are configured again when they change.
+pub fn patches_stamp() -> String {
+    let source = crate::workspace_root().join("target/meson").join(SOURCE);
+    std::fs::read_to_string(source.join(crate::port::STAMP)).unwrap_or_default()
+}
+
 /// Fetches and patches Meson, and returns the command that runs it.
 pub fn command() -> Result<Command> {
     let dir = crate::workspace_root().join("target/meson");

@@ -19,12 +19,13 @@
 //! `x86_64-unknown-mikros.cmake`, with the CMake platform module
 //! `share/cmake/Platform/Mikros.cmake`. They select these compilers and
 //! this sysroot, and work with the Meson and CMake that `crate::meson`
-//! and `crate::cmake` patch, which name shared libraries
-//! `lib<name>.<version>.dlib` with the `DT_SONAME`
-//! `lib<name>.<major>.dlib`, link `lib<name>.dlib` to the latter, and
-//! name static libraries `lib<name>.slib`. A shared library without a
-//! version has the major version 0; loadable modules keep the names the
-//! project gives them.
+//! and `crate::cmake` patch, which name a shared library
+//! `lib<name>.dlib`, with that `DT_SONAME`, whatever versions the
+//! project gives it, as the file name in `/system/libraries` of a
+//! library of the system, and name static libraries `lib<name>.slib`;
+//! loadable modules keep the names the project gives them. A known gap:
+//! a library of a package should get the soname `<id>:<path>`, which
+//! they cannot give yet, as nothing builds library packages with them.
 
 use crate::llvm::{self, LLVM};
 use anyhow::{Context, Result, bail};
@@ -379,11 +380,9 @@ set(CMAKE_STATIC_LIBRARY_PREFIX "lib")
 set(CMAKE_STATIC_LIBRARY_SUFFIX ".slib")
 set(CMAKE_FIND_LIBRARY_PREFIXES "lib")
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".dlib" ".slib")
-# The version goes before the suffix, which the Mikros patch of CMake
-# allows: lib<name>.<version>.dlib, with the soname lib<name>.<major>.dlib.
-# A shared library without a version has the major version 0.
-set(CMAKE_SHARED_LIBRARY_VERSION_BEFORE_SUFFIX 1)
-set(CMAKE_SHARED_LIBRARY_DEFAULT_SOVERSION 0)
+# A library is named lib<name>.dlib, which is also its soname, whatever
+# versions the project gives it.
+set(CMAKE_PLATFORM_NO_VERSIONED_SONAME 1)
 set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")
 set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")
 set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG_SEP ":")
@@ -493,8 +492,7 @@ mod tests {
         for line in [
             "set(CMAKE_SHARED_LIBRARY_SUFFIX \".dlib\")",
             "set(CMAKE_STATIC_LIBRARY_SUFFIX \".slib\")",
-            "set(CMAKE_SHARED_LIBRARY_VERSION_BEFORE_SUFFIX 1)",
-            "set(CMAKE_SHARED_LIBRARY_DEFAULT_SOVERSION 0)",
+            "set(CMAKE_PLATFORM_NO_VERSIONED_SONAME 1)",
         ] {
             assert!(CMAKE_PLATFORM.lines().any(|l| l == line), "{line}");
         }

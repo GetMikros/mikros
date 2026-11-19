@@ -152,15 +152,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     crate::build_systems::check_installed(
         &xkbcommon.install,
         &[
-            "libraries/libxkbcommon.0.13.2.dlib",
+            "libraries/libxkbcommon.dlib",
             "include/xkbcommon/xkbcommon.h",
             "bin/xkbcli",
         ],
-        &[
-            ("libraries/libxkbcommon.0.dlib", "libxkbcommon.0.13.2.dlib"),
-            ("libraries/libxkbcommon.dlib", "libxkbcommon.0.dlib"),
-        ],
+        &[],
     )?;
+    crate::build_systems::check_sonames(&xkbcommon.install, &["libxkbcommon.dlib"])?;
     println!("built    {}", xkbcommon.install.display());
     let keymaps = crate::ports::build(&crate::ports::load("xkeyboard-config")?)?;
     crate::build_systems::check_installed(
@@ -177,15 +175,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     crate::build_systems::check_installed(
         &freetype.install,
         &[
-            "libraries/libfreetype.6.20.7.dlib",
+            "libraries/libfreetype.dlib",
             "include/freetype2/ft2build.h",
             "include/freetype2/freetype/freetype.h",
         ],
-        &[
-            ("libraries/libfreetype.6.dlib", "libfreetype.6.20.7.dlib"),
-            ("libraries/libfreetype.dlib", "libfreetype.6.dlib"),
-        ],
+        &[],
     )?;
+    crate::build_systems::check_sonames(&freetype.install, &["libfreetype.dlib"])?;
     println!("built    {}", freetype.install.display());
     let wayland = crate::wayland::build()?;
     println!("built    {}", wayland.library.display());
@@ -402,10 +398,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let cmake_tree = crate::build_systems::cmake("tally-cmake", &tally_source, &[])?;
             let meson_tree = crate::build_systems::meson("tally-meson", &tally_source, &[])?;
             for (tree, system) in [(&cmake_tree, "cmake"), (&meson_tree, "meson")] {
-                let real = format!("libtally-{system}.1.2.3.dlib");
-                let major = format!("libtally-{system}.1.dlib");
-                // The library without a version has the major version 0.
-                let base = format!("libbase-{system}.0.dlib");
+                // Both libraries are named without their versions, the
+                // one the project gives and the one it does not.
+                let real = format!("libtally-{system}.dlib");
+                let base = format!("libbase-{system}.dlib");
                 crate::build_systems::check_installed(
                     tree,
                     &[
@@ -414,12 +410,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         &format!("libraries/{base}"),
                         &format!("libraries/libcount-{system}.slib"),
                     ],
-                    &[
-                        (&format!("libraries/{major}"), &real),
-                        (&format!("libraries/libtally-{system}.dlib"), &major),
-                        (&format!("libraries/libbase-{system}.dlib"), &base),
-                    ],
+                    &[],
                 )?;
+                crate::build_systems::check_sonames(tree, &[&real, &base])?;
                 println!("built    {}", tree.display());
             }
             let hello_std = crate::rust_std::build("hello-std", kind)?;
@@ -504,24 +497,24 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         &cmake_tree.join("bin/tally-cmake-user"),
                     ),
                     (
-                        "system/libraries/libtally-cmake.1.dlib",
-                        &cmake_tree.join("libraries/libtally-cmake.1.dlib"),
+                        "system/libraries/libtally-cmake.dlib",
+                        &cmake_tree.join("libraries/libtally-cmake.dlib"),
                     ),
                     (
-                        "system/libraries/libbase-cmake.0.dlib",
-                        &cmake_tree.join("libraries/libbase-cmake.0.dlib"),
+                        "system/libraries/libbase-cmake.dlib",
+                        &cmake_tree.join("libraries/libbase-cmake.dlib"),
                     ),
                     (
                         "system/bin/tally-meson-user",
                         &meson_tree.join("bin/tally-meson-user"),
                     ),
                     (
-                        "system/libraries/libtally-meson.1.dlib",
-                        &meson_tree.join("libraries/libtally-meson.1.dlib"),
+                        "system/libraries/libtally-meson.dlib",
+                        &meson_tree.join("libraries/libtally-meson.dlib"),
                     ),
                     (
-                        "system/libraries/libbase-meson.0.dlib",
-                        &meson_tree.join("libraries/libbase-meson.0.dlib"),
+                        "system/libraries/libbase-meson.dlib",
+                        &meson_tree.join("libraries/libbase-meson.dlib"),
                     ),
                     ("system/share/hello/greeting.txt", greeting.as_path()),
                 ],
@@ -1277,12 +1270,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     dynamic_linker.clone(),
                 ),
                 (
-                    "system/libraries/libfreetype.6.dlib".to_owned(),
-                    freetype.install.join("libraries/libfreetype.6.20.7.dlib"),
+                    "system/libraries/libfreetype.dlib".to_owned(),
+                    freetype.install.join("libraries/libfreetype.dlib"),
                 ),
                 (
-                    "system/libraries/libxkbcommon.0.dlib".to_owned(),
-                    xkbcommon.install.join("libraries/libxkbcommon.0.13.2.dlib"),
+                    "system/libraries/libxkbcommon.dlib".to_owned(),
+                    xkbcommon.install.join("libraries/libxkbcommon.dlib"),
                 ),
                 (
                     "system/programs/system.console.yaml".to_owned(),
@@ -2012,12 +2005,12 @@ fn login_members(
             crate::sysroot::dir().join("lib/ld-mikros.dlib"),
         ),
         (
-            "system/libraries/libfreetype.6.dlib".into(),
-            freetype.install.join("libraries/libfreetype.6.20.7.dlib"),
+            "system/libraries/libfreetype.dlib".into(),
+            freetype.install.join("libraries/libfreetype.dlib"),
         ),
         (
-            "system/libraries/libxkbcommon.0.dlib".into(),
-            xkbcommon.install.join("libraries/libxkbcommon.0.13.2.dlib"),
+            "system/libraries/libxkbcommon.dlib".into(),
+            xkbcommon.install.join("libraries/libxkbcommon.dlib"),
         ),
         (
             format!("system/libraries/{}", crate::wayland::LIBRARY),

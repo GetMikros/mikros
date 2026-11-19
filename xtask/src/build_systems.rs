@@ -47,7 +47,13 @@ pub fn cmake(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
         .arg(format!("-DCMAKE_INSTALL_SYSCONFDIR={SYSCONFDIR}"))
         .arg(format!("-DCMAKE_INSTALL_LOCALSTATEDIR={LOCALSTATEDIR}"))
         .args(options);
-    configured(name, &mut configure, &toolchain, source)?;
+    configured(
+        name,
+        &mut configure,
+        &toolchain,
+        source,
+        &crate::cmake::patches_stamp(),
+    )?;
     crate::port::run(Command::new(&cmake).arg("--build").arg(&build))
         .with_context(|| format!("building {name}"))?;
     crate::port::run(
@@ -80,7 +86,13 @@ pub fn meson(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
         .args(options)
         .arg(&build)
         .arg(source);
-    configured(name, &mut setup, &cross, source)?;
+    configured(
+        name,
+        &mut setup,
+        &cross,
+        source,
+        &crate::meson::patches_stamp(),
+    )?;
     crate::port::run(
         crate::meson::command()?
             .arg("compile")
@@ -107,13 +119,20 @@ pub fn build_dir(name: &str) -> PathBuf {
 /// Configures the project built as `name` with `configure`, in an
 /// emptied directory, unless it was configured by the same command, with
 /// the same contents of the cross or toolchain file `file`, from the
-/// same `source`. A source records how it was patched in a stamp file,
-/// which changes whenever it is extracted again.
-fn configured(name: &str, configure: &mut Command, file: &Path, source: &Path) -> Result<()> {
+/// same `source`, by the build tool patched as `tool` records. A source
+/// records how it was patched in a stamp file, which changes whenever it
+/// is extracted again.
+fn configured(
+    name: &str,
+    configure: &mut Command,
+    file: &Path,
+    source: &Path,
+    tool: &str,
+) -> Result<()> {
     let dir = dir(name);
     let stamp_path = dir.join(".mikros-configured");
     let stamp = format!(
-        "{:?}\n{}\n{}\n",
+        "{:?}\n{}\n{}\n{tool}\n",
         configure,
         fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?,
         fs::read_to_string(source.join(crate::port::STAMP)).unwrap_or_default(),
@@ -141,6 +160,44 @@ pub fn check_installed(install: &Path, files: &[&str], links: &[(&str, &str)]) -
         let found = fs::read_link(install.join(link)).ok();
         if found.as_deref() != Some(Path::new(target)) {
             bail!("{link} in {} is not a link to {target}", install.display());
+        }
+    }
+    Ok(())
+}
+
+/// The `DT_SONAME` of the shared library at `path`, if it has one.
+pub fn soname(path: &Path) -> Result<Option<String>> {
+    use object::read::elf::{Dyn, FileHeader, SectionHeader};
+    let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let header = object::elf::FileHeader64::<object::Endianness>::parse(&*data)
+        .with_context(|| format!("{} is no ELF file", path.display()))?;
+    let endian = header.endian()?;
+    let sections = header.sections(endian, &*data)?;
+    for section in sections.iter() {
+        let Some((entries, link)) = section.dynamic(endian, &*data)? else {
+            continue;
+        };
+        let strings = sections.strings(endian, &*data, link)?;
+        for entry in entries {
+            if entry.d_tag(endian) == object::elf::DT_SONAME {
+                let name = strings
+                    .get(entry.d_val(endian) as u32)
+                    .map_err(|()| anyhow::anyhow!("{} has a bad soname", path.display()))?;
+                return Ok(Some(String::from_utf8_lossy(name).into_owned()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Fails unless each shared library `libraries/<name>` in `install` has
+/// its file name as its `DT_SONAME`, as a library of the system must.
+pub fn check_sonames(install: &Path, names: &[&str]) -> Result<()> {
+    for name in names {
+        let path = install.join("libraries").join(name);
+        let found = soname(&path)?;
+        if found.as_deref() != Some(*name) {
+            bail!("{} has the soname {found:?}, not {name}", path.display());
         }
     }
     Ok(())

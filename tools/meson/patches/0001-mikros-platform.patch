@@ -52,11 +52,11 @@ index 6b502e8..439af70 100644
              if self.darwin_versions is None and self.soversion is not None:
                  # If unspecified, pick the soversion
                  self.darwin_versions = (self.soversion, self.soversion)
-+            # On Mikros, a shared library without a version has the major
-+            # version 0. Loadable modules keep their names.
-+            if (self.soversion is None and not isinstance(self, SharedModule)
-+                    and self.environment.machines[self.for_machine].is_mikros()):
-+                self.soversion = '0'
++            # On Mikros, a library is named lib<name>.dlib, which is also
++            # its soname, whatever versions the project gives it.
++            if self.environment.machines[self.for_machine].is_mikros():
++                self.soversion = None
++                self.ltversion = None
  
          self.win_subsystem = kwargs.get('win_subsystem') or 'console'
  

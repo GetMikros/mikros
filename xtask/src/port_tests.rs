@@ -247,7 +247,7 @@ pub fn run_on_host(port: &Port, built: &Built) -> Result<()> {
 /// The members of the boot image of the tests of `port`, built in
 /// `built`, by their names there, besides the runner and the dynamic
 /// linker: the plan, written to `plan_file`, the programs the tests run,
-/// the shared libraries of the build directory by their major versions,
+/// the shared libraries of the build directory by their names,
 /// and the files of `port`'s test data.
 pub fn members(port: &Port, built: &Built, plan_file: &Path) -> Result<Vec<(String, PathBuf)>> {
     let (listed, expected) = suite(port, built)?;
@@ -271,7 +271,7 @@ pub fn members(port: &Port, built: &Built, plan_file: &Path) -> Result<Vec<(Stri
     }
     for entry in fs::read_dir(&built.build)? {
         let name = entry?.file_name().into_string().ok().unwrap_or_default();
-        if major_version_name(&name) {
+        if library_name(&name) {
             members.push((format!("system/libraries/{name}"), built.build.join(&name)));
         }
     }
@@ -289,20 +289,11 @@ pub fn members(port: &Port, built: &Built, plan_file: &Path) -> Result<Vec<(Stri
     Ok(members)
 }
 
-/// Whether `name` is a library's name with its major version only:
-/// `lib<name>.<major>.dlib`.
-fn major_version_name(name: &str) -> bool {
-    let Some(stem) = name
-        .strip_prefix("lib")
+/// Whether `name` is a shared library's name, `lib<name>.dlib`.
+fn library_name(name: &str) -> bool {
+    name.strip_prefix("lib")
         .and_then(|n| n.strip_suffix(".dlib"))
-    else {
-        return false;
-    };
-    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    // A full version has more numbers before the last.
-    stem.rsplit_once('.').is_some_and(|(name, major)| {
-        number(major) && !name.rsplit_once('.').is_some_and(|(_, n)| number(n))
-    })
+        .is_some_and(|stem| !stem.is_empty())
 }
 
 /// Adds every regular file below `dir` to `files`, in name order.
@@ -428,11 +419,11 @@ mod tests {
     }
 
     #[test]
-    fn names_libraries_by_their_major_versions() {
-        assert!(major_version_name("libxkbcommon.0.dlib"));
-        assert!(major_version_name("libxkbcommon-test-internal.0.dlib"));
-        assert!(!major_version_name("libxkbcommon.0.13.2.dlib"));
-        assert!(!major_version_name("libxkbcommon.dlib"));
-        assert!(!major_version_name("test-keysym"));
+    fn names_libraries_without_versions() {
+        assert!(library_name("libxkbcommon.dlib"));
+        assert!(library_name("libxkbcommon-test-internal.dlib"));
+        assert!(!library_name("lib.dlib"));
+        assert!(!library_name("test-keysym"));
+        assert!(!library_name("libxkbcommon.slib"));
     }
 }

@@ -16,6 +16,12 @@ fn main() {
             .join(port)
             .join("install/system/libraries");
         println!("cargo:rustc-link-search=native={}", lib.display());
+        // Relinked whenever the library is built again, whose name it
+        // needs.
+        println!(
+            "cargo:rerun-if-changed={}",
+            lib.join(format!("lib{port}.dlib")).display()
+        );
     }
     println!("cargo:rustc-link-lib=dylib=freetype");
     println!("cargo:rustc-link-lib=dylib=xkbcommon");
