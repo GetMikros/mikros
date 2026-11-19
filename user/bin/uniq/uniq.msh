@@ -1,0 +1,16 @@
+# What `uniq` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern uniq(
+    input?: file "the file to read, or - for standard input",
+    output?: file "the file to write, standard output when absent",
+    --count(-c): bool "put how often each line occurs before it",
+    --repeated(-d): bool "write only lines that occur more than once",
+    --unique(-u): bool "write only lines that occur once",
+    --ignore-case(-i): bool "compare without regard to case",
+    --skip-fields(-f): int "do not compare the first fields",
+    --skip-chars(-s): int "do not compare the first characters",
+    --check-chars(-w): int "compare at most this many characters",
+    --zero-terminated(-z): bool "lines end with a NUL byte",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
