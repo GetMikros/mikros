@@ -55,7 +55,8 @@ pub fn main() -> ExitCode {
         let moved = pair.and_then(|(source, destination)| {
             let done = shift(options, &source, &destination)?;
             if done && options.verbose {
-                let p = |path: &Path| paint.paint(Role::Path, &path.display().to_string());
+                let moved = Role::Path(paint.entry_type(&destination));
+                let p = |path: &Path| paint.paint(moved, &path.display().to_string());
                 let _ = writeln!(
                     io::stdout(),
                     "renamed {} -> {}",

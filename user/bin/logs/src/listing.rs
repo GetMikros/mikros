@@ -320,11 +320,9 @@ mod tests {
         assert_eq!(
             line(&entry(0, 3, "disk \x1b gone"), on),
             format!(
-                "{} {} system.timesvc[{}]: {}",
+                "{} {} system.timesvc[12]: disk ? gone",
                 paint("90", "-"),
-                paint("38;2;231;76;60", "error"),
-                paint("38;2;21;193;160", "12"),
-                paint("38;2;255;134;26", "disk ? gone")
+                paint("31", "error"),
             )
         );
         assert_eq!(

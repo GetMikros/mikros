@@ -3,7 +3,7 @@
 //! library's `realpath`.
 
 use crate::folder::{self, COMMAND};
-use mikros_cli::{FAILURE, Paint, Role, SUCCESS, complain, start};
+use mikros_cli::{EntryType, FAILURE, Paint, Role, SUCCESS, complain, start};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
@@ -29,7 +29,7 @@ pub fn main() -> ExitCode {
             }
         },
     };
-    let shown = Paint::stdout(&run).paint(Role::Path, &path);
+    let shown = Paint::stdout(&run).paint(Role::Path(EntryType::Folder), &path);
     match writeln!(std::io::stdout(), "{shown}") {
         Ok(()) => ExitCode::from(SUCCESS),
         Err(e) => {

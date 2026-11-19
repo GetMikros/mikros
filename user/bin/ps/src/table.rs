@@ -43,7 +43,7 @@ pub fn text(processes: &[Process], paint: Paint) -> String {
                 (p.parent.to_string(), Some(Role::Number)),
                 (p.user_name.clone(), None),
                 (p.app_id.clone(), None),
-                (p.path.clone(), Some(Role::Path)),
+                (p.path.clone(), Some(Role::Path(paint.entry_type(&p.path)))),
             ]
         })
         .collect();
@@ -114,18 +114,12 @@ mod tests {
     #[test]
     fn colours_by_role_and_keeps_the_columns() {
         let on = Paint::new(Some("always"), false, None);
-        let paint = |sgr: &str, t: &str| format!("\x1b[{sgr}m{t}\x1b[0m");
-        let number = |t| paint("38;2;21;193;160", t);
         let line = text(&processes()[..2], on);
         let second = line.lines().nth(2).unwrap();
+        // Numbers, and paths of no entry, take the default colour.
         assert_eq!(
             second,
-            format!(
-                " {}       {}  system  system.termsvc  {}",
-                number("27"),
-                number("3"),
-                paint("38;2;27;213;177", "/usr/bin/termsvc")
-            )
+            " 27       3  system  system.termsvc  /usr/bin/termsvc"
         );
         assert!(line.starts_with("\x1b[90mPID\x1b[0m  \x1b[90mPARENT\x1b[0m  "));
     }

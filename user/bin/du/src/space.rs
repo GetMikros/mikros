@@ -110,7 +110,7 @@ pub fn line(bytes: u64, path: &str, unit: Unit, paint: Paint) -> String {
     format!(
         "{}\t{}\n",
         paint.paint(Role::Number, &shown(bytes, unit)),
-        paint.paint(Role::Path, path)
+        paint.entry(path)
     )
 }
 

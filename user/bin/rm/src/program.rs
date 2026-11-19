@@ -2,7 +2,7 @@
 //! (MIKSPEC-0098.R33), after refusing the root and the system version.
 
 use crate::removal::{self, Asking, COMMAND, Refusal, Settings};
-use mikros_cli::{FAILURE, INVALID, Paint, Role, Run, SUCCESS, complain, start};
+use mikros_cli::{EntryType, FAILURE, INVALID, Paint, Role, Run, SUCCESS, complain, start};
 use std::fs;
 use std::io::{BufRead, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -118,7 +118,7 @@ impl Remover<'_> {
             return;
         }
         match fs::remove_dir(path) {
-            Ok(()) => self.removed("removed folder", path),
+            Ok(()) => self.removed("removed folder", path, EntryType::Folder),
             Err(e) => self.fail(&format!("cannot remove {shown}: {e}")),
         }
     }
@@ -129,15 +129,18 @@ impl Remover<'_> {
         if self.settings.asking == Asking::Each && !self.ask(&format!("remove {what} {shown}")) {
             return;
         }
+        let kind = self.paint.entry_type(path);
         match fs::remove_file(path) {
-            Ok(()) => self.removed("removed", path),
+            Ok(()) => self.removed("removed", path, kind),
             Err(e) => self.fail(&format!("cannot remove {shown}: {e}")),
         }
     }
 
-    fn removed(&self, what: &str, path: &Path) {
+    fn removed(&self, what: &str, path: &Path, kind: EntryType) {
         if self.settings.verbose {
-            let path = self.paint.paint(Role::Path, &path.display().to_string());
+            let path = self
+                .paint
+                .paint(Role::Path(kind), &path.display().to_string());
             let mut out = std::io::stdout().lock();
             let _ = writeln!(out, "{what} {path}");
         }

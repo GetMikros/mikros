@@ -9,7 +9,7 @@ use crate::data::{self, Crc};
 use crate::extract::{self, Options, Report};
 use crate::inside::{Space, Volume};
 use crate::listing;
-use mikros_cli::{FAILURE, INVALID, Paint, Role, Run, SUCCESS, complain, start};
+use mikros_cli::{EntryType, FAILURE, INVALID, Paint, Role, Run, SUCCESS, complain, start};
 use mikros_command::node;
 use std::fs::File;
 use std::io::{self, BufReader, IsTerminal, Write};
@@ -102,13 +102,16 @@ fn test(file: &mut BufReader<File>, records: &[&Record], told: &mut Told, name: 
             data::checked(record, data.crc())
         });
         match checked {
-            Ok(()) if !quiet => told.did("testing", &format!("{}  OK", record.name)),
+            Ok(()) if !quiet => {
+                let tested = format!("{}  OK", record.name);
+                told.did("testing", &tested, listing::entry_type(record));
+            }
             Ok(()) => {}
             Err(why) => told.error(&format!("{}: {why}", record.name)),
         }
     }
     if !told.failed && !quiet {
-        println!("no errors in {}", told.paint.paint(Role::Path, name));
+        println!("no errors in {}", told.paint.entry(name));
     }
 }
 
@@ -137,9 +140,9 @@ struct Told<'a> {
 }
 
 impl Report for Told<'_> {
-    fn did(&mut self, what: &str, name: &str) {
+    fn did(&mut self, what: &str, name: &str, kind: EntryType) {
         if !self.run.has("-q") {
-            let line = format!("{what:>10}: {}\n", self.paint.paint(Role::Path, name));
+            let line = format!("{what:>10}: {}\n", self.paint.paint(Role::Path(kind), name));
             let _ = io::stdout().write_all(line.as_bytes());
         }
     }

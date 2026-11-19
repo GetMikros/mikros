@@ -3,7 +3,7 @@
 //! failed.
 
 use mikros_cli::table::{Cell, columns};
-use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
+use mikros_cli::{EntryType, Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
 
 pub static COMMAND: Spec = Spec {
     options: &[Opt::long(
@@ -116,7 +116,7 @@ pub fn text(volumes: &[Volume], paint: Paint) -> String {
                 false => "no",
             };
             vec![
-                or_none(&v.name, Some(Role::Path)),
+                or_none(&v.name, Some(Role::Path(EntryType::Folder))),
                 (v.id.clone(), Some(Role::Number)),
                 or_none(&v.kind, None),
                 (v.state.name().into(), state),
@@ -268,9 +268,8 @@ mod tests {
         assert_eq!(
             text(&volumes, on).lines().nth(2).unwrap(),
             format!(
-                "{}      {}                             {}     ejected  yes",
+                "{}      1234-abcd                             {}     ejected  yes",
                 paint("90", "-"),
-                paint("38;2;21;193;160", "1234-abcd"),
                 paint("90", "-")
             )
         );

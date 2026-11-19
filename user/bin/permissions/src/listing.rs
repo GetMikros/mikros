@@ -255,11 +255,11 @@ mod tests {
         let on = Paint::new(Some("always"), false, None);
         assert_eq!(
             text(&grants[..2], on).lines().nth(1),
-            Some("app.a    user.microphone.use  \x1b[38;2;17;209;22mallowed\x1b[0m")
+            Some("app.a    user.microphone.use  \x1b[32mallowed\x1b[0m")
         );
         assert_eq!(
             text(&grants[..1], on).lines().nth(1),
-            Some("app.zed  user.camera.use  \x1b[38;2;231;76;60mdenied\x1b[0m")
+            Some("app.zed  user.camera.use  \x1b[31mdenied\x1b[0m")
         );
         assert_eq!(
             json(&grants[..1]),

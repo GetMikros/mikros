@@ -79,14 +79,9 @@ mod tests {
             "NAME     PID  STATE\nlogsvc     7  running\ntermsvc   12  -\n"
         );
         let on = Paint::new(Some("always"), false, None);
-        let coloured = columns(
-            &["NAME", "PID"],
-            &rows.iter().map(|r| r[..2].to_vec()).collect::<Vec<_>>(),
-            &[false, true],
-            on,
-        );
+        let coloured = columns(&["NAME", "PID", "STATE"], &rows, &[false, true, false], on);
         let first = coloured.lines().nth(1).unwrap();
-        assert_eq!(first, "logsvc     \x1b[38;2;21;193;160m7\x1b[0m");
+        assert_eq!(first, "logsvc     7  \x1b[32mrunning\x1b[0m");
         assert!(coloured.starts_with("\x1b[90mNAME\x1b[0m"));
     }
 }

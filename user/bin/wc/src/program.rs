@@ -2,8 +2,8 @@
 //! standard library, continuing after one that fails (MIKSPEC-0098.R44,
 //! MIKSPEC-0098.R33).
 
-use crate::counting::{self, COMMAND, Counter, Counts, Show};
-use mikros_cli::{FAILURE, Paint, SUCCESS, complain, start};
+use crate::counting::{self, COMMAND, Counter, Counts, Name, Show};
+use mikros_cli::{EntryType, FAILURE, Paint, SUCCESS, complain, start};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
@@ -31,16 +31,20 @@ pub fn main() -> ExitCode {
     let text = match json {
         true => counting::json(&rows),
         false => {
-            let mut shown: Vec<(Option<String>, Counts)> = rows
+            let paint = Paint::stdout(&run);
+            let mut shown: Vec<(Option<Name>, Counts)> = rows
                 .iter()
-                .map(|(path, counts)| (named.then(|| path.clone()), *counts))
+                .map(|(path, counts)| {
+                    let name = named.then(|| (path.clone(), paint.entry_type(path)));
+                    (name, *counts)
+                })
                 .collect();
             if operands.len() > 1 {
                 let mut total = Counts::default();
                 rows.iter().for_each(|(_, c)| total.add(c));
-                shown.push((Some("total".into()), total));
+                shown.push((Some(("total".into(), EntryType::Other)), total));
             }
-            counting::text(&shown, show, Paint::stdout(&run))
+            counting::text(&shown, show, paint)
         }
     };
     if let Err(e) = io::stdout().write_all(text.as_bytes()) {

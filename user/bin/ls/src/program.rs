@@ -4,7 +4,7 @@
 //! and JSON (MIKSPEC-0098.R33).
 
 use crate::listing::{self, COMMAND, Entry, Hidden, Show, Type};
-use mikros_cli::{FAILURE, Paint, Run, SUCCESS, complain, start};
+use mikros_cli::{EntryType, FAILURE, Paint, Run, SUCCESS, complain, start};
 use mikros_command::node;
 use std::ffi::c_int;
 use std::fs::{self, Metadata};
@@ -190,6 +190,15 @@ impl Lister<'_> {
             Type::Link => fs::read_link(path).ok().map(|t| t.display().to_string()),
             _ => None,
         };
+        let (colour, target_colour) = match self.paint.on() {
+            true => (
+                EntryType::from_metadata(path, &metadata),
+                target
+                    .as_ref()
+                    .map_or(EntryType::Other, |t| EntryType::of_target(path, t)),
+            ),
+            false => (EntryType::Other, EntryType::Other),
+        };
         let (access, acl) = match self.details {
             true => details(path, kind != Type::Link),
             false => (None, false),
@@ -203,6 +212,8 @@ impl Lister<'_> {
             access,
             acl,
             target,
+            colour,
+            target_colour,
         })
     }
 

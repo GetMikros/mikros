@@ -1,7 +1,7 @@
 //! What wc takes, how it counts the bytes of a file as UTF-8, and how it
 //! writes the counts as columns or JSON (MIKSPEC-0098.R47).
 
-use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
+use mikros_cli::{EntryType, Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
 
 pub static COMMAND: Spec = Spec {
     operands: &[Operand::any(
@@ -195,10 +195,13 @@ impl Show {
     }
 }
 
+/// A name of an input, and the type of the entry it names.
+pub type Name = (String, EntryType);
+
 /// The lines of `rows`, each counts and a name, which standard input
 /// read without a name lacks: the counts shown, right-aligned to the
 /// widest, and the name.
-pub fn text(rows: &[(Option<String>, Counts)], show: Show, paint: Paint) -> String {
+pub fn text(rows: &[(Option<Name>, Counts)], show: Show, paint: Paint) -> String {
     let values: Vec<Vec<u64>> = rows.iter().map(|(_, c)| show.values(c)).collect();
     let width = values
         .iter()
@@ -213,9 +216,9 @@ pub fn text(rows: &[(Option<String>, Counts)], show: Show, paint: Paint) -> Stri
             .map(|v| paint.paint(Role::Number, &format!("{v:>width$}")))
             .collect();
         text.push_str(&shown.join(" "));
-        if let Some(name) = name {
+        if let Some((name, kind)) = name {
             text.push(' ');
-            text.push_str(&paint.paint(Role::Path, name));
+            text.push_str(&paint.paint(Role::Path(*kind), name));
         }
         text.push('\n');
     }
@@ -305,7 +308,8 @@ mod tests {
             bytes: 120,
             longest: 9,
         };
-        let rows = vec![(Some("a".to_string()), c), (Some("total".into()), c)];
+        let name = |n: &str| Some((n.to_string(), EntryType::Other));
+        let rows = vec![(name("a"), c), (name("total"), c)];
         assert_eq!(
             text(&rows, Show::of(&run(&[])), Paint::never()),
             "  3  10 120 a\n  3  10 120 total\n"

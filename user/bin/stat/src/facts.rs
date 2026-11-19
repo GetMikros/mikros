@@ -147,10 +147,11 @@ pub fn text(facts: &Facts, paint: Paint) -> String {
     let mut text = String::new();
     let number = |n: u64| paint.paint(Role::Number, &n.to_string());
     let when = |t: i64| paint.paint(Role::Secondary, &time::local(t));
-    let mut name = paint.paint(Role::Path, &facts.name);
+    let mut name = paint.entry(&facts.name);
     if let Some(target) = &facts.target {
+        let kind = paint.target_type(&facts.name, target);
         name.push_str(" -> ");
-        name.push_str(&paint.paint(Role::Path, target));
+        name.push_str(&paint.paint(Role::Path(kind), target));
     }
     line(&mut text, "Name", &name);
     line(&mut text, "Type", facts.kind.word());

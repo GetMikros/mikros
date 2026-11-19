@@ -21,7 +21,8 @@ pub fn main() -> ExitCode {
     for operand in &run.operands {
         match written(Path::new(operand), mode) {
             Ok(path) => {
-                let shown = paint.paint(Role::Path, &path.to_string_lossy());
+                let kind = paint.target_type(operand, &path);
+                let shown = paint.paint(Role::Path(kind), &path.to_string_lossy());
                 failed |= write!(out, "{shown}{end}").is_err();
             }
             Err(why) => {

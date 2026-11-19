@@ -24,7 +24,7 @@ struct Told<'a> {
 impl Report for Told<'_> {
     fn did(&mut self, what: &str, name: &str, how: &str) {
         if !self.run.has("-q") {
-            let name = self.paint.paint(Role::Path, name);
+            let name = self.paint.entry(name);
             let line = match how.is_empty() {
                 true => format!("{what:>8}: {name}\n"),
                 false => format!(

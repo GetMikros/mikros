@@ -43,11 +43,12 @@ pub fn main() -> ExitCode {
     for operand in &run.operands {
         match resolve(operand) {
             Ok(path) => {
+                let kind = paint.entry_type(&path);
                 let path = match &base {
                     Some(base) => paths::relative(&path, base),
                     None => path,
                 };
-                let shown = paint.paint(Role::Path, &path.to_string_lossy());
+                let shown = paint.paint(Role::Path(kind), &path.to_string_lossy());
                 failed |= write!(out, "{shown}{end}").is_err();
             }
             Err(e) => {

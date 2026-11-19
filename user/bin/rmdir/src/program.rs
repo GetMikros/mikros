@@ -2,7 +2,7 @@
 //! (MIKSPEC-0098.R33).
 
 use crate::parents::{COMMAND, folders};
-use mikros_cli::{FAILURE, Paint, Role, SUCCESS, complain, start};
+use mikros_cli::{EntryType, FAILURE, Paint, Role, SUCCESS, complain, start};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -21,7 +21,7 @@ pub fn main() -> ExitCode {
                 let _ = writeln!(
                     std::io::stdout(),
                     "removed folder {}",
-                    paint.paint(Role::Path, &folder)
+                    paint.paint(Role::Path(EntryType::Folder), &folder)
                 );
             }
         }

@@ -284,7 +284,6 @@ mod tests {
         let services = [service("a", "failed", 0, 3), service("bb", "running", 7, 0)];
         let paint = |sgr: &str, t: &str| format!("\x1b[{sgr}m{t}\x1b[0m");
         let grey = |t| paint("90", t);
-        let number = |t| paint("38;2;21;193;160", t);
         let expected = [
             format!(
                 "{}  {}    {}  {}  {}",
@@ -295,17 +294,11 @@ mod tests {
                 grey("ENABLED")
             ),
             format!(
-                "a     {}     {}         {}  yes",
-                paint("38;2;231;76;60", "failed"),
+                "a     {}     {}         3  yes",
+                paint("31", "failed"),
                 grey("-"),
-                number("3")
             ),
-            format!(
-                "bb    {}    {}         {}  yes",
-                paint("38;2;17;209;22", "running"),
-                number("7"),
-                number("0")
-            ),
+            format!("bb    {}    7         0  yes", paint("32", "running"),),
         ];
         assert_eq!(text(&services, on), expected.join("\n") + "\n");
     }

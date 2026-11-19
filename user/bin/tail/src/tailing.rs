@@ -3,7 +3,7 @@
 //! seek in, and by holding back the last ones of a stream
 //! (MIKSPEC-0098.R46, MIKSPEC-0098.R44).
 
-use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, size};
+use mikros_cli::{Kind, Operand, Opt, Paint, Run, Spec, size};
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 
@@ -105,7 +105,7 @@ pub fn title(name: &str, first: bool, paint: Paint) -> String {
         name => name,
     };
     let blank = if first { "" } else { "\n" };
-    format!("{blank}==> {} <==\n", paint.paint(Role::Path, name))
+    format!("{blank}==> {} <==\n", paint.entry(name))
 }
 
 /// Why a copy stopped: reading or writing failed.

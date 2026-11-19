@@ -4,7 +4,16 @@
 
 use crate::central::Record;
 use mikros_cli::table::{Cell, columns};
-use mikros_cli::{Paint, Role, json_string, time};
+use mikros_cli::{EntryType, Paint, Role, json_string, time};
+
+/// The type of `record`'s entry, from its stored mode.
+pub fn entry_type(record: &Record) -> EntryType {
+    match (record.is_folder(), record.mode()) {
+        (true, _) => EntryType::Folder,
+        (false, Some(mode)) => EntryType::from_mode(mode),
+        (false, None) => EntryType::Other,
+    }
+}
 
 /// The entries `records` in columns under a header.
 pub fn list(records: &[&Record], paint: Paint) -> String {
@@ -14,7 +23,7 @@ pub fn list(records: &[&Record], paint: Paint) -> String {
             vec![
                 (r.size.to_string(), Some(Role::Number)),
                 (time::local(r.modified()), Some(Role::Secondary)),
-                (r.name.clone(), Some(Role::Path)),
+                (r.name.clone(), Some(Role::Path(entry_type(r)))),
             ]
         })
         .collect();

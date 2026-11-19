@@ -2,7 +2,7 @@
 //! library, trying names until one is not taken, and writes its path.
 
 use crate::template::{self, COMMAND};
-use mikros_cli::{FAILURE, INVALID, Paint, Role, SUCCESS, complain, start};
+use mikros_cli::{FAILURE, INVALID, Paint, SUCCESS, complain, start};
 use std::collections::hash_map::RandomState;
 use std::fs::{DirBuilder, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
@@ -43,7 +43,7 @@ pub fn main() -> ExitCode {
         let path = plan.path(Some(&mut random));
         match make(&path, run.has("-d"), run.has("-u")) {
             Ok(()) => {
-                let shown = Paint::stdout(&run).paint(Role::Path, &path.to_string_lossy());
+                let shown = Paint::stdout(&run).entry(&path);
                 return match writeln!(std::io::stdout(), "{shown}") {
                     Ok(()) => ExitCode::from(SUCCESS),
                     Err(_) => ExitCode::from(FAILURE),

@@ -2,7 +2,7 @@
 //! header line, or JSON (MIKSPEC-0098.R39).
 
 use mikros_cli::table::{Cell, columns};
-use mikros_cli::{Kind, Operand, Opt, Paint, Role, Spec, json_string, size};
+use mikros_cli::{EntryType, Kind, Operand, Opt, Paint, Role, Spec, json_string, size};
 
 pub static COMMAND: Spec = Spec {
     operands: &[Operand::any(
@@ -95,7 +95,7 @@ pub fn text(volumes: &[Volume], human: bool, paint: Paint) -> String {
         .iter()
         .map(|v| {
             vec![
-                cell(&v.path, Role::Path),
+                cell(&v.path, Role::Path(EntryType::Folder)),
                 cell(&v.kind, Role::String),
                 cell(&v.label, Role::String),
                 cell(&v.id, Role::Number),

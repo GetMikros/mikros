@@ -3,13 +3,23 @@
 //! name, and with `--json` an array of objects.
 
 use crate::header::{Entry, Kind};
-use mikros_cli::{Paint, Role, json_string, time};
+use mikros_cli::{EntryType, Paint, Role, json_string, time};
+
+/// The type of `entry`, from its stored type and mode.
+fn entry_type(entry: &Entry) -> EntryType {
+    match entry.kind {
+        Kind::Folder => EntryType::Folder,
+        Kind::Link => EntryType::Link,
+        Kind::File | Kind::Hard if entry.mode & 0o111 != 0 => EntryType::Executable,
+        _ => EntryType::Other,
+    }
+}
 
 /// The names of `entries`, one per line.
 pub fn names(entries: &[Entry], paint: Paint) -> String {
     entries
         .iter()
-        .map(|e| format!("{}\n", paint.paint(Role::Path, &e.path)))
+        .map(|e| format!("{}\n", paint.paint(Role::Path(entry_type(e)), &e.path)))
         .collect()
 }
 
@@ -31,10 +41,11 @@ pub fn long(entries: &[Entry], paint: Paint) -> String {
         text.push(' ');
         text.push_str(&paint.paint(Role::Secondary, &time::local(entry.modified)));
         text.push(' ');
-        text.push_str(&paint.paint(Role::Path, &entry.path));
+        text.push_str(&paint.paint(Role::Path(entry_type(entry)), &entry.path));
         if matches!(entry.kind, Kind::Link | Kind::Hard) {
+            // The archive does not say what the target is.
             text.push_str(" -> ");
-            text.push_str(&paint.paint(Role::Path, &entry.target));
+            text.push_str(&paint.paint(Role::Path(EntryType::Other), &entry.target));
         }
         text.push('\n');
     }

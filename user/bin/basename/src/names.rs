@@ -67,7 +67,8 @@ pub fn output(run: &Run, paint: Paint) -> Result<String, String> {
     };
     let mut text = String::new();
     for name in names {
-        text.push_str(&paint.paint(Role::Path, &basename(name, suffix)));
+        let kind = Role::Path(paint.entry_type(name));
+        text.push_str(&paint.paint(kind, &basename(name, suffix)));
         text.push(end);
     }
     Ok(text)

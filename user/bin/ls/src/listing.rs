@@ -1,7 +1,7 @@
 //! What ls takes, and how it orders and writes entries: names in columns
 //! or one per line, long lines, or JSON (MIKSPEC-0098.R34).
 
-use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string, size, time};
+use mikros_cli::{EntryType, Kind, Operand, Opt, Paint, Role, Run, Spec, json_string, size, time};
 
 pub static COMMAND: Spec = Spec {
     operands: &[Operand::any(
@@ -105,6 +105,11 @@ pub struct Entry {
     pub acl: bool,
     /// A link's target.
     pub target: Option<String>,
+    /// The type that colours the name, which also tells executable files
+    /// and links whose targets do not exist.
+    pub colour: EntryType,
+    /// The type that colours a link's target.
+    pub target_colour: EntryType,
 }
 
 /// How entries are shown, from the options.
@@ -186,7 +191,7 @@ fn shown_name(entry: &Entry, show: Show, paint: Paint) -> (String, usize) {
         text.push(' ');
     }
     width += entry.name.chars().count() + mark.len();
-    text.push_str(&paint.paint(Role::Path, &entry.name));
+    text.push_str(&paint.paint(Role::Path(entry.colour), &entry.name));
     text.push_str(mark);
     (text, width)
 }
@@ -223,7 +228,7 @@ pub fn long(entries: &[Entry], show: Show, paint: Paint) -> String {
         text.push_str(&name);
         if let Some(target) = &entry.target {
             text.push_str(" -> ");
-            text.push_str(&paint.paint(Role::Path, target));
+            text.push_str(&paint.paint(Role::Path(entry.target_colour), target));
         }
         text.push('\n');
     }
@@ -322,6 +327,11 @@ mod tests {
             access: Some("rw-".into()),
             acl: false,
             target: None,
+            colour: match kind {
+                Type::Folder => EntryType::Folder,
+                _ => EntryType::Other,
+            },
+            target_colour: EntryType::Other,
         }
     }
 

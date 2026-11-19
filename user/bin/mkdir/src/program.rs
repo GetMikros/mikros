@@ -3,7 +3,7 @@
 //! file creation mask.
 
 use crate::making::{COMMAND, Mode, prefixes};
-use mikros_cli::{FAILURE, INVALID, Paint, Role, Run, SUCCESS, complain, start};
+use mikros_cli::{EntryType, FAILURE, INVALID, Paint, Role, Run, SUCCESS, complain, start};
 use std::fs::{self, DirBuilder, Permissions};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -95,7 +95,9 @@ impl Maker<'_> {
             }
         }
         if self.run.has("-v") {
-            let path = self.paint.paint(Role::Path, &shown.to_string());
+            let path = self
+                .paint
+                .paint(Role::Path(EntryType::Folder), &shown.to_string());
             let _ = writeln!(std::io::stdout(), "created folder {path}");
         }
         if let Some(mode) = mode

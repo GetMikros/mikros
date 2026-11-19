@@ -231,7 +231,8 @@ fn check_list(
         if escaped {
             line.push(b'\\');
         }
-        line.extend(sums::paint_bytes(paint, Role::Path, &name));
+        let kind = paint.entry_type(OsStr::from_bytes(&listed.name));
+        line.extend(sums::paint_bytes(paint, Role::Path(kind), &name));
         line.extend_from_slice(b": ");
         line.extend_from_slice(paint.paint(role, verdict).as_bytes());
         line.push(end);

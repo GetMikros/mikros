@@ -11,7 +11,7 @@ use crate::inside::{Space, Target, Volume};
 use crate::listing;
 use crate::reader::{self, Next, Reader};
 use flate2::{Compression, write::GzEncoder};
-use mikros_cli::{FAILURE, INVALID, Paint, Role, Run, SUCCESS, complain, start};
+use mikros_cli::{FAILURE, INVALID, Paint, Run, SUCCESS, complain, start};
 use mikros_command::node;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -73,7 +73,7 @@ impl Report for Told<'_> {
         if !self.verbose {
             return;
         }
-        let line = format!("{}\n", self.paint.paint(Role::Path, name));
+        let line = format!("{}\n", self.paint.entry(name));
         let _ = match self.to_stderr {
             true => io::stderr().write_all(line.as_bytes()),
             false => io::stdout().write_all(line.as_bytes()),

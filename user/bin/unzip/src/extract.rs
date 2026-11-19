@@ -10,6 +10,8 @@ use crate::args::Existing;
 use crate::central::{Directory, Record, S_IFMT, S_IFREG};
 use crate::data::{self, Crc};
 use crate::inside::{self, Space, Target};
+use crate::listing::entry_type;
+use mikros_cli::EntryType;
 use std::fs;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -20,7 +22,7 @@ const TARGET_MAX: u64 = 4096;
 /// What a run tells as it goes.
 pub trait Report {
     /// What was done with an entry, as `inflating`, and its name.
-    fn did(&mut self, what: &str, name: &str);
+    fn did(&mut self, what: &str, name: &str, kind: EntryType);
     /// A failure, after which the run exits with 1.
     fn error(&mut self, message: &str);
     /// A message that is not a failure.
@@ -172,7 +174,7 @@ fn one<F: Read + Seek>(
     let modified = record.modified();
     if folder {
         target.folder(&at).map_err(failed)?;
-        report.did("creating", &record.name);
+        report.did("creating", &record.name, EntryType::Folder);
         folders.push((at, record.mode(), modified));
         return Ok(());
     }
@@ -220,7 +222,8 @@ fn one<F: Read + Seek>(
         target
             .link(&at, &to)
             .map_err(|e| failed(format!("cannot create the link: {e}")))?;
-        report.did("linking", &format!("{} -> {to}", record.name));
+        let link = format!("{} -> {to}", record.name);
+        report.did("linking", &link, EntryType::Link);
     } else {
         let mut out = target
             .create(&at)
@@ -241,7 +244,7 @@ fn one<F: Read + Seek>(
             0 => "extracting",
             _ => "inflating",
         };
-        report.did(what, &record.name);
+        report.did(what, &record.name, entry_type(record));
     }
     target
         .modified(&at, modified)
@@ -266,7 +269,7 @@ mod tests {
     }
 
     impl Report for Told {
-        fn did(&mut self, what: &str, name: &str) {
+        fn did(&mut self, what: &str, name: &str, _: EntryType) {
             self.did.push(format!("{what} {name}"));
         }
         fn error(&mut self, message: &str) {

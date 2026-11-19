@@ -3,7 +3,7 @@
 //! (MIKSPEC-0098.R52).
 
 use crate::pattern::{Matcher, Settings, Syntax};
-use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
+use mikros_cli::{EntryType, Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 
@@ -218,12 +218,14 @@ struct Writer<'a, W: Write> {
     matcher: &'a Matcher,
     paint: Paint,
     name: &'a str,
+    /// The colour of the name.
+    named: Role,
 }
 
 impl<W: Write> Writer<'_, W> {
     fn prefix(&mut self, number: u64, separator: &[u8]) -> io::Result<()> {
         if self.options.with_name {
-            painted(self.out, self.paint, Role::Path, self.name.as_bytes())?;
+            painted(self.out, self.paint, self.named, self.name.as_bytes())?;
             self.out.write_all(separator)?;
         }
         if self.options.line_number {
@@ -317,6 +319,10 @@ pub fn search(
         matcher,
         paint,
         name: input.name,
+        named: Role::Path(match o.with_name {
+            true => paint.entry_type(input.path),
+            false => EntryType::Other,
+        }),
     };
     let mut kept: VecDeque<(u64, Vec<u8>)> = VecDeque::new();
     let mut last: Option<u64> = None;
@@ -383,7 +389,7 @@ pub fn search(
 pub fn count_line(name: &str, count: u64, o: &Options, paint: Paint) -> String {
     let count = paint.paint(Role::Number, &count.to_string());
     match o.with_name {
-        true => format!("{}:{count}\n", paint.paint(Role::Path, name)),
+        true => format!("{}:{count}\n", paint.entry(name)),
         false => format!("{count}\n"),
     }
 }
@@ -557,7 +563,7 @@ mod tests {
         assert_eq!(text, "f:2:two\n");
         let on = Paint::new(Some("always"), false, None);
         let (text, _) = grep(&["wo"], "two\n", true, on);
-        let path = on.paint(Role::Path, "f");
+        let path = on.paint(Role::Path(EntryType::Other), "f");
         let found = on.paint(Role::String, "wo");
         assert_eq!(text, format!("{path}:t{found}\n"));
         let options = Options {

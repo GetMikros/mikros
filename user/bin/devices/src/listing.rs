@@ -139,10 +139,7 @@ mod tests {
         );
         assert_eq!(text(&[], Paint::never()), "");
         let on = Paint::new(Some("always"), false, None);
-        assert_eq!(
-            text(&devices()[..1], on),
-            "input/input0  \x1b[38;2;255;134;26mPS/2 keyboard\x1b[0m\n"
-        );
+        assert_eq!(text(&devices()[..1], on), "input/input0  PS/2 keyboard\n");
     }
 
     #[test]

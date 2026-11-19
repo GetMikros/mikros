@@ -294,7 +294,7 @@ impl World for Finder<'_> {
             return;
         }
         let end = if nul { "\0" } else { "\n" };
-        let shown = self.paint.paint(Role::Path, &entry.path);
+        let shown = self.paint.entry(&entry.path);
         self.failed |= write!(self.out, "{shown}{end}").is_err();
     }
 

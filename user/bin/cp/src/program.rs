@@ -4,7 +4,7 @@
 //! (MIKSPEC-0098.R33).
 
 use crate::copying::{self, COMMAND, Clobber, Make, Options, Reflink, Refused};
-use mikros_cli::{FAILURE, INVALID, Paint, Role, Run, SUCCESS, complain, start};
+use mikros_cli::{FAILURE, INVALID, Paint, Run, SUCCESS, complain, start};
 use mikros_command::node;
 use std::ffi::{CString, c_char, c_int};
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -302,8 +302,8 @@ impl Copier<'_> {
         if !self.options.verbose {
             return;
         }
-        let p = |path: &Path| self.paint.paint(Role::Path, &path.display().to_string());
-        let _ = writeln!(io::stdout(), "{} -> {}", p(source), p(destination));
+        let (source, destination) = (self.paint.entry(source), self.paint.entry(destination));
+        let _ = writeln!(io::stdout(), "{source} -> {destination}");
     }
 }
 

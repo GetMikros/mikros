@@ -230,7 +230,7 @@ mod tests {
             "warning: org.x.y 1.0.0 is installed; this file cannot be checked to come from the same developer"
         ));
         let on = Paint::new(Some("always"), false, None);
-        assert!(describe(&m, on).contains("\n  \x1b[38;2;255;134;26mEdits.\x1b[0m\n"));
+        assert!(describe(&m, on).contains("\n  Edits.\n"));
         assert!(update_warnings("a", "1", "1", on).starts_with("\x1b[33mwarning:\x1b[0m a 1 "));
         let older = update_warnings("org.x.y", "2.0.0", "1.9.0", Paint::never());
         assert!(older.ends_with("warning: 1.9.0 is older than the installed 2.0.0\n"));

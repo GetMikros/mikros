@@ -1,7 +1,7 @@
 //! What dirname takes, and the folder part of a name by the steps of
 //! POSIX (MIKSPEC-0098.R41).
 
-use mikros_cli::{Kind, Operand, Opt, Paint, Role, Run, Spec};
+use mikros_cli::{Kind, Operand, Opt, Paint, Run, Spec};
 
 pub static COMMAND: Spec = Spec {
     operands: &[Operand::some(
@@ -45,7 +45,7 @@ pub fn output(run: &Run, paint: Paint) -> String {
     };
     let mut text = String::new();
     for name in &run.operands {
-        text.push_str(&paint.paint(Role::Path, &dirname(name)));
+        text.push_str(&paint.entry(dirname(name)));
         text.push(end);
     }
     text

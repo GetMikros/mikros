@@ -255,7 +255,7 @@ impl<W: Write> Grep<'_, W> {
         let o = &self.options;
         let listed = (o.files_with && selected > 0) || (o.files_without && selected == 0);
         if listed {
-            let name = self.paint.paint(mikros_cli::Role::Path, name);
+            let name = self.paint.entry(name);
             writeln!(self.out, "{name}")?;
         } else if o.count && !o.files_with && !o.files_without {
             let line = search::count_line(name, selected, o, self.paint);

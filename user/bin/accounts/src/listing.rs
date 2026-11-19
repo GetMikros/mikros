@@ -374,9 +374,7 @@ mod tests {
         let on = Paint::new(Some("always"), false, None);
         assert_eq!(
             text(&users[1..], on).lines().nth(1),
-            Some(
-                "\x1b[38;2;21;193;160m1001\x1b[0m  bob   standard  \x1b[38;2;255;134;26mBob\x1b[0m"
-            )
+            Some("1001  bob   standard  Bob")
         );
         assert_eq!(
             json(&users[..1]),

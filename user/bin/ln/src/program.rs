@@ -40,11 +40,16 @@ pub fn main() -> ExitCode {
             complain(&COMMAND, &run, &why);
             failed = true;
         } else if run.has("-v") {
+            let shown = target(&run, link);
+            let kind = match run.has("-s") {
+                true => paint.target_type(&link.name, &shown),
+                false => paint.entry_type(&link.target),
+            };
             let _ = writeln!(
                 std::io::stdout(),
                 "{} -> {}",
-                paint.paint(Role::Path, &link.name),
-                paint.paint(Role::Path, &target(&run, link))
+                paint.entry(&link.name),
+                paint.paint(Role::Path(kind), &shown)
             );
         }
     }

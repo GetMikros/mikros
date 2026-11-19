@@ -3,6 +3,8 @@
 
 use crate::Algorithm;
 use mikros_cli::{Paint, Role, json_string};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 
 /// How lines of sums are written.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,7 +42,8 @@ pub fn line(algorithm: &Algorithm, hash: &str, name: &[u8], form: Form, paint: P
         true => (false, name.to_vec()),
         false => escape(name),
     };
-    let shown = paint_bytes(paint, Role::Path, &shown);
+    let kind = paint.entry_type(OsStr::from_bytes(name));
+    let shown = paint_bytes(paint, Role::Path(kind), &shown);
     let hash = paint.paint(Role::Number, hash);
     let mut out = Vec::new();
     if escaped {
