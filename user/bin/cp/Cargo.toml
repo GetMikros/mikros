@@ -15,6 +15,7 @@ mikros-command = { path = "../../lib/command" }
 [package.metadata.mikros]
 kind = "program"
 image = "system"
+manifest = "system.cp.yaml"
 completions = "cp.msh"
 
 # The parts that only run on Mikros are left out of the host's tests.

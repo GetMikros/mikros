@@ -14,12 +14,12 @@ mikros-command = { path = "../../lib/command" }
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 
 # One of the commands that replaced the uutils port (MIKSPEC-0098.R4).
-# It has no program manifest: setting the time needs admin.time.set,
-# for which the time service asks, and a command manifest would have to
-# name a program in /system/bin.
+# Its manifest holds no permission: setting the time needs
+# admin.time.set, for which the time service asks, naming date.
 [package.metadata.mikros]
 kind = "program"
 image = "system"
+manifest = "system.date.yaml"
 completions = "date.msh"
 
 # The parts that only run on Mikros are left out of the host's tests.

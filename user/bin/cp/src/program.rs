@@ -285,10 +285,12 @@ impl Copier<'_> {
             if let Err(e) = fs::set_permissions(destination, mode) {
                 self.fail(&format!("cannot keep the mode of {d}: {e}"));
             }
-            if let Err(why) = acls(source, destination, metadata.is_dir()) {
-                self.fail(&format!(
+            match acls(source, destination, metadata.is_dir()) {
+                Ok(()) => {}
+                Err(why) if why == NOT_AUTHORIZED => self.fail(NOT_AUTHORIZED),
+                Err(why) => self.fail(&format!(
                     "cannot keep the access control list of {d}: {why}"
-                ));
+                )),
             }
         }
         if let Err(e) = times(destination, metadata, link) {
@@ -319,6 +321,10 @@ fn resolved(path: &Path) -> Option<PathBuf> {
     Some(fs::canonicalize(folder).ok()?.join(name))
 }
 
+/// Why a list could not be set when its file system's question for an
+/// administrator was refused.
+const NOT_AUTHORIZED: &str = "not authorized";
+
 /// Copies the access list of `source` to `destination`, and the default
 /// list of a folder. A list that the file system does not keep is
 /// skipped where the source's says no more than its mode.
@@ -341,6 +347,9 @@ fn acls(source: &Path, destination: &Path, folder: bool) -> Result<(), String> {
         match to.set_acl(default, entries, FOREVER) {
             Ok(Ok(_)) => {}
             Ok(Err(e)) if format!("{e:?}") == "NotSupported" && !extended => {}
+            // The file system asked for an administrator, who did not
+            // allow it (MIKSPEC-0098.R64).
+            Ok(Err(e)) if format!("{e:?}") == "AccessDenied" => return Err(NOT_AUTHORIZED.into()),
             Ok(Err(e)) => return Err(format!("{e:?}")),
             Err(e) => return Err(format!("{e:?}")),
         }

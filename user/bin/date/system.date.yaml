@@ -1,0 +1,8 @@
+# The program manifest of date, installed as
+# system/programs/system.date.yaml: a command, which sets the time with
+# -s, for which the time service asks an administrator. It holds no
+# permissions, so that the question names it.
+app_id: system.date
+binary: /system/bin/date
+command: true
+permissions: []

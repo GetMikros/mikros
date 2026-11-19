@@ -1,0 +1,9 @@
+# The program manifest of mv, installed as
+# system/programs/system.mv.yaml: a command, which keeps access control
+# lists when it moves across file systems, for which a file system may
+# ask an administrator. It holds no permissions, so that the question
+# names it.
+app_id: system.mv
+binary: /system/bin/mv
+command: true
+permissions: []

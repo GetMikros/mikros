@@ -1,0 +1,8 @@
+# The program manifest of cp, installed as
+# system/programs/system.cp.yaml: a command, which keeps access control
+# lists with -p and -a, for which a file system may ask an
+# administrator. It holds no permissions, so that the question names it.
+app_id: system.cp
+binary: /system/bin/cp
+command: true
+permissions: []

@@ -167,8 +167,10 @@ fn copy(source: &Path, destination: &Path, metadata: &Metadata) -> Result<(), St
             fs::Permissions::from_mode(metadata.mode() & 0o7777),
         )
         .map_err(|e| format!("cannot keep the mode of {d}: {e}"))?;
-        acls(source, destination, kind.is_dir())
-            .map_err(|e| format!("cannot keep the access control list of {d}: {e}"))?;
+        acls(source, destination, kind.is_dir()).map_err(|e| match e.as_str() {
+            NOT_AUTHORIZED => e,
+            _ => format!("cannot keep the access control list of {d}: {e}"),
+        })?;
     }
     times(destination, metadata, kind.is_symlink())
         .map_err(|e| format!("cannot keep the times of {d}: {e}"))
@@ -187,6 +189,10 @@ fn resolved(path: &Path) -> Option<PathBuf> {
     };
     Some(fs::canonicalize(folder).ok()?.join(name))
 }
+
+/// Why a list could not be set when its file system's question for an
+/// administrator was refused.
+const NOT_AUTHORIZED: &str = "not authorized";
 
 /// Copies the access list of `source` to `destination`, and the default
 /// list of a folder. A list that the file system does not keep is
@@ -210,6 +216,9 @@ fn acls(source: &Path, destination: &Path, folder: bool) -> Result<(), String> {
         match to.set_acl(default, entries, FOREVER) {
             Ok(Ok(_)) => {}
             Ok(Err(e)) if format!("{e:?}") == "NotSupported" && !extended => {}
+            // The file system asked for an administrator, who did not
+            // allow it (MIKSPEC-0098.R64).
+            Ok(Err(e)) if format!("{e:?}") == "AccessDenied" => return Err(NOT_AUTHORIZED.into()),
             Ok(Err(e)) => return Err(format!("{e:?}")),
             Err(e) => return Err(format!("{e:?}")),
         }
