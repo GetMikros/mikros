@@ -6,6 +6,8 @@ use crate::{Error, F_ACCESS_PLATFORM, F_RING_PACKED, F_VERSION_1, SharedMemory};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::future::poll_fn;
+use core::task::{Poll, Waker};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
@@ -61,7 +63,24 @@ pub struct Transport {
     queues: Vec<Rc<Queue>>,
     features: u64,
     _interrupts: Vec<OwnedHandle>,
-    config_changes: Rc<Cell<u64>>,
+    config_changes: Rc<ConfigChanges>,
+}
+
+/// How many configuration changes the device has reported, and the tasks
+/// waiting for the next.
+#[derive(Default)]
+struct ConfigChanges {
+    count: Cell<u64>,
+    waiting: RefCell<Vec<Waker>>,
+}
+
+impl ConfigChanges {
+    fn add(&self) {
+        self.count.set(self.count.get() + 1);
+        for waker in self.waiting.borrow_mut().drain(..) {
+            waker.wake();
+        }
+    }
 }
 
 /// What `Transport::start` gives a driver.
@@ -164,7 +183,7 @@ impl Transport {
                 return Err(e);
             }
         };
-        let config_changes = Rc::new(Cell::new(0));
+        let config_changes = Rc::new(ConfigChanges::default());
         let device = Rc::new(RefCell::new(device));
         let kept = watch(
             &device,
@@ -213,7 +232,24 @@ impl Transport {
 
     /// How many configuration changes the device has reported.
     pub fn config_changes(&self) -> u64 {
-        self.config_changes.get()
+        self.config_changes.count.get()
+    }
+
+    /// Waits until the device has reported more configuration changes
+    /// than `seen`, and returns how many.
+    pub async fn config_changed(&self, seen: u64) -> u64 {
+        poll_fn(|cx| {
+            let count = self.config_changes.count.get();
+            if count > seen {
+                return Poll::Ready(count);
+            }
+            self.config_changes
+                .waiting
+                .borrow_mut()
+                .push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 
     /// Reads the device-specific configuration with `read`, again until
@@ -313,7 +349,7 @@ fn watch(
     structures: &Rc<Structures>,
     interrupts: Interrupts,
     queues: &[Rc<Queue>],
-    config_changes: &Rc<Cell<u64>>,
+    config_changes: &Rc<ConfigChanges>,
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Vec<OwnedHandle> {
@@ -337,7 +373,7 @@ fn watch(
                             queue.process_used();
                         }
                         if let Some(changes) = &config {
-                            changes.set(changes.get() + 1);
+                            changes.add();
                         }
                     }
                 });
@@ -358,7 +394,7 @@ fn watch(
                         }
                     }
                     if isr & ISR_CONFIG != 0 {
-                        changes.set(changes.get() + 1);
+                        changes.add();
                     }
                     // While the bus driver restarts, the event stays signaled
                     // until a new channel acknowledges it.
