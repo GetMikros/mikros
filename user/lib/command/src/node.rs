@@ -6,18 +6,18 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
-use mikros_rt::interfaces::mikros::fs::{AclEntry, AclTag, Error, FilesystemInfo, NodeClient};
+use mikros_rt::interfaces::mikros::fs::{AclEntry, AclTag, Error, FilesystemInfo};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::mikros::io::AsHandleExt;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const FOREVER: i64 = i64::MAX;
 /// The C library's flag that opens a link itself.
 const O_NOFOLLOW: i32 = 0o400000;
 
-pub use mikros_rt::interfaces::mikros::fs::Rights;
+pub use mikros_rt::interfaces::mikros::fs::{NodeClient, Rights};
 
 /// The node connection behind `file`.
 pub fn node(file: &File) -> io::Result<NodeClient> {
@@ -45,6 +45,35 @@ pub fn open(path: &Path, follow: bool) -> io::Result<NodeClient> {
             .open(path)?,
     };
     node(&file)
+}
+
+/// The process's namespace entries (MIKSPEC-0060.R13), each with a
+/// connection of its own to its root, in the order the process got them.
+pub fn entries() -> io::Result<Vec<(PathBuf, NodeClient)>> {
+    const SAME_RIGHTS: u32 = 1 << 31;
+    let mut found = Vec::new();
+    for entry in std::os::mikros::namespace::entries()? {
+        let mut raw = 0;
+        let root = entry.directory.as_raw_handle();
+        // SAFETY: the out pointer is valid for the call.
+        if unsafe { mikros_rt::sys::handle_duplicate(root, SAME_RIGHTS, &mut raw) } != mikros_rt::OK
+        {
+            continue;
+        }
+        // SAFETY: the kernel just made the handle for us.
+        let handle = unsafe { OwnedHandle::from_raw(raw) };
+        found.push((entry.path, NodeClient::new(ClientEnd::new(handle))));
+    }
+    Ok(found)
+}
+
+/// Writes what `node`'s file system holds back for it to its storage.
+pub fn sync(node: &NodeClient) -> Result<(), Error> {
+    match node.sync(FOREVER) {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(Error::Io),
+    }
 }
 
 /// What `node`'s connection may do, from `Access`.
