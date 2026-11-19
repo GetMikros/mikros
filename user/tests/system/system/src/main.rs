@@ -333,6 +333,13 @@ fn true_and_false_exit() -> Result<(), Failure> {
         &help,
         "showing the usage",
         help.status == 0 && help.out.starts_with("Usage: true"),
+    )?;
+    // false keeps its status after its help.
+    let help = run(FALSE, &["--help"])?;
+    ensure(
+        &help,
+        "showing false's usage",
+        help.status == 1 && help.out.starts_with("Usage: false"),
     )
 }
 
