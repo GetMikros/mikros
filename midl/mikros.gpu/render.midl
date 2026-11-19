@@ -1,4 +1,4 @@
-// MIKSPEC-0029.R10
+// MIKSPEC-0029.R10, MIKSPEC-0029.R26
 
 library mikros.gpu;
 using mikros.base;
@@ -36,4 +36,6 @@ protocol Render {
     @8 SetPriority(priority RenderPriority) -> () error base.Status;
     @9 GetMemoryInfo() -> (info MemoryInfo);
     @10 -> OnReset(guilty bool);
+    @11 ImportMemory(memory handle<MemoryObject, READ | WRITE | MAP>)
+        -> (buffer u32, size u64) error base.Status;
 };

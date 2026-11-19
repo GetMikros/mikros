@@ -10,3 +10,4 @@ Render.DestroySync: public
 Render.DriverCommand: public
 Render.SetPriority: public
 Render.GetMemoryInfo: public
+Render.ImportMemory: public

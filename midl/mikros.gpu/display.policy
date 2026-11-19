@@ -8,3 +8,4 @@ Display.DestroyBuffer: public
 Display.ImportSync: public
 Display.DestroySync: public
 Display.Commit: public
+Display.ImportMemory: public

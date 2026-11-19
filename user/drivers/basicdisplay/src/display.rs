@@ -1,8 +1,8 @@
 //! The `Display` connection of the display owner: the resources, dumb
-//! buffers, sync objects, and commits presented by copying the plane's
-//! buffer into the framebuffer; and what the gpudev library needs of the
-//! device, the framebuffer among it, which shows the log while no client
-//! owns the display.
+//! buffers and buffers of imported memory objects, sync objects, and
+//! commits presented by copying the plane's buffer into the framebuffer;
+//! and what the gpudev library needs of the device, the framebuffer among
+//! it, which shows the log while no client owns the display.
 
 use crate::framebuffer::{Framebuffer, PERM_READ};
 use alloc::collections::BTreeMap;
@@ -21,8 +21,9 @@ use mikros_rt::interfaces::mikros::gpu::{
     self as gpu, Capabilities, Colorspace, Commit, CommitFlags, Connector, ConnectorCaps,
     ConnectorType, DeviceInfo, DisplayAsyncServer, DisplayCommitResponse,
     DisplayCreateDumbBufferResponse, DisplayFlags, DisplayGetResourcesResponse,
-    DisplayImportSyncResponse, DisplayRequest, DisplayResources, DumbBuffer, FormatModifier, Mode,
-    ModeFlags, Plane, PlaneType, Render,
+    DisplayImportMemoryRequest, DisplayImportMemoryResponse, DisplayImportSyncResponse,
+    DisplayRequest, DisplayResources, DumbBuffer, FormatModifier, Mode, ModeFlags, Plane,
+    PlaneType, Render,
 };
 use mikros_rt::objects::now;
 use mikros_rt::sys;
@@ -42,10 +43,12 @@ const FRAME: i64 = 1_000_000_000 / 60;
 const PAGE_SIZE: u64 = 4096;
 const SAME_RIGHTS: u32 = 1 << 31;
 
-/// A dumb buffer, mapped for reading.
+/// A dumb buffer or an imported memory object, mapped for reading.
 struct Buffer {
     mapping: Mapping,
     _memory: OwnedHandle,
+    /// Where the first line starts in the mapping.
+    start: u64,
     width: u32,
     height: u32,
     /// Bytes per line.
@@ -184,6 +187,7 @@ impl Display {
             Buffer {
                 mapping,
                 _memory: memory,
+                start: 0,
                 width,
                 height,
                 pitch,
@@ -196,6 +200,43 @@ impl Display {
             size,
             memory: client,
         })
+    }
+
+    /// Makes a buffer of the XRGB8888 image of `q` in its memory object,
+    /// mapping only the pages that hold it. The kernel refuses a mapping
+    /// that runs past the object's end, which is how an image that does
+    /// not fit is found: the handle has no right to read the object's
+    /// size.
+    fn import_memory(&self, q: DisplayImportMemoryRequest) -> Result<u32, Status> {
+        let line = q.width.checked_mul(4).ok_or(Status::InvalidArgs)?;
+        if q.format != XRGB8888
+            || q.width == 0
+            || q.height == 0
+            || q.stride < line
+            || q.stride % 4 != 0
+            || q.offset % 4 != 0
+        {
+            return Err(Status::InvalidArgs);
+        }
+        let len = u64::from(q.stride) * u64::from(q.height);
+        let end = q.offset.checked_add(len).ok_or(Status::InvalidArgs)?;
+        let first = q.offset & !(PAGE_SIZE - 1);
+        let mapping = Mapping::new(self.process, PERM_READ, q.memory.raw(), first, end - first)
+            .map_err(|_| Status::InvalidArgs)?;
+        let buffer = self.id();
+        self.buffers.borrow_mut().insert(
+            buffer,
+            Buffer {
+                mapping,
+                _memory: q.memory,
+                start: q.offset - first,
+                width: q.width,
+                height: q.height,
+                pitch: q.stride,
+                destroyed: false,
+            },
+        );
+        Ok(buffer)
     }
 
     /// Marks `buffer` destroyed, and frees it unless a plane shows it or
@@ -384,7 +425,7 @@ impl Display {
             for row in 0..r.height {
                 let y = r.y as u64 + row;
                 // `check` kept the source within the buffer.
-                let line = y * u64::from(buffer.pitch) + r.x as u64 * 4;
+                let line = buffer.start + y * u64::from(buffer.pitch) + r.x as u64 * 4;
                 let pixels = (0..r.width).map(|i| buffer.mapping.read32(line + i * 4));
                 fb.write_row((r.x + dx) as u32, (y as i64 + dy) as u32, pixels);
             }
@@ -488,6 +529,13 @@ pub async fn serve(display: Rc<Display>, server: Rc<DisplayAsyncServer>) {
                 r.reply(
                     s,
                     committed.map(|commit_id| DisplayCommitResponse { commit_id }),
+                )
+            }
+            DisplayRequest::ImportMemory(q, r) => {
+                let imported = display.import_memory(q);
+                r.reply(
+                    s,
+                    imported.map(|buffer| DisplayImportMemoryResponse { buffer }),
                 )
             }
         };
