@@ -12,7 +12,8 @@ use crate::edit::complete::as_word;
 use crate::value::{Value, scalar_text};
 
 /// The aliases an interactive msh defines before it runs `~/.mshrc`.
-pub const DEFAULT_ALIASES: [(&str, &[&str]); 2] = [("ls", &["ls", "-l"]), ("la", &["ls", "-la"])];
+/// Both show sizes in readable units.
+pub const DEFAULT_ALIASES: [(&str, &[&str]); 2] = [("ls", &["ls", "-lh"]), ("la", &["ls", "-lah"])];
 
 /// The line that shows the alias `name` for `words`, as it is defined.
 fn shown(name: &str, words: &[String]) -> String {

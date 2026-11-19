@@ -1137,10 +1137,10 @@ fn defines_the_default_aliases_which_may_change() {
     let ls: Behaviour = |args, _| (0, format!("{}\n", args.join(" ")).into_bytes());
     s.system.programs.insert("/bin/ls".into(), ls);
     s.define_default_aliases();
-    assert_eq!(run(&mut s, "alias").unwrap(), "la = ls -la\nls = ls -l\n");
+    assert_eq!(run(&mut s, "alias").unwrap(), "la = ls -lah\nls = ls -lh\n");
     // `ls` runs the program `ls`, not the alias again.
-    assert_eq!(typed(&mut s, "ls").unwrap(), "ls -l\n");
-    assert_eq!(typed(&mut s, "la /tmp").unwrap(), "ls -la /tmp\n");
+    assert_eq!(typed(&mut s, "ls").unwrap(), "ls -lh\n");
+    assert_eq!(typed(&mut s, "la /tmp").unwrap(), "ls -lah /tmp\n");
     assert_eq!(run(&mut s, "ls").unwrap(), "ls\n");
     run(&mut s, "unalias la; alias ls = ls -a").unwrap();
     assert_eq!(typed(&mut s, "ls").unwrap(), "ls -a\n");
