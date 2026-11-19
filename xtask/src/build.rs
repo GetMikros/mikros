@@ -1122,7 +1122,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // display driver, the log service, through which the drivers'
             // messages reach the kernel log, and the input probe, their
             // client.
-            let basic_display = user_build("basicdisplay", kind)?;
+            let basic_display = user_build("basicgraphics", kind)?;
             println!("built    {}", basic_display.display());
             let input_probe = user_build("input-probe", kind)?;
             println!("built    {}", input_probe.display());
@@ -1133,7 +1133,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("pcibus", &pci_bus),
                 ("xhci", &xhci),
                 ("usbhid", &usb_hid),
-                ("basicdisplay", &basic_display),
+                ("basicgraphics", &basic_display),
             ] {
                 input_files.extend([
                     (

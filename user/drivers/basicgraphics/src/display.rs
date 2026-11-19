@@ -437,7 +437,7 @@ impl Backend for Display {
     fn info(&self) -> DeviceInfo {
         DeviceInfo {
             name: "Basic Display".into(),
-            driver: "basicdisplay".into(),
+            driver: "basicgraphics".into(),
             driver_version: 1,
             vendor_id: 0,
             device_id: 0,

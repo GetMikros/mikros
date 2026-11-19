@@ -135,12 +135,12 @@ async fn start(
     let description = Description::from(&request.device.properties).ok_or_else(|| {
         mikros_rt::log!(
             Error,
-            "basicdisplay: the framebuffer's description is not valid"
+            "basicgraphics: the framebuffer's description is not valid"
         );
         Status::InvalidArgs
     })?;
     let framebuffer = Framebuffer::map(memory, description, process).ok_or_else(|| {
-        mikros_rt::log!(Error, "basicdisplay: mapping the framebuffer failed");
+        mikros_rt::log!(Error, "basicgraphics: mapping the framebuffer failed");
         Status::NotSupported
     })?;
     let display = Rc::new(Display::new(
@@ -160,7 +160,7 @@ async fn start(
     .await?;
     mikros_rt::log!(
         Info,
-        "basicdisplay: serving the {}x{} framebuffer, format {}",
+        "basicgraphics: serving the {}x{} framebuffer, format {}",
         description.width,
         description.height,
         description.format

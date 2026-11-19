@@ -5912,7 +5912,7 @@ mod manager {
         const SECONDS: i64 = 300;
         const EXPECTED: &[(&[u8], usize)] = &[
             (b"device-manager: released the kernel console", 1),
-            (b"basicdisplay: serving the ", 1),
+            (b"basicgraphics: serving the ", 1),
             (b"ps2: published the keyboard", 1),
             (b"ps2: published the mouse", 1),
             (b"usbhid: published a Keyboard", 1),

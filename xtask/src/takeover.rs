@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const PASSED: &str = "SCENARIO takeover PASSED";
-const BOUND: &str = "bound driver basicdisplay to device ";
+const BOUND: &str = "bound driver basicgraphics to device ";
 const AS_BOOT_FRAMEBUFFER: &str = ", as display:boot-framebuffer";
 const RELEASED: &str = "device-manager: released the kernel console";
 
@@ -49,9 +49,9 @@ fn handed_over(serial: &str) -> Result<(), String> {
         ));
     }
     let steps = [
-        format!("started driver basicdisplay for device {id} as pid"),
-        format!("driver test-takeover takes over device {id}, {name}, from driver basicdisplay"),
-        format!("stopped driver basicdisplay for device {id}, which another driver takes over"),
+        format!("started driver basicgraphics for device {id} as pid"),
+        format!("driver test-takeover takes over device {id}, {name}, from driver basicgraphics"),
+        format!("stopped driver basicgraphics for device {id}, which another driver takes over"),
         format!("started driver test-takeover for device {id} as pid"),
     ];
     let mut after = 0;
@@ -123,10 +123,10 @@ mod tests {
     const LOG: &str = "\
 [0.80] I p750: device-manager: released the kernel console
 [0.85] I p750: device-manager: added device 5, pci-0000:00:03.0, as pci:v1234d1111sv1af4sd1100r02, under 1, with 0 resources, bar0 0x1000000, bar2 0x1000
-[0.85] I p750: device-manager: bound driver basicdisplay to device 5, pci-0000:00:03.0, as display:boot-framebuffer
-[0.86] I p750: device-manager: started driver basicdisplay for device 5 as pid 20
-[2.10] I p750: device-manager: driver test-takeover takes over device 5, pci-0000:00:03.0, from driver basicdisplay
-[2.11] I p750: device-manager: stopped driver basicdisplay for device 5, which another driver takes over
+[0.85] I p750: device-manager: bound driver basicgraphics to device 5, pci-0000:00:03.0, as display:boot-framebuffer
+[0.86] I p750: device-manager: started driver basicgraphics for device 5 as pid 20
+[2.10] I p750: device-manager: driver test-takeover takes over device 5, pci-0000:00:03.0, from driver basicgraphics
+[2.11] I p750: device-manager: stopped driver basicgraphics for device 5, which another driver takes over
 [2.12] I p750: device-manager: started driver test-takeover for device 5 as pid 31";
 
     #[test]
