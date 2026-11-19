@@ -441,6 +441,10 @@ name = "files-change"
 version = "0.0.0"
 
 [[package]]
+name = "files-info"
+version = "0.0.0"
+
+[[package]]
 name = "files-paths"
 version = "0.0.0"
 
