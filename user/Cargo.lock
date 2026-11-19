@@ -1454,6 +1454,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sort"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "spawn-std"
 version = "0.0.0"
 

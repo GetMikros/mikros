@@ -590,3 +590,138 @@ pub fn split(text: &[u8], end: u8) -> Vec<Vec<u8>> {
     lines
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mikros_cli::Parsed;
+
+    fn sort_of(arguments: &[&str]) -> Result<Sort, String> {
+        match COMMAND.parse(arguments.iter().map(|a| a.to_string())) {
+            Parsed::Run(run) => Sort::of(&run),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn sort(arguments: &[&str], lines: &[&str]) -> Vec<String> {
+        let sort = sort_of(arguments).unwrap();
+        let mut lines: Vec<Vec<u8>> = lines.iter().map(|l| l.as_bytes().to_vec()).collect();
+        sort.sort(&mut lines);
+        lines
+            .into_iter()
+            .map(|l| String::from_utf8(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn sorts_by_code_point() {
+        assert_eq!(
+            sort(&[], &["b", "ä", "a", "B", "z"]),
+            ["B", "a", "b", "z", "ä"]
+        );
+        assert_eq!(sort(&["-r"], &["a", "c", "b"]), ["c", "b", "a"]);
+        assert_eq!(sort(&["-f"], &["b", "A", "a", "B"]), ["A", "a", "B", "b"]);
+        assert_eq!(sort(&["-u"], &["b", "a", "b"]), ["a", "b"]);
+        assert_eq!(sort(&["-fu"], &["b", "B", "a"]), ["a", "b"]);
+        assert_eq!(sort(&["-b"], &["  b", "a"]), ["a", "  b"]);
+        assert_eq!(sort(&[], &["  b", "a"]), ["  b", "a"]);
+    }
+
+    #[test]
+    fn sorts_numbers_and_sizes() {
+        assert_eq!(
+            sort(&["-n"], &["10", "9", "-3", "x", "2.50", "2.5", "-10", "0"]),
+            ["-10", "-3", "0", "x", "2.5", "2.50", "9", "10"]
+        );
+        assert_eq!(
+            sort(
+                &["-n"],
+                &["123456789012345678901234567890", "99999999999999999999999"]
+            ),
+            ["99999999999999999999999", "123456789012345678901234567890"]
+        );
+        assert_eq!(
+            sort(&["-h"], &["2G", "1K", "900", "3M", "-1K", "1.5K"]),
+            ["-1K", "900", "1K", "1.5K", "3M", "2G"]
+        );
+        assert_eq!(sort(&["-nr"], &["1", "3", "2"]), ["3", "2", "1"]);
+    }
+
+    #[test]
+    fn sorts_versions() {
+        assert_eq!(
+            sort(
+                &["-V"],
+                &["a-1.10", "a-1.9", "a-1.9~rc1", "a-1.2.tar.gz", "a-1.2"]
+            ),
+            ["a-1.2", "a-1.2.tar.gz", "a-1.9~rc1", "a-1.9", "a-1.10"]
+        );
+        assert_eq!(
+            sort(&["-V"], &["b", ".a", "..", "."]),
+            [".", "..", ".a", "b"]
+        );
+        assert_eq!(version(b"file7", b"file10"), Ordering::Less);
+        assert_eq!(version(b"file007", b"file7"), Ordering::Equal);
+    }
+
+    #[test]
+    fn sorts_by_keys() {
+        let lines = ["x 3 b", "y 1 c", "z 2 a"];
+        assert_eq!(sort(&["-k", "2n"], &lines), ["y 1 c", "z 2 a", "x 3 b"]);
+        assert_eq!(sort(&["-k3"], &lines), ["z 2 a", "x 3 b", "y 1 c"]);
+        assert_eq!(sort(&["-k2,2nr"], &lines), ["x 3 b", "z 2 a", "y 1 c"]);
+        assert_eq!(
+            sort(&["-t", ":", "-k", "2"], &["a:b", "b:a", "c"]),
+            ["c", "b:a", "a:b"]
+        );
+        assert_eq!(
+            sort(&["-t:", "-k1.2,1.2"], &["ab:", "ba:", "ac:"]),
+            ["ba:", "ab:", "ac:"]
+        );
+        assert_eq!(
+            sort(&["-k", "1.2b,1.2b"], &["  zb", " ya", "xc"]),
+            [" ya", "  zb", "xc"]
+        );
+        assert_eq!(sort(&["-k", "1.2,1.2"], &["äb", "öa"]), ["öa", "äb"]);
+        // Equal keys fall back to the whole line, unless stable.
+        assert_eq!(sort(&["-k2,2"], &["b 1", "a 1"]), ["a 1", "b 1"]);
+        assert_eq!(sort(&["-s", "-k2,2"], &["b 1", "a 1"]), ["b 1", "a 1"]);
+        assert_eq!(sort(&["-u", "-k2,2"], &["b 1", "a 1"]), ["b 1"]);
+        // Global options apply to keys without their own.
+        assert_eq!(sort(&["-n", "-k2"], &["a 10", "b 9"]), ["b 9", "a 10"]);
+        assert_eq!(sort(&["-n", "-k2r"], &["a 10", "b 9"]), ["b 9", "a 10"]);
+    }
+
+    #[test]
+    fn checks_the_order() {
+        let sort = sort_of(&[]).unwrap();
+        let lines = split(b"a\nb\nb\na\n", b'\n');
+        assert_eq!(sort.disorder(&lines), Some(4));
+        assert_eq!(sort.disorder(&lines[..3]), None);
+        let unique = sort_of(&["-u"]).unwrap();
+        assert_eq!(unique.disorder(&lines[..3]), Some(3));
+    }
+
+    #[test]
+    fn splits_lines() {
+        assert_eq!(split(b"a\nb", b'\n'), [b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(split(b"a\n\n", b'\n'), [b"a".to_vec(), b"".to_vec()]);
+        assert_eq!(split(b"", b'\n'), Vec::<Vec<u8>>::new());
+        assert_eq!(split(b"a\0b\n\0", 0), [b"a".to_vec(), b"b\n".to_vec()]);
+    }
+
+    #[test]
+    fn refuses_bad_keys_and_separators() {
+        assert!(sort_of(&["-k", "0"]).is_err());
+        assert!(sort_of(&["-k", "1.0"]).is_err());
+        assert!(sort_of(&["-k", "x"]).is_err());
+        assert!(sort_of(&["-k", "1q"]).is_err());
+        assert!(sort_of(&["-t", "ab"]).is_err());
+        assert!(sort_of(&["-k", "2,3.0"]).is_ok());
+    }
+
+    #[test]
+    fn declares_what_it_takes() {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/sort.msh");
+        mikros_cli::declared(&COMMAND, std::path::Path::new(file)).unwrap();
+    }
+}
