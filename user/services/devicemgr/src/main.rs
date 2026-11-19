@@ -10,7 +10,10 @@
 //! configuration space of its buses. After the host bridges, when the
 //! platform information names an RSDP, it adds `acpi` as
 //! `platform:acpi`, with the property `rsdp`, the RSDP's physical address
-//! in hexadecimal with `0x`, and no resources.
+//! in hexadecimal with `0x`, and no resources. Then, on every system, it
+//! adds `basic-render` as `platform:basic-render`, with no properties and
+//! no resources, the device of the render instance of the basic graphics
+//! adapter.
 //!
 //! It then reads the driver manifests, binds a driver to each device
 //! that one matches, and starts and supervises the bound drivers.
@@ -101,6 +104,9 @@ const KIND_MMIO: u32 = 1;
 const SHARED: u32 = 1 << 0;
 /// The configuration space of one bus, in an ECAM range.
 const BUS_SIZE: u64 = 1 << 20;
+/// The hardware ID of the root device that every system has for a render
+/// device without hardware.
+const PLATFORM_BASIC_RENDER: &str = "platform:basic-render";
 /// The protocols of the permission broker and the service manager's
 /// registrar.
 const BROKER: &str = "mikros.permissions.Broker";
@@ -237,6 +243,15 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             Vec::new(),
         );
     }
+    // After the ACPI device, so that the devices before it keep their IDs
+    // (MIKSPEC-0025.R76).
+    devices.add(
+        "basic-render".into(),
+        vec![PLATFORM_BASIC_RENDER.into()],
+        Vec::new(),
+        None,
+        Vec::new(),
+    );
     let drivers = match managed::take_entry(&mut managed.namespace, drivers::DRIVERS) {
         Some((directory, at)) => {
             let directory = NodeAsyncClient::new(directory, reactor.clone());

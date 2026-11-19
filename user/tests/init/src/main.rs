@@ -4977,7 +4977,8 @@ mod manager {
     /// the root resource, the log and init's own platform information.
     /// The device manager adds a PCI host bridge from the MCFG table of
     /// the q35 machine, with its ECAM range as its one resource, then the
-    /// ACPI device with the RSDP's address, leaves out the invalid driver
+    /// ACPI device with the RSDP's address and the basic render device
+    /// without resources, leaves out the invalid driver
     /// manifest, and binds the test driver whose
     /// manifest has no kind, which makes it normal, rather than the
     /// fallback one. It starts that driver as `system.driver.test-host`,
@@ -5001,6 +5002,10 @@ mod manager {
                 b"device-manager: added device 2, acpi, as platform:acpi, with 0 resources, rsdp 0x",
                 1,
             ),
+            (
+                b"device-manager: added device 3, basic-render, as platform:basic-render, with 0 resources",
+                1,
+            ),
             (b"test-invalid/driver.yaml:6:", 1),
             (b"ServiceKey(\"start\")", 1),
             (
@@ -5012,22 +5017,22 @@ mod manager {
                 1,
             ),
             (
-                b"device-manager: added device 3, test-child, as test:child, under 1, with 0 resources, slot 0",
+                b"device-manager: added device 4, test-child, as test:child, under 1, with 0 resources, slot 0",
                 1,
             ),
             (
-                b"device-manager: bound driver test-child to device 3, test-child, as test:child",
+                b"device-manager: bound driver test-child to device 4, test-child, as test:child",
                 1,
             ),
             (
-                b"device-manager: started driver test-child for device 3 as pid",
+                b"device-manager: started driver test-child for device 4 as pid",
                 1,
             ),
             (
-                b"device-manager: stopped driver test-child for device 3",
+                b"device-manager: stopped driver test-child for device 4",
                 1,
             ),
-            (b"device-manager: removed device 3, test-child", 1),
+            (b"device-manager: removed device 4, test-child", 1),
             (
                 b"device-manager: published device.storage 1 for device 1",
                 1,
@@ -5039,16 +5044,17 @@ mod manager {
         ];
         const FAILED: &[&[u8]] = &[
             b"no MCFG table",
-            // The ACPI device, 2, has no driver in this image.
+            // The ACPI device, 2, and the basic render device, 3, have no
+            // driver in this image.
             b"no driver for device 1,",
-            b"no driver for device 3,",
+            b"no driver for device 4,",
             b"bound driver test-fallback",
             b"driver test-host declined",
             b"driver test-host for device 1 closed its channel",
             b"driver test-host for device 1 terminated",
             b"checks-failed",
-            b"driver test-child for device 3 did not start",
-            b"driver test-child for device 3 terminated",
+            b"driver test-child for device 4 did not start",
+            b"driver test-child for device 4 terminated",
         ];
         let logged = device_manager_logs(
             s,
@@ -5069,7 +5075,7 @@ mod manager {
     /// and the boot framebuffer, the device manager adds the framebuffer
     /// as device 1 and the host bridge as device 2. When the startup
     /// message names the framebuffer's PCI function, it adds the host
-    /// bridge as device 1 instead, and the framebuffer gets device 3 once
+    /// bridge as device 1 instead, and the framebuffer gets device 4 once
     /// the host bridge's driver failed without adding that function. The
     /// host bridge's driver fails `Start`: the device manager terminates
     /// it, and the device fails without a restart. The framebuffer's
@@ -5164,11 +5170,11 @@ mod manager {
                 2,
             ),
             (
-                b"device-manager: added device 3, kept-child, as test:kept, under 1",
+                b"device-manager: added device 4, kept-child, as test:kept, under 1",
                 1,
             ),
             (
-                b"device-manager: started driver test-kept-child for device 3 as pid",
+                b"device-manager: started driver test-kept-child for device 4 as pid",
                 1,
             ),
             (
@@ -5180,16 +5186,16 @@ mod manager {
                 1,
             ),
             (
-                b"device-manager: added device 3 again, kept-child, under 1",
+                b"device-manager: added device 4 again, kept-child, under 1",
                 1,
             ),
-            (b"device-manager: reconnected device 3", 1),
+            (b"device-manager: reconnected device 4", 1),
         ];
         const FAILED: &[&[u8]] = &[
-            b"device 3 was not added again in time",
-            b"removed device 3",
-            b"reconnecting device 3 failed",
-            b"driver test-kept-child for device 3 terminated",
+            b"device 4 was not added again in time",
+            b"removed device 4",
+            b"reconnecting device 4 failed",
+            b"driver test-kept-child for device 4 terminated",
             b"declined",
             b"did not start",
         ];
