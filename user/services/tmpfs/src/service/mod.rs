@@ -44,6 +44,13 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let provider = managed.handles.remove(at).handle;
     let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
     let fs = Rc::new(Fs::new(directory, reactor.clone(), spawner.clone()));
+    // Times are UTC once the time service runs; the header, and with it
+    // the process handle, stays for as long as the process runs.
+    let process = managed.header.process.raw();
+    let (clock_fs, clock_reactor) = (fs.clone(), reactor.clone());
+    spawner.spawn(async move {
+        crate::service::fs::take_time_page(&clock_fs.directory, clock_reactor, process).await;
+    });
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor);
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {

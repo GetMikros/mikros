@@ -9,6 +9,7 @@ use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::sync::atomic::{AtomicU64, Ordering, fence};
 use core::task::Waker;
 use mikros_acl::Subject;
 use mikros_rt::exec::{Reactor, Spawner};
@@ -22,11 +23,16 @@ use mikros_rt::interfaces::mikros::permissions::{
     AppNumbers, AppNumbersAsyncClient, Broker, BrokerAsyncClient,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::interfaces::mikros::time::{Clock, ClockAsyncClient};
 use mikros_rt::sys;
 
 /// The broker's protocols, through which a subject's `admin.acls.manage`
 /// is asked for.
 const BROKER: &str = "mikros.permissions.Broker";
+const CLOCK: &str = "mikros.time.Clock";
+/// The address of the time service's time page once it is mapped, 0
+/// before.
+static TIME_PAGE: AtomicU64 = AtomicU64::new(0);
 const APP_NUMBERS: &str = "mikros.permissions.AppNumbers";
 
 const INFO_BASIC: u32 = 1;
@@ -73,7 +79,7 @@ pub struct Fs {
     pub budgets: RefCell<BTreeMap<Id, Rc<OwnedHandle>>>,
     pub watches: Watches,
     /// The service's own directory, through which it reaches the broker.
-    directory: DirectoryAsyncClient,
+    pub(crate) directory: DirectoryAsyncClient,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -94,13 +100,77 @@ pub fn error(e: crate::memfs::Error) -> Error {
     }
 }
 
-/// The time now, in nanoseconds since 1970 in UTC: the time since boot,
-/// as the time service starts it without a real-time clock.
+/// The time now, in nanoseconds since 1970 in UTC, from the time page
+/// (MIKSPEC-0054.R9), or 0, an unknown time, while tmpfs, which starts
+/// before the time service, has none.
 pub fn now() -> i64 {
-    let mut now = 0;
+    let page = TIME_PAGE.load(Ordering::Acquire);
+    if page == 0 {
+        return 0;
+    }
+    let read = |at: u64| {
+        // SAFETY: the page stays mapped read-only for as long as the
+        // process runs.
+        unsafe { core::ptr::read_volatile(at as *const u64) }
+    };
+    // The page's first word is odd while the time service changes it.
+    let offset = loop {
+        let before = read(page) as u32;
+        fence(Ordering::Acquire);
+        let offset = read(page + 8) as i64;
+        fence(Ordering::Acquire);
+        if before % 2 == 0 && read(page) as u32 == before {
+            break offset;
+        }
+        core::hint::spin_loop();
+    };
+    let mut monotonic = 0;
     // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::clock_get_monotonic(&mut now) };
-    now
+    unsafe { sys::clock_get_monotonic(&mut monotonic) };
+    monotonic.saturating_add(offset)
+}
+
+/// Waits for the time service, through `directory`, and maps its time
+/// page into `process`, from which `now` then gives UTC.
+pub async fn take_time_page(
+    directory: &DirectoryAsyncClient,
+    reactor: Reactor,
+    process: sys::Handle,
+) {
+    const READ: u32 = 1 << 0;
+    let Ok((client, server)) = endpoints::<Clock>() else {
+        return;
+    };
+    // The connection waits until the time service runs.
+    let connected = directory
+        .connect(CLOCK.into(), None, server.into_handle())
+        .await;
+    if !matches!(connected, Ok(Ok(_))) {
+        mikros_rt::log!(
+            Warning,
+            "tmpfs: the time service cannot be reached; times stay 0"
+        );
+        return;
+    }
+    let Ok(reply) = ClockAsyncClient::new(client, reactor).get_time_page().await else {
+        return;
+    };
+    let mut at = 0;
+    // SAFETY: the out pointer is valid; the kernel picks a free range.
+    let status = unsafe {
+        sys::vm_map(
+            process,
+            READ,
+            0,
+            reply.page.raw(),
+            0,
+            u64::from(PAGE),
+            &mut at,
+        )
+    };
+    if status == mikros_rt::OK {
+        TIME_PAGE.store(at, Ordering::Release);
+    }
 }
 
 impl Fs {
