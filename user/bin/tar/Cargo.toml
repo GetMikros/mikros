@@ -1,0 +1,29 @@
+[package]
+name = "tar"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-cli = { path = "../../lib/cli" }
+mikros-glob = { path = "../../lib/glob" }
+mikros-extract = { path = "../../lib/extract" }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+mikros-extract = { path = "../../lib/extract", features = ["testing"] }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-command = { path = "../../lib/command" }
+
+# A command that the uutils port does not have, in /system/bin from the
+# start.
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+completions = "tar.msh"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

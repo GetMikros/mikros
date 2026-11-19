@@ -1,0 +1,17 @@
+# What `tar` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern tar(
+    ...path: path "with -c, the files and folders to store; with -x and -t, the entries to take",
+    --create(-c): bool "create an archive of the paths",
+    --extract(-x): bool "extract every entry, or those named",
+    --list(-t): bool "list every entry, or those named",
+    --file(-f): file "the archive, - or none for standard input or output",
+    --verbose(-v): bool "print each name; with -t, each entry's type, size, modified time and name",
+    --directory(-C): folder "create from or extract into this folder",
+    --gzip(-z): bool "compress the archive with gzip",
+    --keep-old-files(-k): bool "keep existing files, failing the entries that would replace them",
+    --exclude: string "leave out the entries that match the pattern",
+    --json: bool "with -t, write the entries as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
