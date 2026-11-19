@@ -1,0 +1,10 @@
+# What `df` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern df(
+    ...path: path "show the volumes that hold these paths",
+    --human-readable(-h): bool "show sizes with K, M and G",
+    --print-type(-T): bool "show the file system type, which is always shown",
+    --json: bool "write the volumes as a JSON array of objects",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
