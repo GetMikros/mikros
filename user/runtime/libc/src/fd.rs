@@ -1,7 +1,8 @@
 //! The descriptor table of the process. Each descriptor refers to an open
 //! description: a stream, a connection to a file or directory, a slave
-//! terminal, an epoll instance, a timer or a memory object, which `dup`
-//! shares between descriptors.
+//! terminal, an epoll instance, a timer, a memory object, a channel or
+//! any other kernel object's handle, which `dup` shares between
+//! descriptors.
 
 use crate::errno::{EBADF, EINVAL, EMFILE};
 use crate::lock::Lock;
@@ -16,8 +17,10 @@ use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 pub const KIND_FILE: u32 = 1;
 /// The descriptor kind of a stream.
 pub const KIND_STREAM: u32 = 2;
-/// The descriptor kind of a memory object.
+/// The descriptor kinds of a memory object, a channel and a handle.
 pub const KIND_MEMORY: u32 = 4;
+pub const KIND_CHANNEL: u32 = 9;
+pub const KIND_HANDLE: u32 = 10;
 /// The descriptor kind of a slave terminal, which is its token.
 pub const KIND_TERMINAL: u32 = 8;
 /// The bits of a startup handle's `id` that hold its descriptor number.
@@ -52,6 +55,12 @@ pub enum Description {
     Folder(crate::dir::Folder),
     /// A memory object, with the byte size the C library keeps.
     Memory(crate::memfd::Memory),
+    /// A channel, whose messages are read and written with the kernel's
+    /// channel calls, so that only its readiness goes through the C
+    /// library.
+    Channel(OwnedHandle),
+    /// Any other kernel object, which the descriptor only holds.
+    Handle(OwnedHandle),
 }
 
 /// A connection to a file system node, with the status flags it was
@@ -184,7 +193,15 @@ pub fn install(handles: &mut Vec<StartupHandle>) {
             HandleRole::Stdout => Some(1),
             HandleRole::Stderr => Some(2),
             HandleRole::User
-                if matches!(kind, KIND_FILE | KIND_STREAM | KIND_TERMINAL | KIND_MEMORY) =>
+                if matches!(
+                    kind,
+                    KIND_FILE
+                        | KIND_STREAM
+                        | KIND_TERMINAL
+                        | KIND_MEMORY
+                        | KIND_CHANNEL
+                        | KIND_HANDLE
+                ) =>
             {
                 None
             }
@@ -212,6 +229,8 @@ fn inherited(handle: OwnedHandle, kind: u32) -> Option<Description> {
         (KIND_MEMORY, Some(TYPE_MEMORY)) => {
             Some(Description::Memory(crate::memfd::Memory::received(handle)))
         }
+        (KIND_CHANNEL, Some(TYPE_CHANNEL)) => Some(Description::Channel(handle)),
+        (KIND_HANDLE, Some(_)) => Some(Description::Handle(handle)),
         (KIND_TERMINAL, Some(TYPE_EVENT)) => Some(Description::Terminal(
             crate::terminal::Terminal::new(handle),
         )),
@@ -265,6 +284,8 @@ pub fn shared_handle(description: &Description) -> Option<(mikros_rt::sys::Handl
             Some((node.node.lock().channel().ok()?, KIND_FILE))
         }
         Description::Memory(m) => Some((m.object.raw(), KIND_MEMORY)),
+        Description::Channel(channel) => Some((channel.raw(), KIND_CHANNEL)),
+        Description::Handle(handle) => Some((handle.raw(), KIND_HANDLE)),
         Description::Epoll(_) | Description::Timer(_) | Description::Folder(_) => None,
     }
 }
@@ -295,6 +316,110 @@ extern "C" fn mikros_fd_handle(fd: i32) -> i64 {
         return -crate::errno::from_status(status);
     }
     i64::from(out)
+}
+
+/// The `BASIC` information topic, the status of a handle that does not
+/// exist, and the object type of a timer.
+const INFO_BASIC: u32 = 1;
+const STATUS_BAD_HANDLE: mikros_rt::sys::Status = -11;
+const TYPE_TIMER: u32 = 7;
+/// The kind of a watch, which the C library does not make yet.
+const KIND_WATCH: u32 = 7;
+
+/// The object type of `handle`: `Err(EBADF)` when it is not a handle,
+/// and `Ok(None)` when it cannot be inspected.
+fn object_type(handle: mikros_rt::sys::Handle) -> Result<Option<u32>, i64> {
+    let mut record = [0u8; 24];
+    let mut len = 0;
+    // SAFETY: the pointers describe `record` and `len`.
+    let status = unsafe {
+        mikros_rt::sys::object_get_info(handle, INFO_BASIC, record.as_mut_ptr(), 24, &mut len)
+    };
+    match status {
+        mikros_rt::OK if len >= 24 => Ok(Some(u32::from_le_bytes(
+            record[16..20].try_into().expect("4 bytes"),
+        ))),
+        STATUS_BAD_HANDLE => Err(EBADF),
+        _ => Ok(None),
+    }
+}
+
+/// `mikros_fd_from_handle` (MIKSPEC-0033.R44): a descriptor of `kind`
+/// that owns `handle`, whose object type must be that of the kind. Fails
+/// with `EBADF` for no handle, `EINVAL` for another kind or a type that
+/// differs or cannot be inspected, and `EMFILE` with no free descriptor,
+/// leaving the handle with the caller. Watches, kind 7, are not made yet.
+#[unsafe(no_mangle)]
+extern "C" fn mikros_fd_from_handle(handle: mikros_rt::sys::Handle, kind: u32) -> i32 {
+    let object = match object_type(handle) {
+        Ok(object) => object,
+        Err(e) => return crate::process::failed(e) as i32,
+    };
+    let fits = match kind {
+        KIND_FILE | KIND_CHANNEL => object == Some(TYPE_CHANNEL),
+        KIND_STREAM => object == Some(TYPE_STREAM),
+        KIND_MEMORY => object == Some(TYPE_MEMORY),
+        3 => object == Some(TYPE_TIMER),
+        KIND_HANDLE => object.is_some(),
+        KIND_WATCH => false,
+        _ => false,
+    };
+    let free = TABLE.lock().iter().filter(|e| e.is_some()).count() < FDS_MAX;
+    if !fits {
+        return crate::process::failed(EINVAL) as i32;
+    }
+    if !free {
+        return crate::process::failed(EMFILE) as i32;
+    }
+    // SAFETY: the caller gives the handle to the descriptor, which owns
+    // it from here on.
+    let owned = unsafe { OwnedHandle::from_raw(handle) };
+    let description = match kind {
+        3 => Some(Description::Timer(crate::timerfd::Timerfd::from_timer(
+            owned,
+        ))),
+        _ => inherited(owned, kind),
+    };
+    match description {
+        Some(description) => {
+            let fd = insert(Arc::new(description), false, 0);
+            if fd < 0 {
+                crate::process::failed(-fd) as i32
+            } else {
+                fd as i32
+            }
+        }
+        None => crate::process::failed(EINVAL) as i32,
+    }
+}
+
+/// `mikros_handle_from_fd` (MIKSPEC-0033.R44): stores in `out` a
+/// duplicate, with the same rights, of the handle of a pipe, memory,
+/// channel or handle descriptor `fd`, which the caller then owns. Fails
+/// with `EBADF` for no descriptor and `EINVAL` for another kind or a
+/// handle without `DUPLICATE`.
+#[unsafe(no_mangle)]
+extern "C" fn mikros_handle_from_fd(fd: i32, out: *mut mikros_rt::sys::Handle) -> i32 {
+    let Some(description) = get(fd.into()) else {
+        return crate::process::failed(EBADF) as i32;
+    };
+    let handle = match &*description {
+        Description::Stream(h) | Description::Channel(h) | Description::Handle(h) => h.raw(),
+        Description::Memory(m) => m.object.raw(),
+        _ => return crate::process::failed(EINVAL) as i32,
+    };
+    if out.is_null() {
+        return crate::process::failed(crate::errno::EFAULT) as i32;
+    }
+    let mut copy = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { mikros_rt::sys::handle_duplicate(handle, SAME_RIGHTS, &mut copy) };
+    if status != mikros_rt::OK {
+        return crate::process::failed(EINVAL) as i32;
+    }
+    // SAFETY: the caller gives room for a handle at `out`.
+    unsafe { out.write(copy) };
+    0
 }
 
 /// Installs `description` as descriptor `fd`, which is free.

@@ -36,6 +36,19 @@ mikros_handle_t mikros_process_self(void);
 int mikros_namespace_entry(size_t index, char *path, size_t len,
                            mikros_handle_t *directory);
 
+/* Makes a descriptor of the kind (1 file or directory, 2 pipe, 3 timer,
+   4 memory, 9 channel, 10 handle) that owns handle, and returns its
+   number. Returns -1 with errno EBADF when handle is not a handle,
+   EINVAL for another kind or an object of another type, and EMFILE with
+   no free descriptor, leaving the handle with the caller. */
+int mikros_fd_from_handle(mikros_handle_t handle, uint32_t kind);
+
+/* Stores in handle a duplicate, with the same rights, of the handle of a
+   pipe, memory, channel or handle descriptor, which the caller then
+   owns, and returns 0. Returns -1 with errno EBADF for no descriptor,
+   and EINVAL for another kind or a handle that cannot be duplicated. */
+int mikros_handle_from_fd(int fd, mikros_handle_t *handle);
+
 #ifdef __cplusplus
 }
 #endif

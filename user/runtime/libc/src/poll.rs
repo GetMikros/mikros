@@ -297,7 +297,12 @@ fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
         // to become readable, which it is while it has events; a timer
         // descriptor for its timer to expire.
         let (handle, signals) = match &*description {
-            Description::Stream(stream) => (stream.raw(), signals(entry.events)),
+            // A channel is ready as a stream is.
+            Description::Stream(stream) | Description::Channel(stream) => {
+                (stream.raw(), signals(entry.events))
+            }
+            // A handle descriptor is never ready.
+            Description::Handle(_) => continue,
             Description::Epoll(epoll) if entry.events & INPUT != 0 => {
                 (epoll.port().raw(), READABLE)
             }
@@ -386,7 +391,7 @@ impl Drop for Waits {
     fn drop(&mut self) {
         for (description, key, pending) in &self.streams {
             let handle = match &**description {
-                Description::Stream(stream) => stream.raw(),
+                Description::Stream(stream) | Description::Channel(stream) => stream.raw(),
                 Description::Epoll(epoll) => epoll.port().raw(),
                 Description::Timer(timer) => timer.timer.raw(),
                 Description::Terminal(t) => match t.readiness() {

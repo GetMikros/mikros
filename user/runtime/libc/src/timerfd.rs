@@ -126,6 +126,16 @@ pub struct Timerfd {
 }
 
 impl Timerfd {
+    /// A timer descriptor for the kernel timer `timer`, not armed as far
+    /// as the C library knows, whose reads wait.
+    pub fn from_timer(timer: OwnedHandle) -> Timerfd {
+        Timerfd {
+            timer,
+            arming: Lock::new(Arming::default()),
+            flags: AtomicU32::new(O_RDWR),
+        }
+    }
+
     /// Sets the kernel timer for `arming`: to its next expiration, or
     /// cancelled when it has none. Either clears the timer's signal.
     fn set(&self, arming: Arming) -> Result<(), i64> {

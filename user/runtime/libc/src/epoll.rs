@@ -152,7 +152,9 @@ struct Watched<'a> {
 /// be watched: files and directories are not, as on Linux.
 fn watched(description: &Description) -> Result<Watched<'_>, i64> {
     match description {
-        Description::Stream(stream) => Ok(Watched {
+        // A channel is watched as a stream is, for its readable,
+        // writable and peer-closed signals.
+        Description::Stream(stream) | Description::Channel(stream) => Ok(Watched {
             handle: stream.raw(),
             _description: core::marker::PhantomData,
             kind: Kind::Stream,
@@ -174,11 +176,13 @@ fn watched(description: &Description) -> Result<Watched<'_>, i64> {
             _description: core::marker::PhantomData,
             kind: Kind::Terminal,
         }),
-        // As regular files on Linux, which a memory object is too.
+        // As regular files on Linux, which a memory object is too; a
+        // handle descriptor has no readiness.
         Description::File(..)
         | Description::Directory(..)
         | Description::Folder(_)
-        | Description::Memory(_) => Err(EPERM),
+        | Description::Memory(_)
+        | Description::Handle(_) => Err(EPERM),
     }
 }
 

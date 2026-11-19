@@ -74,6 +74,8 @@ pub fn read(fd: i64, buf: *mut u8, len: u64) -> i64 {
         Description::Timer(timer) => crate::timerfd::read(timer, buf, len),
         Description::Terminal(t) => t.read(buf, len),
         Description::Memory(m) => m.read(buf, len),
+        // A channel's messages go through the kernel's channel calls.
+        Description::Channel(_) | Description::Handle(_) => -EINVAL,
     }
 }
 
@@ -129,6 +131,7 @@ pub fn write(fd: i64, buf: *const u8, len: u64) -> i64 {
         Description::Epoll(_) | Description::Timer(_) => -EINVAL,
         Description::Terminal(t) => t.write(buf, len),
         Description::Memory(m) => m.write(buf, len),
+        Description::Channel(_) | Description::Handle(_) => -EINVAL,
     }
 }
 
@@ -156,7 +159,9 @@ pub fn pread(fd: i64, buf: *mut u8, len: u64, offset: i64) -> i64 {
         Description::Stream(_)
         | Description::Terminal(_)
         | Description::Epoll(_)
-        | Description::Timer(_) => -ESPIPE,
+        | Description::Timer(_)
+        | Description::Channel(_)
+        | Description::Handle(_) => -ESPIPE,
     }
 }
 
@@ -179,7 +184,9 @@ pub fn pwrite(fd: i64, buf: *const u8, len: u64, offset: i64) -> i64 {
         Description::Stream(_)
         | Description::Terminal(_)
         | Description::Epoll(_)
-        | Description::Timer(_) => -ESPIPE,
+        | Description::Timer(_)
+        | Description::Channel(_)
+        | Description::Handle(_) => -ESPIPE,
     }
 }
 
@@ -205,7 +212,9 @@ pub fn lseek(fd: i64, offset: i64, whence: i64) -> i64 {
         Description::Stream(_)
         | Description::Terminal(_)
         | Description::Epoll(_)
-        | Description::Timer(_) => -ESPIPE,
+        | Description::Timer(_)
+        | Description::Channel(_)
+        | Description::Handle(_) => -ESPIPE,
     }
 }
 

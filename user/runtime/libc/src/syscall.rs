@@ -558,8 +558,10 @@ fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<OwnedHandle, i64> {
         let private = flags & MAP_TYPE == MAP_PRIVATE;
         return m.mapped(private, 0, memory_size(m.object.raw()));
     }
-    let Description::File(node) = &*description else {
-        return Err(ENODEV);
+    let node = match &*description {
+        Description::File(node) => node,
+        Description::Handle(_) => return Err(EINVAL),
+        _ => return Err(ENODEV),
     };
     match node
         .node
@@ -647,7 +649,9 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
                 Description::Stream(_)
                 | Description::Epoll(_)
                 | Description::Folder(_)
-                | Description::Memory(_) => {
+                | Description::Memory(_)
+                | Description::Channel(_)
+                | Description::Handle(_) => {
                     return if cmd == F_GETFL {
                         i64::from(fs::O_RDWR)
                     } else {
