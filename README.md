@@ -73,8 +73,11 @@ of its kernel panic reports replaced by functions, files and lines.
 
 ## License
 
-The kernel, under `kernel/`, is licensed under the Mozilla Public License
-2.0; see [kernel/LICENSE](kernel/LICENSE).
+The root [LICENSE](LICENSE) contains the Mozilla Public License 2.0 text
+for Mikros code designated MPL-2.0, including the kernel.
+Component and file notices identify exceptions. The Linux-based userspace
+btrfs driver is GPL-2.0-only; see [LICENSES.md](LICENSES.md) for the license
+boundaries, third-party provenance, and corresponding-source requirements.
 
 ## Contributing
 
