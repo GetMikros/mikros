@@ -1,8 +1,9 @@
 //! The boot service of `tests/input.img`, the client of the display and
 //! input drivers in the input run of `cargo xtask test`. It owns the
-//! basic display driver's display and fills it with `display::PAINT`,
-//! logging `input-probe: painted` once that commit completed, and then
-//! opens the input devices of the PS/2 and USB HID drivers and waits for
+//! display of the basic graphics adapter's display instance and fills it
+//! with `display::PAINT`, logging `input-probe: painted` once that commit
+//! completed, checks the adapter's render instance, and then opens the
+//! input devices of the PS/2 and USB HID drivers and waits for
 //! the keys and mouse movement that the runner sends. Then it gives the
 //! display up, so that the driver shows the log again, logs
 //! `input-probe: closed the display`, and waits for B, which the runner
@@ -16,6 +17,7 @@ extern crate alloc;
 
 mod display;
 mod input;
+mod render;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -140,6 +142,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let passed = executor.block_on(async {
         let display = display::paint(&directory, &reactor).await?;
         mikros_rt::log!(Info, "input-probe: painted");
+        render::works(&directory, &reactor, &display).await?;
         let watched = input::works(&directory, &reactor, &spawner).await?;
         drop(display);
         mikros_rt::log!(Info, "input-probe: closed the display");
