@@ -28,6 +28,22 @@ Character Database 16.0.0 and carries a Unicode-3.0 notice. Retain original
 licenses on reusable source files and verify that the terms for each linked
 input permit distribution as part of the GPL-2.0-only executable.
 
+## FreeType
+
+Mikros distributes [FreeType 2.15.0](user/ports/freetype/port.toml) under the
+[FreeType License (FTL)](user/ports/freetype/FTL.TXT), not the GPL alternative.
+FreeType ships as a separate shared library and is not linked into the btrfs
+executable. Files with their own licenses retain those terms; see the
+[upstream license overview](user/ports/freetype/LICENSE.TXT) and the
+[notice for bundled zlib](user/ports/freetype/ZLIB-LICENSE.txt).
+
+Mikros is based in part on the work of the FreeType Team. Portions of this
+software are copyright © 2026 The FreeType Project (https://freetype.org).
+All rights reserved.
+
+Include this attribution and the linked notices in the distribution
+documentation accompanying each image that contains FreeType.
+
 ## What to ship with a binary release
 
 For each image or download containing the driver executable, publish a
