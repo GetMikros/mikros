@@ -25,7 +25,8 @@ jobs:
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git \
             qemu-system-x86 gdb btrfs-progs exfatprogs \
-            cmake ninja-build clang lld python3 zstd bison
+            cmake ninja-build clang lld python3 zstd bison \
+            libexpat1-dev pkg-config
       - uses: actions/checkout@v4
         with:
           # The commit checks look at every commit since the base branch.
