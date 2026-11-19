@@ -1,0 +1,12 @@
+# What `seq` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern seq(
+    first?: string "the first number, 1 when absent",
+    step?: string "the step, 1 when absent",
+    last: string "the last number",
+    --separator(-s): string "write this between the numbers, not a line feed",
+    --equal-width(-w): bool "pad the numbers with zeros to one width",
+    --format(-f): string "write each number by this printf format, such as %.2f",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
