@@ -1,0 +1,8 @@
+# What `printf` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern printf(
+    format: string "the text to write, with escapes and conversions",
+    ...argument: string "the values that the conversions take",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
