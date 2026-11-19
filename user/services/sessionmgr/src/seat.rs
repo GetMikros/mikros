@@ -11,7 +11,9 @@ use core::pin::pin;
 use core::task::Poll;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
-use mikros_rt::interfaces::mikros::gpu::{Device as Gpu, DeviceAsyncClient as GpuClient, Display};
+use mikros_rt::interfaces::mikros::gpu::{
+    Capabilities, Device as Gpu, DeviceAsyncClient as GpuClient, Display,
+};
 use mikros_rt::interfaces::mikros::input::{Device, Input, InputAsyncClient};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{SeatAsyncClient, SeatEvent};
@@ -43,7 +45,8 @@ async fn instances(directory: &DirectoryAsyncClient, service: &str) -> alloc::ve
 }
 
 /// Opens the first display, once one is published, and gives it to
-/// `seat`.
+/// `seat`. GPU devices without `DISPLAY`, such as a render device, are
+/// passed over.
 async fn display(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &SeatAsyncClient) {
     loop {
         for instance in instances(directory, GPU).await {
@@ -51,6 +54,10 @@ async fn display(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &Sea
                 continue;
             };
             let device = GpuClient::new(device, reactor.clone());
+            match device.get_info().await {
+                Ok(r) if r.info.capabilities.contains(Capabilities::DISPLAY) => {}
+                _ => continue,
+            }
             let Ok((display, server)) = endpoints::<Display>() else {
                 continue;
             };
