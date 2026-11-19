@@ -390,6 +390,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "echo"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "env"
 version = "0.0.0"
 dependencies = [

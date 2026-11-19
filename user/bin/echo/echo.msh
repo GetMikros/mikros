@@ -1,0 +1,10 @@
+# What `echo` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern echo(
+    ...text: string "the text to write",
+    -n: bool "write no line feed at the end",
+    -e: bool "read the escapes of the text, such as \n and \t",
+    -E: bool "write backslashes as they are, the default",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
