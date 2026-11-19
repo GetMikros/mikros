@@ -3,7 +3,9 @@
 //! that holds `system.display.control` own the display through a `Display`
 //! connection, closing it when its revocation event is signaled, and
 //! showing the system log on the driver's screen while no client owns
-//! the display.
+//! the display. `OpenDisplay` and `OpenRender` fail with `NOT_SUPPORTED`
+//! on a device whose capabilities lack `DISPLAY` or `RENDER`, and a
+//! device without `DISPLAY` reads no log.
 
 #![no_std]
 
@@ -24,8 +26,8 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
 use mikros_rt::interfaces::mikros::gpu::{
-    Device, DeviceAsyncServer, DeviceGetInfoResponse, DeviceInfo, DeviceOpenDisplayResponse,
-    DeviceOpenRenderResponse, DeviceRequest, DisplayAsyncServer, Render,
+    Capabilities, Device, DeviceAsyncServer, DeviceGetInfoResponse, DeviceInfo,
+    DeviceOpenDisplayResponse, DeviceOpenRenderResponse, DeviceRequest, DisplayAsyncServer, Render,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
@@ -54,18 +56,39 @@ pub trait Backend {
     /// Frees what the closed `Display` connection had.
     fn closed(&self);
 
-    /// Answers `OpenRender` with `render`.
-    fn open_render(&self, render: ServerEnd<Render>) -> Result<(), Status>;
+    /// Answers `OpenRender` of `client` with `render`, on a device with
+    /// `RENDER`.
+    fn open_render(self: Rc<Self>, render: ServerEnd<Render>, client: Client)
+    -> Result<(), Status>;
 
     /// Calls `draw` with the screen that shows the log while no client
     /// owns the display, when the driver has one.
     fn with_screen(&self, draw: &mut dyn FnMut(&dyn Screen));
 }
 
+/// The client of a connection to the device, whose permissions the
+/// permission broker tells.
+pub struct Client {
+    identity: ClientIdentity,
+    broker: Option<Rc<BrokerAsyncClient>>,
+}
+
+impl Client {
+    /// Whether the client holds `permission`, as the broker says: false
+    /// when the broker cannot be reached.
+    pub async fn holds(&self, permission: &str) -> bool {
+        let Some(broker) = &self.broker else {
+            return false;
+        };
+        let checked = broker.check(self.identity.clone(), permission.into()).await;
+        matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
+    }
+}
+
 /// A published GPU device.
 pub struct GpuDevice<B> {
     backend: Rc<B>,
-    broker: Option<BrokerAsyncClient>,
+    broker: Option<Rc<BrokerAsyncClient>>,
     /// The open `Display` connection.
     owner: RefCell<Option<Rc<DisplayAsyncServer>>>,
     log: Log,
@@ -90,7 +113,7 @@ impl<B: Backend + 'static> GpuDevice<B> {
     ) -> Result<Rc<GpuDevice<B>>, Status> {
         let device = Rc::new(GpuDevice {
             backend,
-            broker: broker(&directory, &reactor).await,
+            broker: broker(&directory, &reactor).await.map(Rc::new),
             owner: RefCell::new(None),
             log: Log::new(),
             stale: Cell::new(false),
@@ -105,13 +128,20 @@ impl<B: Backend + 'static> GpuDevice<B> {
             Err(_) => return Err(Status::PeerClosed),
         }
         device.spawner.spawn(device.clone().serve_provider(server));
-        device.spawner.spawn(log::follow(device.clone(), directory));
-        device.spawner.spawn(device.clone().draw_logs());
+        if device.has(Capabilities::DISPLAY) {
+            device.spawner.spawn(log::follow(device.clone(), directory));
+            device.spawner.spawn(device.clone().draw_logs());
+        }
         Ok(device)
     }
 
     pub fn backend(&self) -> &Rc<B> {
         &self.backend
+    }
+
+    /// Whether the device reports `capability`.
+    fn has(&self, capability: Capabilities) -> bool {
+        self.backend.info().capabilities.contains(capability)
     }
 
     /// Marks the log's drawing out of date, for `draw_logs` to bring up to
@@ -163,14 +193,11 @@ impl<B: Backend + 'static> GpuDevice<B> {
         }
     }
 
-    /// Whether `client` holds `system.display.control`, as the broker says.
-    async fn may_own(&self, client: &ClientIdentity) -> bool {
-        let Some(broker) = &self.broker else {
-            return false;
-        };
-        let client = client.clone();
-        let checked = broker.check(client, GPU_DISPLAY.into()).await;
-        matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
+    fn client(&self, identity: &ClientIdentity) -> Client {
+        Client {
+            identity: identity.clone(),
+            broker: self.broker.clone(),
+        }
     }
 
     async fn serve_device(self: Rc<Self>, end: ServerEnd<Device>, client: ClientIdentity) {
@@ -185,7 +212,9 @@ impl<B: Backend + 'static> GpuDevice<B> {
                     },
                 ),
                 DeviceRequest::OpenDisplay(q, r) => {
-                    let result = if !self.may_own(&client).await {
+                    let result = if !self.has(Capabilities::DISPLAY) {
+                        Err(Status::NotSupported)
+                    } else if !self.client(&client).holds(GPU_DISPLAY).await {
                         Err(Status::AccessDenied)
                     } else if self.owner.borrow().is_some() {
                         Err(Status::AlreadyExists)
@@ -203,7 +232,13 @@ impl<B: Backend + 'static> GpuDevice<B> {
                     r.reply(s, result)
                 }
                 DeviceRequest::OpenRender(q, r) => {
-                    let result = self.backend.open_render(q.render);
+                    let result = match self.has(Capabilities::RENDER) {
+                        true => {
+                            let client = self.client(&client);
+                            self.backend.clone().open_render(q.render, client)
+                        }
+                        false => Err(Status::NotSupported),
+                    };
                     r.reply(s, result.map(|()| DeviceOpenRenderResponse {}))
                 }
             };

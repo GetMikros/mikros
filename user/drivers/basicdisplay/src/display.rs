@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::Future;
 use mikros_display::rects::{Rect, copied};
-use mikros_gpudev::{Backend, Screen};
+use mikros_gpudev::{Backend, Client, Screen};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
@@ -462,7 +462,11 @@ impl Backend for Display {
     }
 
     /// Without `Render` connections no buffer can be exported.
-    fn open_render(&self, _render: ServerEnd<Render>) -> Result<(), Status> {
+    fn open_render(
+        self: Rc<Self>,
+        _render: ServerEnd<Render>,
+        _client: Client,
+    ) -> Result<(), Status> {
         Err(Status::NotSupported)
     }
 
