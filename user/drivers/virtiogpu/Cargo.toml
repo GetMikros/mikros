@@ -12,5 +12,10 @@ mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-storage = { path = "../../lib/storage" }
 mikros-virtio = { path = "../../lib/virtio" }
 
+[package.metadata.mikros]
+kind = "driver"
+image = "boot"
+runtime = "rt"
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

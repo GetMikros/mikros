@@ -14,5 +14,8 @@ mod driver;
 mod edid;
 mod protocol;
 
+#[cfg(target_os = "mikros")]
+mikros_rt::raw_main!(driver::main);
+
 #[cfg(not(target_os = "mikros"))]
 fn main() {}
