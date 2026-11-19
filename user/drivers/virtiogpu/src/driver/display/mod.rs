@@ -3,6 +3,8 @@
 //! imported memory objects as 2D resources, and commits that set the
 //! scanouts, copy the damaged parts to the host and flush them.
 
+mod commit;
+
 use crate::driver::gpu::{Gpu, Resource};
 use crate::protocol::{self, FORMAT_B8G8R8A8, FORMAT_B8G8R8X8};
 use alloc::collections::BTreeMap;
@@ -405,8 +407,13 @@ pub async fn serve(display: Rc<Display>, server: Rc<DisplayAsyncServer>) {
                 display.syncs.borrow_mut().remove(&q.sync);
                 Ok(())
             }
-            // Commits come with the next change.
-            DisplayRequest::Commit(_, r) => r.reply(s, Err(Status::NotSupported)),
+            DisplayRequest::Commit(q, r) => {
+                let committed = display.commit(q.commit, &server);
+                r.reply(
+                    s,
+                    committed.map(|commit_id| DisplayCommitResponse { commit_id }),
+                )
+            }
             DisplayRequest::ImportMemory(q, r) => {
                 let imported = display.import_memory(q).await;
                 r.reply(
