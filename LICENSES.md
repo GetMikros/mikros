@@ -44,6 +44,16 @@ All rights reserved.
 Include this attribution and the linked notices in the distribution
 documentation accompanying each image that contains FreeType.
 
+## ACPICA
+
+Mikros distributes the ACPICA code from the [pinned Unix release
+20260930](user/ports/acpica/port.toml) under its
+[BSD-3-Clause option](user/ports/acpica/LICENSE.BSD-3-Clause), not the
+GPL-2.0-only alternative. ACPICA is statically linked into the ACPI driver;
+Mikros's own driver code remains MPL-2.0. Preserve upstream file notices
+and include the linked BSD notice, conditions, and disclaimer in the
+materials accompanying binary distributions of the driver.
+
 ## What to ship with a binary release
 
 For each image or download containing the driver executable, publish a
