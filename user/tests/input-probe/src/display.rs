@@ -1,4 +1,5 @@
-//! The display: the basic display driver's device and its one owner,
+//! The display: the basic graphics adapter's display instance and its
+//! one owner,
 //! a commit that refuses another mode, one that fills the top half of
 //! the screen from a dumb buffer, imports of memory objects that do not
 //! hold their image refused, and a commit that fills the bottom half
@@ -65,13 +66,27 @@ fn placed(flags: CommitFlags, mode: Mode, buffer: u32, src: Rect, dst: Rect) -> 
     }
 }
 
-async fn open(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<DeviceAsyncClient> {
-    let instance = instances(directory, reactor, GPU, 1)
-        .await?
-        .into_iter()
-        .next()?;
-    let channel = connect::<Device>(directory, GPU, instance).await?;
-    Some(DeviceAsyncClient::new(channel, reactor.clone()))
+/// The basic graphics adapter's instance whose only capability is
+/// `capability`, once both of its instances are published.
+pub async fn open(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    capability: Capabilities,
+) -> Option<DeviceAsyncClient> {
+    for instance in instances(directory, reactor, GPU, 2).await? {
+        let channel = connect::<Device>(directory, GPU, instance).await?;
+        let device = DeviceAsyncClient::new(channel, reactor.clone());
+        match device.get_info().await {
+            Ok(r)
+                if r.info.name == "Basic Graphics Adapter" && r.info.capabilities == capability =>
+            {
+                return Some(device);
+            }
+            Ok(_) => {}
+            Err(_) => return failed("GetInfo"),
+        }
+    }
+    failed("finding the adapter's instance")
 }
 
 /// Maps the `size` bytes of `memory` for reading and writing, and returns
@@ -130,14 +145,9 @@ pub async fn paint(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
 ) -> Option<DisplayAsyncClient> {
-    let Some(device) = open(directory, reactor).await else {
-        return failed("connecting to the gpu service");
+    let Some(device) = open(directory, reactor, Capabilities::DISPLAY).await else {
+        return failed("connecting to the display instance");
     };
-    match device.get_info().await {
-        Ok(r) if r.info.name == "Basic Display" && r.info.capabilities == Capabilities::DISPLAY => {
-        }
-        _ => return failed("GetInfo"),
-    }
     let (_, render) = endpoints::<Render>().ok()?;
     if !matches!(
         device.open_render(render).await,
@@ -151,7 +161,7 @@ pub async fn paint(
     }
     let display = DisplayAsyncClient::new(client, reactor.clone());
     // A second owner is refused while the first is open.
-    let other = open(directory, reactor).await?;
+    let other = open(directory, reactor, Capabilities::DISPLAY).await?;
     let (_, server) = endpoints::<Display>().ok()?;
     if !matches!(
         other.open_display(server, None).await,

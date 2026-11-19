@@ -1,11 +1,14 @@
-# The manifest of the basic display driver, installed as
+# The manifest of the basic graphics adapter, installed as
 # system/drivers/system.driver.basicgraphics/driver.yaml.
 name: basicgraphics
 binary: /system/drivers/system.driver.basicgraphics/basicgraphics
 # The boot framebuffer's own device, or the PCI function that provides it,
-# which a GPU driver, as a normal driver, takes instead.
-match: [platform:boot-framebuffer, display:boot-framebuffer]
+# which a GPU driver, as a normal driver, takes instead, for the display
+# instance; and the render device without hardware, which only this
+# driver matches, for the render instance.
+match: [platform:boot-framebuffer, display:boot-framebuffer, platform:basic-render]
 kind: fallback
-# To ask the permission broker whether a client may own the display, and
-# to read the log that it shows while none does.
+# To ask the permission broker whether a client may own the display or
+# render at high priority, and to read the log that the display instance
+# shows while no client owns the display.
 permissions: [system.permissions.read, admin.logs.read]

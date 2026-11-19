@@ -435,14 +435,7 @@ impl Display {
 
 impl Backend for Display {
     fn info(&self) -> DeviceInfo {
-        DeviceInfo {
-            name: "Basic Display".into(),
-            driver: "basicgraphics".into(),
-            driver_version: 1,
-            vendor_id: 0,
-            device_id: 0,
-            capabilities: Capabilities::DISPLAY,
-        }
+        crate::info(Capabilities::DISPLAY)
     }
 
     fn serve(
@@ -461,7 +454,7 @@ impl Backend for Display {
         self.free_unused();
     }
 
-    /// Without `Render` connections no buffer can be exported.
+    /// Never called: the library refuses `OpenRender` without `RENDER`.
     fn open_render(
         self: Rc<Self>,
         _render: ServerEnd<Render>,
@@ -513,8 +506,9 @@ pub async fn serve(display: Rc<Display>, server: Rc<DisplayAsyncServer>) {
                     created.map(|buffer| DisplayCreateDumbBufferResponse { buffer }),
                 )
             }
-            // Without `Render` connections no buffer can be exported.
-            DisplayRequest::ImportBuffer(_, r) => r.reply(s, Err(Status::NotSupported)),
+            // The display instance exports no buffers, so no token is
+            // one of its own.
+            DisplayRequest::ImportBuffer(_, r) => r.reply(s, Err(Status::NotFound)),
             DisplayRequest::DestroyBuffer(q) => {
                 display.destroy_buffer(q.buffer);
                 Ok(())

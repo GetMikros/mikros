@@ -5905,14 +5905,17 @@ mod manager {
     }
 
     /// The `input` scenario: serves `tests/input.img`, whose input probe
-    /// fills the basic display driver's screen and then waits for the
+    /// fills the screen of the basic graphics adapter's display instance,
+    /// checks its render instance, and then waits for the
     /// keys and mouse movement that the runner sends; stops QEMU with
     /// `PASSED` once the probe passed, or with `FAILED`.
     pub fn input_scenario(s: &Startup) -> i64 {
         const SECONDS: i64 = 300;
         const EXPECTED: &[(&[u8], usize)] = &[
             (b"device-manager: released the kernel console", 1),
-            (b"basicgraphics: serving the ", 1),
+            // The display instance's framebuffer and the render device.
+            (b"basicgraphics: serving the ", 2),
+            (b"basicgraphics: serving the render device", 1),
             (b"ps2: published the keyboard", 1),
             (b"ps2: published the mouse", 1),
             (b"usbhid: published a Keyboard", 1),

@@ -60,6 +60,14 @@ pub fn memory(size: u64, options: u32) -> Result<OwnedHandle, Status> {
     created(s, out)
 }
 
+/// The bytes of memory that the kernel's frame allocator manages.
+pub fn system_memory() -> u64 {
+    let mut record = [0u8; 16];
+    // SAFETY: the record holds the 16 bytes the call writes.
+    unsafe { sys::system_get_memory_info(record.as_mut_ptr()) };
+    u64::from_le_bytes(record[..8].try_into().expect("8 bytes")) * 4096
+}
+
 /// Fills `buf` from the memory object `memory`, from `offset`.
 pub fn read_memory(memory: Handle, offset: u64, buf: &mut [u8]) -> Result<(), Status> {
     // SAFETY: the pointer and length describe `buf`.
