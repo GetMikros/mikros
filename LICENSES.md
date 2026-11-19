@@ -54,6 +54,31 @@ Mikros's own driver code remains MPL-2.0. Preserve upstream file notices
 and include the linked BSD notice, conditions, and disclaimer in the
 materials accompanying binary distributions of the driver.
 
+## musl
+
+The Mikros C library combines [musl 1.2.5](user/ports/musl/port.toml), with
+[Mikros port patches](user/ports/musl/patches), and the MPL-2.0
+[`mikros-libc` layer](user/runtime/libc/Cargo.toml). Upstream licenses
+musl as a whole under MIT and lists file-specific terms and attributions
+in its [COPYRIGHT notice](user/ports/musl/COPYRIGHT). There is no license
+option to select. Include the full upstream notice with source and binary
+distributions of the musl-based C library.
+
+## Time zone and keyboard data
+
+- [IANA tzdata 2026f](user/ports/tzdata/port.toml): the time zone data
+  used to build the installed zoneinfo files is public domain. The pinned
+  data archive contains none of the BSD-licensed exceptions named in
+  [upstream's statement](user/ports/tzdata/LICENSE), which is retained
+  here for provenance.
+- [libxkbcommon 1.13.2](user/ports/xkbcommon/port.toml): ship the
+  [upstream LICENSE](user/ports/xkbcommon/LICENSE) with the library.
+  It collects the MIT/X11-family notices and separately lists notices
+  for test data; preserve those too when shipping the test data.
+- [xkeyboard-config 2.48](user/ports/xkeyboard-config/port.toml): ship
+  the [upstream COPYING notices](user/ports/xkeyboard-config/COPYING)
+  with the installed keyboard layouts and accompanying documentation.
+
 ## What to ship with a binary release
 
 For each image or download containing the driver executable, publish a
