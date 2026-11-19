@@ -95,10 +95,14 @@ fn run(program: &str, arguments: &[&str]) -> Result<Run, Failure> {
 fn ensure(run: &Run, what: &'static str, ok: bool) -> Result<(), Failure> {
     match ok {
         true => Ok(()),
-        false => Err(Failure {
-            what,
-            status: run.status,
-        }),
+        false => {
+            // What the command wrote, to tell why in the serial log.
+            eprintln!("out: {:?}\nerr: {:?}", run.out, run.err);
+            Err(Failure {
+                what,
+                status: run.status,
+            })
+        }
     }
 }
 
@@ -260,13 +264,19 @@ fn env_writes_the_environment() -> Result<(), Failure> {
 }
 
 /// A command runs with the environment changed, and env exits with its
-/// status.
+/// status. The process manager adds `TMPDIR` to every environment, also
+/// to one that -i emptied.
 fn env_runs_a_command() -> Result<(), Failure> {
     let run = run(ENV, &["-i", "X=1", ENV, "-u", "X", "Y=2"])?;
+    let lines: Vec<&str> = run
+        .out
+        .lines()
+        .filter(|l| !l.starts_with("TMPDIR="))
+        .collect();
     ensure(
         &run,
         "running env in env",
-        run.status == 0 && run.out == "Y=2\n",
+        run.status == 0 && lines == ["Y=2"],
     )?;
     let failing = self::run(ENV, &[FALSE])?;
     ensure(&failing, "the command's status", failing.status == 1)?;

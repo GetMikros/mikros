@@ -363,20 +363,18 @@ fn dirname_bad_arguments(_: &Folder) -> Result<(), Failure> {
     )
 }
 
-/// mktemp makes a file in `$TMPDIR`, a folder in the folder of `-p`,
-/// with the suffix given, and only a name with `-u`.
+/// mktemp makes a file in `$TMPDIR`, which the process manager sets to
+/// `/tmp` for every process, a folder in the folder of `-p`, with the
+/// suffix given, and only a name with `-u`.
 fn mktemp_makes_files_and_folders(dir: &Folder) -> Result<(), Failure> {
-    let tmpdir = dir.at("sub");
-    let with = With {
-        folder: None,
-        env: &[("TMPDIR", Some(&tmpdir))],
-    };
+    let with = With::default();
     let r = run_with(MKTEMP, &[], &with)?;
     let path = r.out.trim_end();
-    let start = format!("{tmpdir}/tmp.");
-    let named = path.starts_with(&start) && path.len() == start.len() + 10;
+    let start = "/tmp/tmp.";
+    let named = path.starts_with(start) && path.len() == start.len() + 10;
     ensure(&r, "a name in $TMPDIR", r.status == 0 && named)?;
     let file = std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == 0);
+    let _ = std::fs::remove_file(path);
     ensure(&r, "an empty file", file)?;
     let r = run_with(
         MKTEMP,
@@ -393,7 +391,7 @@ fn mktemp_makes_files_and_folders(dir: &Folder) -> Result<(), Failure> {
     ensure(
         &r,
         "a name with -u",
-        r.status == 0 && path.starts_with(&tmpdir),
+        r.status == 0 && path.starts_with("/tmp/y."),
     )?;
     let made = std::fs::symlink_metadata(&path).is_ok();
     ensure(&r, "nothing made with -u", !made)

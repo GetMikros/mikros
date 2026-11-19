@@ -111,7 +111,8 @@ fn uniq_merges() -> Result<(), Failure> {
     let got = run_with(&uniq, &["-d"], Some(input))?;
     wrote(&got, "only repeated lines", "a\nc\n")?;
     let got = run_with(&uniq, &["-u", "-i"], Some(input))?;
-    wrote(&got, "only unique lines without case", "b\n")?;
+    // A is not next to the lines a, so it is unique too.
+    wrote(&got, "only unique lines without case", "b\nA\n")?;
     let got = run_with(&uniq, &["-f", "1"], Some(b"1 x\n2 x\n3 y\n"))?;
     wrote(&got, "skipping a field", "1 x\n3 y\n")?;
     let list = file("uniq-in", b"x\nx\ny\n")?;

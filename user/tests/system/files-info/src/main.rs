@@ -93,10 +93,14 @@ pub fn run_with(program: &str, arguments: &[&str], input: Option<&[u8]>) -> Resu
 pub fn ensure(run: &Run, what: &'static str, ok: bool) -> Result<(), Failure> {
     match ok {
         true => Ok(()),
-        false => Err(Failure {
-            what,
-            status: run.status,
-        }),
+        false => {
+            // What the command wrote, to tell why in the serial log.
+            eprintln!("out: {:?}\nerr: {:?}", run.out, run.err);
+            Err(Failure {
+                what,
+                status: run.status,
+            })
+        }
     }
 }
 

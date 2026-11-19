@@ -25,7 +25,13 @@ fn stat_shows_a_file() -> Result<(), Failure> {
     ensure(&run, "what the caller may do", starts("  Access: rw"))?;
     ensure(&run, "the owner", starts("   Owner: "))?;
     ensure(&run, "the stored mode", starts("    Mode: 0"))?;
-    ensure(&run, "the modified time", starts("Modified: 20"))?;
+    // tmpfs, which holds $TMPDIR, keeps times since boot, so only the
+    // form of the time is checked.
+    let time = |l: &str| {
+        let t = l.strip_prefix("Modified: ").unwrap_or("");
+        t.len() >= 16 && t.as_bytes()[4] == b'-' && t.as_bytes()[10] == b' '
+    };
+    ensure(&run, "the modified time", run.out.lines().any(time))?;
     ensure(&run, "the access control list", starts("     ACL: "))?;
     ensure(&run, "the owner's entry", run.out.contains("owner:rw"))?;
     ensure(&run, "no default list for a file", !starts(" Default:"))
