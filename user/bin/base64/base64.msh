@@ -1,0 +1,10 @@
+# What `base64` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern base64(
+    file?: file "the file to encode or decode, or - for standard input",
+    --decode(-d): bool "decode instead of encoding",
+    --ignore-garbage(-i): bool "when decoding, skip bytes that are not of the alphabet",
+    --wrap(-w): int "break lines after this many columns, 0 for none",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
