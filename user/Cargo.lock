@@ -1388,6 +1388,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha256sum"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+ "mikros-sums",
+ "sha2",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
