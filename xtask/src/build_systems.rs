@@ -119,7 +119,8 @@ pub fn build_dir(name: &str) -> PathBuf {
 /// Configures the project built as `name` with `configure`, in an
 /// emptied directory, unless it was configured by the same command, with
 /// the same contents of the cross or toolchain file `file`, from the
-/// same `source`, by the build tool patched as `tool` records. A source
+/// same `source`, by the build tool patched as `tool` records, against
+/// the same C library's soname. A source
 /// records how it was patched in a stamp file, which changes whenever it
 /// is extracted again.
 fn configured(
@@ -131,11 +132,14 @@ fn configured(
 ) -> Result<()> {
     let dir = dir(name);
     let stamp_path = dir.join(".mikros-configured");
+    // The C library's soname, which the project's libraries and programs
+    // name.
     let stamp = format!(
-        "{:?}\n{}\n{}\n{tool}\n",
+        "{:?}\n{}\n{}\n{tool}\n{}\n",
         configure,
         fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?,
         fs::read_to_string(source.join(crate::port::STAMP)).unwrap_or_default(),
+        crate::musl::SONAME,
     );
     if fs::read_to_string(&stamp_path).ok().as_deref() == Some(stamp.as_str()) {
         return Ok(());

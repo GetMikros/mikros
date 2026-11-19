@@ -15,7 +15,7 @@ fn dir() -> PathBuf {
 }
 
 /// The `DT_SONAME` of the shared C library.
-pub const SONAME: &str = "libc.1.dlib";
+pub const SONAME: &str = "libc.dlib";
 
 /// What building musl produced.
 pub struct Built {

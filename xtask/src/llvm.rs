@@ -219,13 +219,14 @@ pub fn build_cxx_runtimes(toolchain: &Path, sysroot: &Path) -> Result<()> {
     args.push(format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()));
     args.push(format!("-DCMAKE_INSTALL_PREFIX={}", sysroot.display()));
     args.push("-DCMAKE_INSTALL_LIBDIR=lib".to_owned());
-    // Configured again when the options, the toolchain or the CMake
-    // patches change.
+    // Configured again when the options, the toolchain, the CMake patches
+    // or the C library's soname change.
     let stamp = format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
         args.join("\n"),
         fs::read_to_string(toolchain).unwrap_or_default(),
         crate::cmake::patches_stamp(),
+        crate::musl::SONAME,
     );
     let configured = build.join(".mikros-cmake-options");
     if fs::read_to_string(&configured).ok() != Some(stamp.clone()) {

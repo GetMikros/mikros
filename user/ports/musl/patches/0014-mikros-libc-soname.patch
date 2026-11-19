@@ -1,0 +1,20 @@
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -1031,10 +1031,14 @@
+ 		return 0;
+ 	}
+ 
+-	/* Catch and block attempts to reload the implementation itself */
+-	if (name[0]=='l' && name[1]=='i' && name[2]=='b') {
++	/* Catch and block attempts to reload the implementation itself:
++	 * on Mikros the C library is named by its soname, libc.dlib, and
++	 * no other libc name. */
++	if (!strcmp(name, "libc.dlib")) {
++		is_self = 1;
++	} else if (name[0]=='l' && name[1]=='i' && name[2]=='b') {
+ 		static const char reserved[] =
+-			"c.pthread.rt.m.dl.util.xnet.";
++			"pthread.rt.m.dl.util.xnet.";
+ 		const char *rp, *next;
+ 		for (rp=reserved; *rp; rp=next) {
+ 			next = strchr(rp, '.') + 1;

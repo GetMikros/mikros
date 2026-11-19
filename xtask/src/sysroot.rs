@@ -116,6 +116,7 @@ fn make() -> Result<PathBuf> {
     let abi_note = crate::workspace_root().join("target/musl/abi-note.o");
     assemble(&cfg, "user/runtime/libc/crt/abi-note.S", &abi_note)?;
     let musl = crate::musl::build(&cfg, &[&shared_layer, &abi_note])?;
+    forget_other_c_library(&sysroot)?;
     let lib = sysroot.join("lib");
     combine(&lib.join("libc.slib"), &[&musl.libc, &layer])?;
     // The shared library is also the dynamic linker.
@@ -138,6 +139,24 @@ fn make() -> Result<PathBuf> {
     assemble(&cfg, "user/runtime/libc/crt/crt1.S", &lib.join("crt1.o"))?;
     llvm::build_cxx_runtimes(&cmake_toolchain_file(), &sysroot)?;
     Ok(sysroot)
+}
+
+/// Removes the programs with the standard library that were linked
+/// against a shared C library of another soname, which would name it in
+/// `DT_NEEDED`, the first time the sysroot is built with this one, and
+/// records it. Cargo does not see the change; ported projects, which are
+/// configured again when the soname changes, do.
+fn forget_other_c_library(sysroot: &Path) -> Result<()> {
+    let record = sysroot.join(".mikros-libc-soname");
+    if fs::read_to_string(&record).ok().as_deref() == Some(crate::musl::SONAME) {
+        return Ok(());
+    }
+    let programs = crate::workspace_root().join("user/target/std");
+    if programs.exists() {
+        fs::remove_dir_all(&programs)
+            .with_context(|| format!("removing {}", programs.display()))?;
+    }
+    fs::write(&record, crate::musl::SONAME).with_context(|| format!("writing {}", record.display()))
 }
 
 /// Assembles `source`, a path relative to the repository, to `object`
