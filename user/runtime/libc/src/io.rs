@@ -1,7 +1,8 @@
 //! Reading, writing and seeking descriptors. Streams use the stream
 //! system calls, and wait while they are empty or full. Files use their
 //! connection: `read`, `write` and `lseek` its cursor, and `pread` and
-//! `pwrite` explicit offsets.
+//! `pwrite` explicit offsets. Memory descriptors read and write their
+//! object, at the offset that the C library keeps.
 
 use crate::errno::{self, EBADF, EINVAL, EIO, EISDIR, EPIPE, ESPIPE};
 use crate::fd::{self, Description};
@@ -20,7 +21,7 @@ const FOREVER: i64 = i64::MAX;
 const SIGPIPE: u32 = 13;
 pub const SEEK_SET: i64 = 0;
 pub const SEEK_CUR: i64 = 1;
-const SEEK_END: i64 = 2;
+pub const SEEK_END: i64 = 2;
 
 #[repr(C)]
 pub struct Iovec {
@@ -72,6 +73,7 @@ pub fn read(fd: i64, buf: *mut u8, len: u64) -> i64 {
         Description::Epoll(_) => -EINVAL,
         Description::Timer(timer) => crate::timerfd::read(timer, buf, len),
         Description::Terminal(t) => t.read(buf, len),
+        Description::Memory(m) => m.read(buf, len),
     }
 }
 
@@ -126,6 +128,7 @@ pub fn write(fd: i64, buf: *const u8, len: u64) -> i64 {
         Description::Directory(..) | Description::Folder(_) => -EISDIR,
         Description::Epoll(_) | Description::Timer(_) => -EINVAL,
         Description::Terminal(t) => t.write(buf, len),
+        Description::Memory(m) => m.write(buf, len),
     }
 }
 
@@ -148,6 +151,7 @@ pub fn pread(fd: i64, buf: *mut u8, len: u64, offset: i64) -> i64 {
                 Err(_) => -EIO,
             }
         }
+        Description::Memory(m) => m.pread(buf, len, offset),
         Description::Directory(..) | Description::Folder(_) => -EISDIR,
         Description::Stream(_)
         | Description::Terminal(_)
@@ -170,6 +174,7 @@ pub fn pwrite(fd: i64, buf: *const u8, len: u64, offset: i64) -> i64 {
             Ok(Err(e)) => -errno::from_fs(e),
             Err(_) => -EIO,
         },
+        Description::Memory(m) => m.pwrite(buf, len, offset),
         Description::Directory(..) | Description::Folder(_) => -EISDIR,
         Description::Stream(_)
         | Description::Terminal(_)
@@ -196,6 +201,7 @@ pub fn lseek(fd: i64, offset: i64, whence: i64) -> i64 {
         },
         Description::Directory(_, listing) => crate::dir::seek(listing, offset, whence),
         Description::Folder(folder) => crate::dir::seek(&folder.listing, offset, whence),
+        Description::Memory(m) => m.seek(offset, whence),
         Description::Stream(_)
         | Description::Terminal(_)
         | Description::Epoll(_)

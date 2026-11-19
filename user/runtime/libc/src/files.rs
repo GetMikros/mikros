@@ -235,6 +235,7 @@ pub fn ftruncate(fd: i64, size: i64) -> i64 {
         Some(Description::File(node)) => {
             result(done(node.node.lock().truncate(size, FOREVER)).map(drop))
         }
+        Some(Description::Memory(m)) => m.truncate(size),
         Some(Description::Directory(..) | Description::Folder(_)) => -errno::EISDIR,
         Some(_) => -EINVAL,
         None => -EBADF,

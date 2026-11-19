@@ -1,7 +1,7 @@
 //! The descriptor table of the process. Each descriptor refers to an open
 //! description: a stream, a connection to a file or directory, a slave
-//! terminal, an epoll instance or a timer, which `dup` shares between
-//! descriptors.
+//! terminal, an epoll instance, a timer or a memory object, which `dup`
+//! shares between descriptors.
 
 use crate::errno::{EBADF, EINVAL, EMFILE};
 use crate::lock::Lock;
@@ -16,11 +16,14 @@ use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 pub const KIND_FILE: u32 = 1;
 /// The descriptor kind of a stream.
 pub const KIND_STREAM: u32 = 2;
+/// The descriptor kind of a memory object.
+pub const KIND_MEMORY: u32 = 4;
 /// The descriptor kind of a slave terminal, which is its token.
 pub const KIND_TERMINAL: u32 = 8;
 /// The bits of a startup handle's `id` that hold its descriptor number.
 pub const ID_FD: u32 = (1 << 24) - 1;
-/// The object type of a channel.
+/// The object types of a memory object and of a channel.
+const TYPE_MEMORY: u32 = 3;
 const TYPE_CHANNEL: u32 = 4;
 /// The object type of a stream, and that of an event, which a terminal
 /// token is.
@@ -47,6 +50,8 @@ pub enum Description {
     /// A folder above namespace entries that no entry covers, which the
     /// C library lists itself.
     Folder(crate::dir::Folder),
+    /// A memory object, with the byte size the C library keeps.
+    Memory(crate::memfd::Memory),
 }
 
 /// A connection to a file system node, with the status flags it was
@@ -178,7 +183,11 @@ pub fn install(handles: &mut Vec<StartupHandle>) {
             HandleRole::Stdin => Some(0),
             HandleRole::Stdout => Some(1),
             HandleRole::Stderr => Some(2),
-            HandleRole::User if matches!(kind, KIND_FILE | KIND_STREAM | KIND_TERMINAL) => None,
+            HandleRole::User
+                if matches!(kind, KIND_FILE | KIND_STREAM | KIND_TERMINAL | KIND_MEMORY) =>
+            {
+                None
+            }
             _ => {
                 i += 1;
                 continue;
@@ -200,6 +209,9 @@ fn inherited(handle: OwnedHandle, kind: u32) -> Option<Description> {
     let object = mikros_rt::midl::handle_info(handle.raw()).map(|(object, _)| object);
     match (kind, object) {
         (KIND_STREAM, Some(TYPE_STREAM)) => Some(Description::Stream(handle)),
+        (KIND_MEMORY, Some(TYPE_MEMORY)) => {
+            Some(Description::Memory(crate::memfd::Memory::received(handle)))
+        }
         (KIND_TERMINAL, Some(TYPE_EVENT)) => Some(Description::Terminal(
             crate::terminal::Terminal::new(handle),
         )),
@@ -252,6 +264,7 @@ pub fn shared_handle(description: &Description) -> Option<(mikros_rt::sys::Handl
         Description::File(node) | Description::Directory(node, _) => {
             Some((node.node.lock().channel().ok()?, KIND_FILE))
         }
+        Description::Memory(m) => Some((m.object.raw(), KIND_MEMORY)),
         Description::Epoll(_) | Description::Timer(_) | Description::Folder(_) => None,
     }
 }

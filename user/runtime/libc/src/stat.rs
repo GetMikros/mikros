@@ -143,6 +143,15 @@ pub fn fstat(fd: i64, out: *mut Kstat) -> i64 {
             blksize: BLOCK_SIZE,
             ..Kstat::default()
         }),
+        // A regular file of the byte size, as a memfd is on Linux.
+        Description::Memory(m) => Ok(Kstat {
+            mode: S_IFREG | 0o600,
+            nlink: 1,
+            size: m.size() as i64,
+            blksize: BLOCK_SIZE,
+            blocks: (m.size().div_ceil(512)) as i64,
+            ..Kstat::default()
+        }),
         // An anonymous file, as on Linux.
         Description::Epoll(_) | Description::Timer(_) => Ok(Kstat {
             mode: 0o600,

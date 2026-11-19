@@ -13,6 +13,7 @@
 //! It also spawns `/system/bin/hello`, a static C program, and
 //! `/system/bin/hello-std`, a Rust program that uses the standard library,
 //! with a stream as their standard output, and checks what they print,
+//! runs `/system/bin/memfd-c`, which checks memory descriptors,
 //! runs `/system/bin/msh-check`, which runs msh's scripts and checks what
 //! they do, and reads more than the process manager's small heap blocks hold of
 //! `/system/bin/hello` with one `Read`.
@@ -90,6 +91,9 @@ const APP_HELLO: &str = "/apps/test/bin/hello";
 const APP_HELLO_DYNAMIC: &str = "/apps/test/bin/hello-dynamic";
 const APP_LINK: &str = "/system/bin/app-hello";
 const RAW_SYSCALL: &str = "/system/bin/raw-syscall";
+/// A static C program that checks memory descriptors, also passed to a
+/// child that is itself.
+const MEMFD_C: &str = "/system/bin/memfd-c";
 const APP_RAW_SYSCALL: &str = "/apps/test/bin/raw-syscall";
 /// A Rust program that starts processes with `std::process::Command`.
 const SPAWN_STD: &str = "/system/bin/spawn-std";
@@ -996,6 +1000,12 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             "making a system call as a system component",
             run_c(l, RAW_SYSCALL).await.1 == Some(0),
         )?;
+        // The program exits with the number of the check that failed.
+        let (_, code) = run_c(l, MEMFD_C).await;
+        if code != Some(0) {
+            mikros_rt::log!(Error, "launcher probe: memfd-c exited with {code:?}");
+        }
+        check("using memory descriptors in C", code == Some(0))?;
         // The gate turns the instruction into a protection fault, which
         // ends the program with SEGV.
         let gated = spawn(l, &[], |r| {

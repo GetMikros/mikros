@@ -314,7 +314,11 @@ fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
                     continue;
                 }
             },
-            Description::File(..) | Description::Directory(..) | Description::Folder(_) => {
+            // Files and memory objects are always ready.
+            Description::File(..)
+            | Description::Directory(..)
+            | Description::Folder(_)
+            | Description::Memory(_) => {
                 entry.revents = entry.events & (INPUT | OUTPUT);
                 ready |= entry.revents != 0;
                 continue;

@@ -302,6 +302,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", hello.display());
+            let memfd_c = c_build(
+                "memfd-c",
+                &["user/tests/memfd-c/memfd.c"],
+                Linking::Static,
+                &[],
+            )?;
+            println!("built    {}", memfd_c.display());
             let global_check = crate::rust_std::build("global-check", kind)?;
             let forge_probe = crate::rust_std::build("forge-probe", kind)?;
             let forge_manifest =
@@ -426,6 +433,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("system/bin/hello", hello.as_path()),
                     ("system/bin/hello-dynamic", hello_dynamic.as_path()),
                     ("system/bin/raw-syscall", raw_syscall.as_path()),
+                    ("system/bin/memfd-c", memfd_c.as_path()),
                     // Applications that the boot image provides.
                     ("apps/test/bin/hello", hello.as_path()),
                     ("apps/test/bin/hello-dynamic", hello_dynamic.as_path()),

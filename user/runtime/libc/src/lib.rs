@@ -18,6 +18,7 @@ mod futex;
 mod io;
 mod library;
 mod lock;
+mod memfd;
 mod poll;
 mod process;
 mod services;

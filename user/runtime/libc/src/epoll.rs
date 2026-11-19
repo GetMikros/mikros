@@ -174,7 +174,11 @@ fn watched(description: &Description) -> Result<Watched<'_>, i64> {
             _description: core::marker::PhantomData,
             kind: Kind::Terminal,
         }),
-        Description::File(..) | Description::Directory(..) | Description::Folder(_) => Err(EPERM),
+        // As regular files on Linux, which a memory object is too.
+        Description::File(..)
+        | Description::Directory(..)
+        | Description::Folder(_)
+        | Description::Memory(_) => Err(EPERM),
     }
 }
 

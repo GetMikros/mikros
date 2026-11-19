@@ -128,6 +128,7 @@ const SYS_UNAME: i64 = 63;
 const SYS_SETHOSTNAME: i64 = 170;
 const SYS_FACCESSAT2: i64 = 439;
 const SYS_STATX: i64 = 332;
+const SYS_MEMFD_CREATE: i64 = 319;
 
 const PROT_READ: i64 = 1;
 const PROT_WRITE: i64 = 2;
@@ -153,6 +154,9 @@ const F_DUPFD: i64 = 0;
 const F_GETFD: i64 = 1;
 const F_SETFD: i64 = 2;
 const F_GETFL: i64 = 3;
+/// `F_ADD_SEALS` and `F_GET_SEALS`.
+const F_ADD_SEALS: i64 = 1033;
+const F_GET_SEALS: i64 = 1034;
 const F_SETFL: i64 = 4;
 const F_DUPFD_CLOEXEC: i64 = 1030;
 const FD_CLOEXEC: i64 = 1;
@@ -262,6 +266,7 @@ extern "C" fn __mikros_syscall(
         SYS_FACCESSAT2 => fs::access(a1, a2 as *const u8, a3, a4),
         SYS_PIPE => fd::pipe(a1 as *mut [i32; 2], 0),
         SYS_PIPE2 => fd::pipe(a1 as *mut [i32; 2], a2 as u32),
+        SYS_MEMFD_CREATE => crate::memfd::create(a1 as *const u8, a2 as u32),
         SYS_DUP => fd::duplicate_from(a1, 0, false),
         SYS_DUP2 => dup2(a1, a2),
         SYS_DUP3 => dup3(a1, a2, a3 as u32),
@@ -547,6 +552,12 @@ fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<OwnedHandle, i64> {
         wanted |= MemoryFlags::EXECUTE.0;
     }
     let description = fd::get(fd).ok_or(EBADF)?;
+    // A memory descriptor maps its object, or a copy-on-write clone of
+    // all of it, so that the mapping's offset stays the same.
+    if let Description::Memory(m) = &*description {
+        let private = flags & MAP_TYPE == MAP_PRIVATE;
+        return m.mapped(private, 0, memory_size(m.object.raw()));
+    }
     let Description::File(node) = &*description else {
         return Err(ENODEV);
     };
@@ -620,6 +631,8 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
             None => -EBADF,
         },
         F_SETFD => fd::set_close_on_exec(fd, arg & FD_CLOEXEC != 0),
+        F_ADD_SEALS => crate::memfd::fcntl_seals(fd, true, arg),
+        F_GET_SEALS => crate::memfd::fcntl_seals(fd, false, 0),
         F_GETFL | F_SETFL => {
             let Some(description) = fd::get(fd) else {
                 return -EBADF;
@@ -629,8 +642,12 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
                 Description::Timer(timer) => &timer.flags,
                 Description::Terminal(t) => &t.flags,
                 // Streams are read and written, and have no other flags,
-                // nor has an epoll instance or a folder above entries.
-                Description::Stream(_) | Description::Epoll(_) | Description::Folder(_) => {
+                // nor has an epoll instance, a folder above entries or a
+                // memory object.
+                Description::Stream(_)
+                | Description::Epoll(_)
+                | Description::Folder(_)
+                | Description::Memory(_) => {
                     return if cmd == F_GETFL {
                         i64::from(fs::O_RDWR)
                     } else {
