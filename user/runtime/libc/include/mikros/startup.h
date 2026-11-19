@@ -4,6 +4,7 @@
 #ifndef MIKROS_STARTUP_H
 #define MIKROS_STARTUP_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <mikros/syscalls.h>
 
@@ -25,6 +26,15 @@ mikros_handle_t mikros_directory(void);
    memory objects can be mapped with vm_map. The C library keeps owning
    it: the caller must not close it. */
 mikros_handle_t mikros_process_self(void);
+
+/* Stores in path, with a NUL after it, the path of the process's
+   namespace entry with that index, from 0 in the order the process got
+   them, and in directory the entry's connection, which the C library
+   keeps owning: the caller must not close it. Returns 0, or -1 with
+   errno ENOENT for an index of no entry and ERANGE when the path and its
+   NUL do not fit in len bytes. Safe to call from any thread. */
+int mikros_namespace_entry(size_t index, char *path, size_t len,
+                           mikros_handle_t *directory);
 
 #ifdef __cplusplus
 }

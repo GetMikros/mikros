@@ -62,6 +62,43 @@ pub fn install(entries: Vec<NamespaceEntry>) {
     *CWD.lock() = String::from("/");
 }
 
+/// `mikros_namespace_entry` (MIKSPEC-0033.R40): stores the path of the
+/// namespace entry `index`, in the order the startup transfer gave them,
+/// with a NUL after it, in `path`, and its connection, which stays the C
+/// library's, in `directory`. Fails with `ENOENT` past the last entry and
+/// with `ERANGE` when the path and its NUL do not fit in `len` bytes.
+#[unsafe(no_mangle)]
+extern "C" fn mikros_namespace_entry(
+    index: usize,
+    path: *mut u8,
+    len: usize,
+    directory: *mut mikros_rt::sys::Handle,
+) -> i32 {
+    let namespace = NAMESPACE.lock();
+    let Some((name, node)) = namespace.get(index) else {
+        return crate::process::failed(errno::ENOENT) as i32;
+    };
+    if name.len() >= len || path.is_null() || directory.is_null() {
+        let e = if name.len() >= len {
+            errno::ERANGE
+        } else {
+            errno::EFAULT
+        };
+        return crate::process::failed(e) as i32;
+    }
+    let Ok(handle) = node.lock().channel() else {
+        return crate::process::failed(errno::EIO) as i32;
+    };
+    // SAFETY: the caller gives `len` bytes at `path`, of which the name
+    // and its NUL take fewer, and a handle at `directory`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), path, name.len());
+        path.add(name.len()).write(0);
+        directory.write(handle);
+    }
+    0
+}
+
 /// The absolute form of `path`, relative to the absolute path `base`
 /// when it does not start with `/`: without `.` components, with `..`
 /// components removed lexically, and without a final `/`.

@@ -98,7 +98,7 @@ unsafe extern "C" {
 }
 
 /// Sets `errno` to `e` and returns -1.
-fn failed(e: i64) -> i64 {
+pub fn failed(e: i64) -> i64 {
     // SAFETY: musl gives the calling thread's `errno`.
     unsafe { *__errno_location() = e as i32 };
     -1

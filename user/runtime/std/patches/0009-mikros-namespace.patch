@@ -1,0 +1,83 @@
+diff --git a/std/src/os/mikros/mod.rs b/std/src/os/mikros/mod.rs
+index 90703ef..0ec2e10 100644
+--- a/std/src/os/mikros/mod.rs
++++ b/std/src/os/mikros/mod.rs
+@@ -5,6 +5,7 @@
+ 
+ pub mod fs;
+ pub mod io;
++pub mod namespace;
+ pub mod process;
+ pub mod raw;
+ pub mod startup;
+diff --git a/std/src/os/mikros/namespace.rs b/std/src/os/mikros/namespace.rs
+new file mode 100644
+index 0000000..3614d27
+--- /dev/null
++++ b/std/src/os/mikros/namespace.rs
+@@ -0,0 +1,65 @@
++//! The process's namespace entries, as the C library keeps them
++//! (MIKSPEC-0060.R13).
++
++#![unstable(feature = "mikros_handles", issue = "none")]
++
++use super::io::{BorrowedHandle, RawHandle};
++use crate::ffi::{CStr, OsStr, c_char, c_int};
++use crate::io;
++use crate::os::unix::ffi::OsStrExt;
++use crate::path::PathBuf;
++
++unsafe extern "C" {
++    fn mikros_namespace_entry(
++        index: usize,
++        path: *mut c_char,
++        len: usize,
++        directory: *mut RawHandle,
++    ) -> c_int;
++}
++
++/// A namespace entry: its absolute path and its connection, which the C
++/// library keeps open for as long as the process runs.
++#[derive(Debug)]
++pub struct NamespaceEntry {
++    pub path: PathBuf,
++    pub directory: BorrowedHandle<'static>,
++}
++
++/// The process's namespace entries, in the order it got them, also those
++/// whose paths lie below others'.
++pub fn entries() -> io::Result<Vec<NamespaceEntry>> {
++    const ENOENT: i32 = 2;
++    const ERANGE: i32 = 34;
++    let mut entries = Vec::new();
++    let mut room = vec![0u8; 256];
++    let mut index = 0;
++    loop {
++        let mut directory: RawHandle = 0;
++        // SAFETY: the buffer has `room.len()` bytes, and the out pointer is
++        // valid for the call.
++        let done = unsafe {
++            mikros_namespace_entry(index, room.as_mut_ptr().cast(), room.len(), &mut directory)
++        };
++        if done != 0 {
++            let error = io::Error::last_os_error();
++            match error.raw_os_error() {
++                Some(ENOENT) => return Ok(entries),
++                Some(ERANGE) => {
++                    let more = room.len() * 2;
++                    room.resize(more, 0);
++                    continue;
++                }
++                _ => return Err(error),
++            }
++        }
++        let path = CStr::from_bytes_until_nul(&room).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
++        entries.push(NamespaceEntry {
++            path: PathBuf::from(OsStr::from_bytes(path.to_bytes())),
++            // SAFETY: the C library keeps the connection open and never
++            // closes it while the process runs.
++            directory: unsafe { BorrowedHandle::borrow_raw(directory) },
++        });
++        index += 1;
++    }
++}
