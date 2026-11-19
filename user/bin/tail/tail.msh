@@ -1,0 +1,14 @@
+# What `tail` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern tail(
+    ...file: file "the files to read, or - for standard input",
+    --lines(-n): string "write the last count lines, 10 when absent, or with +count all from that line on",
+    --bytes(-c): string "write the last size bytes, or with +size all from that byte on",
+    --quiet(-q): bool "write no names above the files",
+    --verbose(-v): bool "write the name above each file",
+    --follow(-f): bool "keep writing what is added to the files",
+    -F: bool "follow the files by name, also when they are replaced or appear later",
+    --pid: int "with -f or -F, stop after process pid has ended",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
