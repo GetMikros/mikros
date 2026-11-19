@@ -1,0 +1,419 @@
+diff --git a/src/wayland-client.c b/src/wayland-client.c
+index 2464e7b..cc4e23b 100644
+--- a/src/wayland-client.c
++++ b/src/wayland-client.c
+@@ -34,8 +34,9 @@
+ #include <errno.h>
+ #include <string.h>
+ #include <unistd.h>
+-#include <sys/socket.h>
+-#include <sys/un.h>
++#include <mikros/services.h>
++#include <mikros/startup.h>
++#include <mikros/syscalls.h>
+ #include <ctype.h>
+ #include <fcntl.h>
+ #include <poll.h>
+@@ -1144,71 +1145,42 @@ static const struct wl_display_listener display_listener = {
+ 	display_handle_delete_id
+ };
+ 
++/* The descriptor kind of a channel. */
++#define KIND_CHANNEL 9
++
++/* On Mikros the compositor is reached through the service directory's
++ * wayland protocol, which the session manager provides; the default
++ * display, wayland-0, is the only one. Returns a channel descriptor. */
+ static int
+-connect_to_socket(const char *name)
++connect_to_service(const char *name)
+ {
+-	struct sockaddr_un addr;
+-	socklen_t size;
+-	const char *runtime_dir;
+-	int name_size, fd;
+-	bool path_is_absolute;
++	mikros_handle_t ours, theirs;
++	int fd;
+ 
+ 	if (name == NULL)
+ 		name = getenv("WAYLAND_DISPLAY");
+-	if (name == NULL)
+-		name = "wayland-0";
+-
+-	path_is_absolute = name[0] == '/';
+-
+-	runtime_dir = getenv("XDG_RUNTIME_DIR");
+-	if (((!runtime_dir || runtime_dir[0] != '/') && !path_is_absolute)) {
+-		wl_log("error: XDG_RUNTIME_DIR is invalid or not set in the environment.\n");
+-		/* to prevent programs reporting
+-		 * "failed to create display: Success" */
++	if (name != NULL && strcmp(name, "wayland-0") != 0) {
+ 		errno = ENOENT;
+ 		return -1;
+ 	}
+ 
+-	fd = wl_os_socket_cloexec(PF_LOCAL, SOCK_STREAM, 0);
+-	if (fd < 0)
++	if (mikros_channel_create(0, &ours, &theirs) != 0) {
++		errno = ENOMEM;
+ 		return -1;
+-
+-	memset(&addr, 0, sizeof addr);
+-	addr.sun_family = AF_LOCAL;
+-	if (!path_is_absolute) {
+-		name_size =
+-			snprintf(addr.sun_path, sizeof addr.sun_path,
+-			         "%s/%s", runtime_dir, name) + 1;
+-	} else {
+-		/* absolute path */
+-		name_size =
+-			snprintf(addr.sun_path, sizeof addr.sun_path,
+-			         "%s", name) + 1;
+ 	}
+-
+-	if (!(name_size > 0))
+-		wl_abort("Error assigning path name for socket connection\n");
+-	if (name_size > (int)sizeof addr.sun_path) {
+-		if (!path_is_absolute) {
+-			wl_log("error: socket path \"%s/%s\" plus null terminator"
+-			       " exceeds %i bytes\n", runtime_dir, name, (int) sizeof(addr.sun_path));
+-		} else {
+-			wl_log("error: socket path \"%s\" plus null terminator"
+-			       " exceeds %i bytes\n", name, (int) sizeof(addr.sun_path));
+-		}
+-		close(fd);
+-		/* to prevent programs reporting
+-		 * "failed to add socket: Success" */
+-		errno = ENAMETOOLONG;
++	/* The directory takes the other end in every case. */
++	if (mikros_service_connect("wayland", NULL, theirs) != 0) {
++		mikros_handle_close(ours);
++		errno = ECONNREFUSED;
+ 		return -1;
+-	};
+-
+-	size = offsetof (struct sockaddr_un, sun_path) + name_size;
++	}
+ 
+-	if (connect(fd, (struct sockaddr *) &addr, size) < 0) {
+-		close(fd);
++	fd = mikros_fd_from_handle(ours, KIND_CHANNEL);
++	if (fd < 0) {
++		mikros_handle_close(ours);
+ 		return -1;
+ 	}
++	fcntl(fd, F_SETFD, FD_CLOEXEC);
+ 
+ 	return fd;
+ }
+@@ -1310,21 +1282,11 @@ wl_display_connect_to_fd(int fd)
+  * variable if it is set, otherwise display "wayland-0" will be used.
+  *
+  * If WAYLAND_SOCKET is set, it's interpreted as a file descriptor number
+- * referring to an already opened socket. In this case, the socket is used
++ * referring to an already opened channel. In this case, the channel is used
+  * as-is and \c name is ignored.
+  *
+- * If \c name is a relative path, then the socket is opened relative to
+- * the XDG_RUNTIME_DIR directory.
+- *
+- * If \c name is an absolute path, then that path is used as-is for
+- * the location of the socket at which the Wayland server is listening;
+- * no qualification inside XDG_RUNTIME_DIR is attempted.
+- *
+- * If \c name is \c NULL and the WAYLAND_DISPLAY environment variable
+- * is set to an absolute pathname, then that pathname is used as-is
+- * for the socket in the same manner as if \c name held an absolute
+- * path. Support for absolute paths in \c name and WAYLAND_DISPLAY
+- * is present since Wayland version 1.15.
++ * On Mikros, the display wayland-0 is reached through the service
++ * directory's wayland protocol, and every other name fails with ENOENT.
+  *
+  * \memberof wl_display
+  */
+@@ -1350,7 +1312,7 @@ wl_display_connect(const char *name)
+ 			fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+ 		unsetenv("WAYLAND_SOCKET");
+ 	} else {
+-		fd = connect_to_socket(name);
++		fd = connect_to_service(name);
+ 		if (fd < 0)
+ 			return NULL;
+ 	}
+diff --git a/src/wayland-os.c b/src/wayland-os.c
+index f00ead4..1b6372f 100644
+--- a/src/wayland-os.c
++++ b/src/wayland-os.c
+@@ -28,25 +28,18 @@
+ #include "../config.h"
+ 
+ #include <sys/types.h>
+-#include <sys/socket.h>
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <errno.h>
+-#include <string.h>
+-#include <sys/epoll.h>
+-#include <sys/mman.h>
+-#include <sys/un.h>
+-#ifdef HAVE_SYS_UCRED_H
+-#include <sys/ucred.h>
+-#endif
+ 
+ #include "wayland-os.h"
+ 
++/* Mikros has no sockets: the connection is a kernel channel, which
++ * connection.c reads and writes. Only duplicating a descriptor is left
++ * here. */
++
+ /* used by tests */
+ int (*wl_fcntl)(int fildes, int cmd, ...) = fcntl;
+-int (*wl_socket)(int domain, int type, int protocol) = socket;
+-ssize_t (*wl_recvmsg)(int socket, struct msghdr *message, int flags) = recvmsg;
+-int (*wl_epoll_create1)(int flags) = epoll_create1;
+ 
+ static int
+ set_cloexec_or_close(int fd)
+@@ -70,65 +63,6 @@ err:
+ 	return -1;
+ }
+ 
+-int
+-wl_os_socket_cloexec(int domain, int type, int protocol)
+-{
+-	int fd;
+-
+-	fd = wl_socket(domain, type | SOCK_CLOEXEC, protocol);
+-	if (fd >= 0)
+-		return fd;
+-	if (errno != EINVAL)
+-		return -1;
+-
+-	fd = wl_socket(domain, type, protocol);
+-	return set_cloexec_or_close(fd);
+-}
+-
+-#if defined(__FreeBSD__)
+-int
+-wl_os_socket_peercred(int sockfd, uid_t *uid, gid_t *gid, pid_t *pid)
+-{
+-	socklen_t len;
+-	struct xucred ucred;
+-
+-	len = sizeof(ucred);
+-	if (getsockopt(sockfd, SOL_LOCAL, LOCAL_PEERCRED, &ucred, &len) < 0 ||
+-	    ucred.cr_version != XUCRED_VERSION)
+-		return -1;
+-	*uid = ucred.cr_uid;
+-	*gid = ucred.cr_gid;
+-#if HAVE_XUCRED_CR_PID
+-	/* Since https://cgit.freebsd.org/src/commit/?id=c5afec6e895a */
+-	*pid = ucred.cr_pid;
+-#else
+-	*pid = 0;
+-#endif
+-	return 0;
+-}
+-#elif defined(SO_PEERCRED)
+-int
+-wl_os_socket_peercred(int sockfd, uid_t *uid, gid_t *gid, pid_t *pid)
+-{
+-	socklen_t len;
+-#if defined(__OpenBSD__)
+-	struct sockpeercred ucred;
+-#else
+-	struct ucred ucred;
+-#endif
+-
+-	len = sizeof(ucred);
+-	if (getsockopt(sockfd, SOL_SOCKET, SO_PEERCRED, &ucred, &len) < 0)
+-		return -1;
+-	*uid = ucred.uid;
+-	*gid = ucred.gid;
+-	*pid = ucred.pid;
+-	return 0;
+-}
+-#else
+-#error "Don't know how to read ucred on this platform"
+-#endif
+-
+ int
+ wl_os_dupfd_cloexec(int fd, int minfd)
+ {
+@@ -143,120 +77,3 @@ wl_os_dupfd_cloexec(int fd, int minfd)
+ 	newfd = wl_fcntl(fd, F_DUPFD, minfd);
+ 	return set_cloexec_or_close(newfd);
+ }
+-
+-static ssize_t
+-recvmsg_cloexec_fallback(int sockfd, struct msghdr *msg, int flags)
+-{
+-	ssize_t len;
+-	struct cmsghdr *cmsg;
+-	unsigned char *data;
+-	int *fd;
+-	int *end;
+-
+-	len = wl_recvmsg(sockfd, msg, flags);
+-	if (len == -1)
+-		return -1;
+-
+-	if (!msg->msg_control || msg->msg_controllen == 0)
+-		return len;
+-
+-	cmsg = CMSG_FIRSTHDR(msg);
+-	for (; cmsg != NULL; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+-		if (cmsg->cmsg_level != SOL_SOCKET ||
+-		    cmsg->cmsg_type != SCM_RIGHTS)
+-			continue;
+-
+-		data = CMSG_DATA(cmsg);
+-		end = (int *)(data + cmsg->cmsg_len - CMSG_LEN(0));
+-		for (fd = (int *)data; fd < end; ++fd)
+-			*fd = set_cloexec_or_close(*fd);
+-	}
+-
+-	return len;
+-}
+-
+-ssize_t
+-wl_os_recvmsg_cloexec(int sockfd, struct msghdr *msg, int flags)
+-{
+-#if HAVE_BROKEN_MSG_CMSG_CLOEXEC
+-	/*
+-	 * FreeBSD had a broken implementation of MSG_CMSG_CLOEXEC between 2015
+-	 * and 2021, so we have to use the non-MSG_CMSG_CLOEXEC fallback
+-	 * directly when compiling against a version that does not include the
+-	 * fix (https://cgit.freebsd.org/src/commit/?id=6ceacebdf52211).
+-	 */
+-#pragma message("Using fallback directly since MSG_CMSG_CLOEXEC is broken.")
+-#else
+-	ssize_t len;
+-
+-	len = wl_recvmsg(sockfd, msg, flags | MSG_CMSG_CLOEXEC);
+-	if (len >= 0)
+-		return len;
+-	if (errno != EINVAL)
+-		return -1;
+-#endif
+-	return recvmsg_cloexec_fallback(sockfd, msg, flags);
+-}
+-
+-int
+-wl_os_epoll_create_cloexec(void)
+-{
+-	int fd;
+-
+-#ifdef EPOLL_CLOEXEC
+-	fd = wl_epoll_create1(EPOLL_CLOEXEC);
+-	if (fd >= 0)
+-		return fd;
+-	if (errno != EINVAL)
+-		return -1;
+-#endif
+-
+-	fd = epoll_create(1);
+-	return set_cloexec_or_close(fd);
+-}
+-
+-int
+-wl_os_accept_cloexec(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+-{
+-	int fd;
+-
+-#ifdef HAVE_ACCEPT4
+-	fd = accept4(sockfd, addr, addrlen, SOCK_CLOEXEC);
+-	if (fd >= 0)
+-		return fd;
+-	if (errno != ENOSYS)
+-		return -1;
+-#endif
+-
+-	fd = accept(sockfd, addr, addrlen);
+-	return set_cloexec_or_close(fd);
+-}
+-
+-/*
+- * Fallback function for operating systems that don't implement
+- * mremap(MREMAP_MAYMOVE).
+- */
+-void *
+-wl_os_mremap_maymove(int fd, void *old_data, ssize_t *old_size,
+-		     ssize_t new_size, int prot, int flags)
+-{
+-	void *result;
+-
+-	/* Make sure any pending write is flushed. */
+-	if (msync(old_data, *old_size, MS_SYNC) != 0)
+-		return MAP_FAILED;
+-
+-	/* We could try mapping a new block immediately after the current one
+-	 * with MAP_FIXED, however that is not guaranteed to work and breaks
+-	 * on CHERI-enabled architectures since the data pointer will still
+-	 * have the bounds of the previous allocation.
+-	 */
+-	result = mmap(NULL, new_size, prot, flags, fd, 0);
+-	if (result == MAP_FAILED)
+-		return MAP_FAILED;
+-
+-	if (munmap(old_data, *old_size) == 0)
+-		*old_size = 0;
+-
+-	return result;
+-}
+diff --git a/src/wayland-os.h b/src/wayland-os.h
+index 068fd2f..8daf83f 100644
+--- a/src/wayland-os.h
++++ b/src/wayland-os.h
+@@ -27,50 +27,8 @@
+ #define WAYLAND_OS_H
+ 
+ #include <sys/types.h>
+-#include <sys/socket.h>
+-
+-int
+-wl_os_socket_cloexec(int domain, int type, int protocol);
+-
+-int
+-wl_os_socket_peercred(int sockfd, uid_t *uid, gid_t *gid, pid_t *pid);
+ 
+ int
+ wl_os_dupfd_cloexec(int fd, int minfd);
+ 
+-ssize_t
+-wl_os_recvmsg_cloexec(int sockfd, struct msghdr *msg, int flags);
+-
+-int
+-wl_os_epoll_create_cloexec(void);
+-
+-int
+-wl_os_accept_cloexec(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+-
+-void *
+-wl_os_mremap_maymove(int fd, void *old_data, ssize_t *old_size,
+-		     ssize_t new_size, int prot, int flags);
+-
+-
+-/*
+- * The following are for wayland-os.c and the unit tests.
+- * Do not use them elsewhere.
+- */
+-
+-#ifdef __linux__
+-
+-#ifndef SOCK_CLOEXEC
+-#define SOCK_CLOEXEC 02000000
+-#endif
+-
+-#ifndef F_DUPFD_CLOEXEC
+-#define F_DUPFD_CLOEXEC 1030
+-#endif
+-
+-#ifndef MSG_CMSG_CLOEXEC
+-#define MSG_CMSG_CLOEXEC 0x40000000
+-#endif
+-
+-#endif /* __linux__ */
+-
+ #endif
