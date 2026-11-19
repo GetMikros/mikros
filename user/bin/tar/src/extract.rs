@@ -1,6 +1,6 @@
-//! Extracting a tar archive (MIKSPEC-0098.R57) into a folder and only
+//! Extracting a tar archive (MIKSPEC-0098.R65) into a folder and only
 //! into it (MIKSPEC-0098.R60), within the space of its volume
-//! (MIKSPEC-0098.R61). Each entry is checked by `inside` before anything
+//! (MIKSPEC-0098.R67). Each entry is checked by `inside` before anything
 //! is written for it; refused entries are named and skipped. Folders get
 //! their mode and time at the end, so that what is extracted into them
 //! does not change their time.

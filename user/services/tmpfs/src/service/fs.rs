@@ -101,8 +101,8 @@ pub fn error(e: crate::memfs::Error) -> Error {
 }
 
 /// The time now, in nanoseconds since 1970 in UTC, from the time page
-/// (MIKSPEC-0054.R9), or 0, an unknown time, while tmpfs, which starts
-/// before the time service, has none.
+/// (MIKSPEC-0054.R9, MIKSPEC-0050.R54), or 0, an unknown time, while
+/// tmpfs, which starts before the time service, has none.
 pub fn now() -> i64 {
     let page = TIME_PAGE.load(Ordering::Acquire);
     if page == 0 {

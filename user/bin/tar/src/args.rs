@@ -1,4 +1,4 @@
-//! What tar takes (MIKSPEC-0098.R57), which of its three modes a run
+//! What tar takes (MIKSPEC-0098.R65), which of its three modes a run
 //! asks for, and which entries it takes: those named, or every one, less
 //! those that `--exclude` leaves out.
 

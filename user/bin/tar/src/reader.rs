@@ -1,8 +1,8 @@
 //! Reading a tar archive entry by entry, with gzip found by itself
-//! (MIKSPEC-0098.R57): pax extended and global headers and GNU long
+//! (MIKSPEC-0098.R65): pax extended and global headers and GNU long
 //! names and links apply to the entries they come before. When the
 //! reader is `limited`, as it is for extraction, it refuses those headers
-//! when they are longer than 1 MiB (MIKSPEC-0098.R61), with the entry
+//! when they are longer than 1 MiB (MIKSPEC-0098.R67), with the entry
 //! they come before, without reading them.
 
 use crate::header::{self, BLOCK, Block, Entry, LONGEST, Pax};

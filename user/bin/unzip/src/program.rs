@@ -1,7 +1,7 @@
 //! unzip on Mikros: it reads the archive and writes the files through
 //! the standard library, and asks the node connection of the folder that
 //! receives the entries for the space of its volume with
-//! `QueryFilesystem` (MIKSPEC-0098.R33, MIKSPEC-0098.R61).
+//! `QueryFilesystem` (MIKSPEC-0098.R33, MIKSPEC-0098.R67).
 
 use crate::args::{self, COMMAND, Mode};
 use crate::central::{self, Record};

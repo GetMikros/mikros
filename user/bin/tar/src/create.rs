@@ -1,4 +1,4 @@
-//! Creating a pax archive (MIKSPEC-0098.R57) from files, folders, links
+//! Creating a pax archive (MIKSPEC-0098.R65) from files, folders, links
 //! and hard links, read through the standard library: folders with what
 //! they hold, in the order of names, links as links, and each further
 //! name of a file as a hard link to the first. Each entry keeps its

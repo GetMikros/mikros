@@ -1,5 +1,5 @@
 //! Extracting only into the target folder (MIKSPEC-0098.R60) and within
-//! the space of its volume (MIKSPEC-0098.R61).
+//! the space of its volume (MIKSPEC-0098.R67).
 //!
 //! An entry's name is split into parts, and refused when it is absolute
 //! or has a `..` part. The parts are then resolved from the folder, one

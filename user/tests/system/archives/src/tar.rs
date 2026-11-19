@@ -1,4 +1,4 @@
-//! The checks of tar (MIKSPEC-0098.R57, MIKSPEC-0098.R60).
+//! The checks of tar (MIKSPEC-0098.R65, MIKSPEC-0098.R60).
 
 use crate::{Check, Failure, TAR, ensure, holds, run_in, scratch};
 

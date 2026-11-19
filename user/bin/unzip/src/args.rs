@@ -1,4 +1,4 @@
-//! What unzip takes (MIKSPEC-0098.R59), which of its modes a run asks
+//! What unzip takes (MIKSPEC-0098.R66), which of its modes a run asks
 //! for, and which entries it takes: those that the names given match, as
 //! wildcard patterns, or every one, less those that `-x` matches.
 

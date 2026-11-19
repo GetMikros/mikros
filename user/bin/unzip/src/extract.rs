@@ -1,6 +1,6 @@
-//! Extracting the entries of a zip archive (MIKSPEC-0098.R59) into a
+//! Extracting the entries of a zip archive (MIKSPEC-0098.R66) into a
 //! folder and only into it (MIKSPEC-0098.R60), within the space of its
-//! volume (MIKSPEC-0098.R61): an archive whose entries overlap is
+//! volume (MIKSPEC-0098.R67): an archive whose entries overlap is
 //! refused, and so is one whose entries add up to more than the volume
 //! can take, before anything is written. Each entry is checked by
 //! `inside` before anything is written for it. Folders get their mode

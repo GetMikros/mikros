@@ -1,5 +1,5 @@
 //! The central directory of a zip archive, which zip and unzip both
-//! read (MIKSPEC-0098.R58, MIKSPEC-0098.R59): its end record, with the
+//! read (MIKSPEC-0098.R58, MIKSPEC-0098.R66): its end record, with the
 //! ZIP64 ones where they are, and the record of each entry, with the
 //! sizes and offset of its ZIP64 extra field and the modified time of
 //! its extended timestamp; and the times of MS-DOS, in local time, that

@@ -1,4 +1,4 @@
-//! What `unzip -l` writes (MIKSPEC-0098.R59): each entry's size,
+//! What `unzip -l` writes (MIKSPEC-0098.R66): each entry's size,
 //! modified time and name in columns, or with `--json` an array of
 //! objects.
 

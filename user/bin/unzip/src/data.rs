@@ -1,8 +1,8 @@
-//! The data of an entry (MIKSPEC-0098.R59): found after its local
+//! The data of an entry (MIKSPEC-0098.R66): found after its local
 //! header, read stored or inflated and no further than its compressed
 //! size, with its CRC-32 counted as it is read; and the check that the
 //! entries' data overlap neither one another nor the central directory
-//! (MIKSPEC-0098.R61).
+//! (MIKSPEC-0098.R67).
 
 use crate::central::{self, DEFLATED, Directory, ENCRYPTED, LOCAL, Record, STORED};
 use flate2::read::DeflateDecoder;

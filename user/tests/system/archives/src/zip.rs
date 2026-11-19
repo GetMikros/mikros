@@ -1,4 +1,4 @@
-//! The checks of zip and unzip (MIKSPEC-0098.R58, MIKSPEC-0098.R59,
+//! The checks of zip and unzip (MIKSPEC-0098.R58, MIKSPEC-0098.R66,
 //! MIKSPEC-0098.R60).
 
 use crate::{Check, Failure, UNZIP, ZIP, ensure, holds, run_in, scratch};

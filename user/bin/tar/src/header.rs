@@ -1,4 +1,4 @@
-//! The headers of tar archives (MIKSPEC-0098.R57): reading the blocks
+//! The headers of tar archives (MIKSPEC-0098.R65): reading the blocks
 //! of ustar, pax and GNU archives, and of older ones without a magic
 //! number, and writing those of pax archives, a ustar header after a pax
 //! extended header for what does not fit it.
@@ -8,7 +8,7 @@ pub const BLOCK: usize = 512;
 /// How many blocks make a record, which the archive is padded to.
 pub const RECORD: usize = 20;
 /// The longest pax extended header or GNU long name or long link that
-/// extraction takes (MIKSPEC-0098.R61).
+/// extraction takes (MIKSPEC-0098.R67).
 pub const LONGEST: u64 = 1 << 20;
 
 /// What an entry is.

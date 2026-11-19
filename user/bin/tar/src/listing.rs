@@ -1,4 +1,4 @@
-//! What `tar -t` writes (MIKSPEC-0098.R57): the names of the entries,
+//! What `tar -t` writes (MIKSPEC-0098.R65): the names of the entries,
 //! with `-v` long lines of each entry's type, size, modified time and
 //! name, and with `--json` an array of objects.
 
