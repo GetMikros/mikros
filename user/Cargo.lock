@@ -298,6 +298,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cut"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+]
+
+[[package]]
 name = "date"
 version = "0.0.0"
 dependencies = [

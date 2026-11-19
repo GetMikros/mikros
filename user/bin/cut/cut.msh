@@ -1,0 +1,14 @@
+# What `cut` takes, for msh's completion and colours. The command
+# answers completion itself, from the same tables.
+extern cut(
+    ...file: file "the files to cut, or - for standard input",
+    --bytes(-b): string "select the bytes of the list",
+    --characters(-c): string "select the characters of the list",
+    --fields(-f): string "select the fields of the list",
+    --delimiter(-d): string "the character between fields, a tab when absent",
+    --only-delimited(-s): bool "leave out lines without the delimiter",
+    --complement: bool "select what the list does not",
+    --output-delimiter: string "write this between the fields or ranges written",
+    --help: bool "show how to use the command and exit",
+    --color: [auto always never] "colour the output: auto, always or never"
+) complete
