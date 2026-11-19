@@ -187,6 +187,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         ],
     )?;
     println!("built    {}", freetype.install.display());
+    let wayland = crate::wayland::build()?;
+    println!("built    {}", wayland.library.display());
     let fonts = crate::fonts::fetch()?;
     println!("ok       {}", fonts.ttf.display());
     let mut first_boot_image = None;
@@ -245,7 +247,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // The services that need the root file system, and what they
             // load, are only in the whole system, so that the service
             // manager starts them once the root is available.
-            let login = login_members(kind, &xkbcommon, &freetype, &keymaps)?;
+            let login = login_members(kind, &xkbcommon, &freetype, &keymaps, &wayland.library)?;
             let whole: Vec<(&str, &Path)> = early
                 .iter()
                 .chain(&login)
@@ -316,6 +318,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", handles_c.display());
+            let wayland_c = c_build(
+                "wayland-c",
+                &["user/tests/wayland-c/wayland.c"],
+                Linking::Dynamic,
+                &[
+                    format!("-I{}", wayland.install.join("include").display()),
+                    wayland.library.display().to_string(),
+                ],
+            )?;
+            println!("built    {}", wayland_c.display());
             let global_check = crate::rust_std::build("global-check", kind)?;
             let forge_probe = crate::rust_std::build("forge-probe", kind)?;
             let forge_manifest =
@@ -478,6 +490,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ),
                     ("system/bin/not-a-program", &spawn_c.join("not-a-program")),
                     ("system/libraries/ld-mikros.dlib", dynamic_linker.as_path()),
+                    (
+                        "system/libraries/libwayland.dlib",
+                        wayland.library.as_path(),
+                    ),
+                    ("system/bin/wayland-c", wayland_c.as_path()),
                     ("system/bin/library-user", library_user.as_path()),
                     ("system/libraries/libgreet.1.dlib", greet.as_path()),
                     ("system/share/decoy/libgreet.1.dlib", decoy.as_path()),
@@ -1848,7 +1865,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let sessions_manifest = "system/services/system.sessionmgr/service.yaml";
             let console_fonts =
                 ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"].map(|f| fonts.ttf.join(f));
-            let login = login_members(kind, &xkbcommon, &freetype, &keymaps)?;
+            let login = login_members(kind, &xkbcommon, &freetype, &keymaps, &wayland.library)?;
             let first_boot: Vec<(&str, &Path)> = members
                 .iter()
                 .copied()
@@ -1971,7 +1988,8 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
 /// needs: the components that only the system image holds, among them
 /// the accounts, terminal and session services, the text console, the
 /// setup program and the user's shell msh, then the command-line
-/// utilities, and the dynamic linker, libraries and keymaps they load.
+/// utilities, the dynamic linker, libraries and keymaps they load, and the
+/// Wayland client library.
 /// The fonts and the basic display driver, which the device manager
 /// must find in the boot image, are among the other members.
 fn login_members(
@@ -1979,6 +1997,7 @@ fn login_members(
     xkbcommon: &crate::ports::Built,
     freetype: &crate::ports::Built,
     keymaps: &crate::ports::Built,
+    wayland: &Path,
 ) -> Result<Vec<(String, PathBuf)>> {
     let mut members = Vec::new();
     for component in crate::components::all()? {
@@ -1999,6 +2018,10 @@ fn login_members(
         (
             "system/libraries/libxkbcommon.0.dlib".into(),
             xkbcommon.install.join("libraries/libxkbcommon.0.13.2.dlib"),
+        ),
+        (
+            format!("system/libraries/{}", crate::wayland::LIBRARY),
+            wayland.to_path_buf(),
         ),
     ]);
     let keymap_data = keymaps.install.join("share/xkeyboard-config-2");

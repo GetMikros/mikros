@@ -14,7 +14,8 @@
 //! `/system/bin/hello-std`, a Rust program that uses the standard library,
 //! with a stream as their standard output, and checks what they print,
 //! runs `/system/bin/memfd-c` and `/system/bin/handles-c`, which check
-//! memory, channel and handle descriptors,
+//! memory, channel and handle descriptors, and `/system/bin/wayland-c`,
+//! which checks libwayland.dlib,
 //! runs `/system/bin/msh-check`, which runs msh's scripts and checks what
 //! they do, and reads more than the process manager's small heap blocks hold of
 //! `/system/bin/hello` with one `Read`.
@@ -97,6 +98,9 @@ const RAW_SYSCALL: &str = "/system/bin/raw-syscall";
 const MEMFD_C: &str = "/system/bin/memfd-c";
 /// A static C program that checks channel and handle descriptors.
 const HANDLES_C: &str = "/system/bin/handles-c";
+/// A dynamic C program that checks libwayland.dlib against a compositor
+/// of its own on a channel.
+const WAYLAND_C: &str = "/system/bin/wayland-c";
 const APP_RAW_SYSCALL: &str = "/apps/test/bin/raw-syscall";
 /// A Rust program that starts processes with `std::process::Command`.
 const SPAWN_STD: &str = "/system/bin/spawn-std";
@@ -1014,6 +1018,14 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             mikros_rt::log!(Error, "launcher probe: handles-c exited with {code:?}");
         }
         check("using channel and handle descriptors in C", code == Some(0))?;
+        let (_, code) = run_c(l, WAYLAND_C).await;
+        if code != Some(0) {
+            mikros_rt::log!(Error, "launcher probe: wayland-c exited with {code:?}");
+        }
+        check(
+            "talking Wayland over a channel with libwayland",
+            code == Some(0),
+        )?;
         // The gate turns the instruction into a protection fault, which
         // ends the program with SEGV.
         let gated = spawn(l, &[], |r| {

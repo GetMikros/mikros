@@ -1,0 +1,107 @@
+//! The Wayland client library, `libwayland.dlib`, from the port in
+//! `user/ports/wayland`: the library of `wayland-scanner` and the static
+//! client library built for Mikros, linked into one shared library whose
+//! `DT_SONAME` is its file name in `/system/libraries`.
+//!
+//! The scanner that generates its protocol code runs on the build host
+//! and is built there first from the same patched source, since the
+//! build for Mikros needs a scanner of its own version.
+
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The library's file name in `/system/libraries`, which is its soname.
+pub const LIBRARY: &str = "libwayland.dlib";
+/// The static client library of the build for Mikros, in its build
+/// directory, which also holds the objects of the static libraries it
+/// uses, and which the shared library holds.
+const ARCHIVE: &str = "src/libwayland-client.slib";
+
+/// What the build gives.
+pub struct Built {
+    /// The shared library.
+    pub library: PathBuf,
+    /// The directory its prefix, `/system`, was installed in, with the
+    /// headers.
+    pub install: PathBuf,
+}
+
+/// The patched source of the port.
+fn source(port: &crate::ports::Port) -> Result<PathBuf> {
+    let dir = crate::workspace_root()
+        .join("target/sources")
+        .join(&port.name);
+    let archive = dir.join(format!("{}.tar.xz", port.source));
+    let what = format!("{} source", port.name);
+    crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
+    crate::port::patched_source(&archive, &dir, &port.source, &port.dir.join("patches"), &[])
+}
+
+/// Builds `wayland-scanner` for the build host from `source`, and returns
+/// the directory of its pkg-config file.
+fn host_scanner(source: &Path) -> Result<PathBuf> {
+    let dir = crate::workspace_root().join("target/ported/wayland-scanner");
+    let (build, install) = (dir.join("build"), dir.join("install"));
+    if !build.join("build.ninja").exists() {
+        fs::create_dir_all(&dir)?;
+        crate::port::run(
+            crate::meson::command()?
+                .arg("setup")
+                .arg("--buildtype=release")
+                .arg(format!("--prefix={}", install.display()))
+                .arg("--libdir=lib")
+                .args([
+                    "-Dlibraries=false",
+                    "-Dscanner=true",
+                    "-Dtests=false",
+                    "-Ddocumentation=false",
+                    "-Ddtd_validation=false",
+                ])
+                .arg(&build)
+                .arg(source),
+        )
+        .context("configuring wayland-scanner for the build host")?;
+    }
+    crate::port::run(
+        crate::meson::command()?
+            .args(["install", "--quiet", "--only-changed", "-C"])
+            .arg(&build)
+            .stdout(std::process::Stdio::null()),
+    )
+    .context("building wayland-scanner for the build host")?;
+    Ok(install.join("lib/pkgconfig"))
+}
+
+/// Builds `libwayland.dlib`.
+pub fn build() -> Result<Built> {
+    let port = crate::ports::load("wayland")?;
+    let source = source(&port)?;
+    let scanner = host_scanner(&source)?;
+    let mut options = port.options.clone();
+    options.push(format!("-Dbuild.pkg_config_path={}", scanner.display()));
+    let install = crate::build_systems::meson(&port.name, &source, &options)?;
+    let build = crate::build_systems::build_dir(&port.name);
+    let library = build.join(LIBRARY);
+    link(&build, &library)?;
+    Ok(Built { library, install })
+}
+
+/// Links the static client library of the build in `build` into the
+/// shared library `library`, all of it, exported as its visibility says.
+fn link(build: &Path, library: &Path) -> Result<()> {
+    let cfg = crate::sysroot::dir().join("x86_64-unknown-mikros.cfg");
+    crate::port::run(
+        Command::new(crate::llvm::tool("clang"))
+            .arg(format!("--config={}", cfg.display()))
+            .arg("-shared")
+            .arg(format!("-Wl,-soname,{LIBRARY}"))
+            .arg("-Wl,--whole-archive")
+            .arg(build.join(ARCHIVE))
+            .arg("-Wl,--no-whole-archive")
+            .arg("-o")
+            .arg(library),
+    )
+    .with_context(|| format!("linking {LIBRARY}"))
+}

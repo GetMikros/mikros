@@ -1,0 +1,173 @@
+diff --git a/meson.build b/meson.build
+index d31eaff..b7c37eb 100644
+--- a/meson.build
++++ b/meson.build
+@@ -70,9 +70,7 @@ config_h.set10('HAVE_BROKEN_MSG_CMSG_CLOEXEC', have_broken_msg_cmsg_cloexec)
+ 
+ if get_option('libraries')
+ 	# On Mikros only the client library is built, which needs neither
+-	# epoll, signalfd nor timerfd.
+-	ffi_dep = dependency('libffi')
+-
++	# epoll, signalfd and timerfd, nor libffi: it calls listeners directly.
+ 	decls = [
+ 		{ 'header': 'time.h', 'symbol': 'CLOCK_MONOTONIC' },
+ 	]
+diff --git a/src/connection.c b/src/connection.c
+index 52c4338..3752927 100644
+--- a/src/connection.c
++++ b/src/connection.c
+@@ -37,7 +37,6 @@
+ #include <unistd.h>
+ #include <sys/types.h>
+ #include <time.h>
+-#include <ffi.h>
+ #include <mikros/startup.h>
+ #include <mikros/syscalls.h>
+ 
+@@ -1195,10 +1194,28 @@ wl_closure_lookup_objects(struct wl_closure *closure, struct wl_map *objects)
+ 	return 0;
+ }
+ 
++/* Wayland's arguments are all of integer or pointer size, never floating
++ * point or aggregates, and listeners are never variadic. On the x86-64
++ * System V ABI, the only one of Mikros, a listener can therefore be called
++ * through a pointer to a function of WL_CLOSURE_MAX_ARGS + 2 uint64_t
++ * parameters: the first six go in registers and the others in 8-byte stack
++ * slots, where its own parameters would be, it reads its 32-bit ones from
++ * their low halves, and the caller removes the stack arguments, so that
++ * those it does not declare do no harm. This cast is not portable C: it is
++ * valid only for that ABI, which is why libffi is not needed. */
++#if !defined(__x86_64__) || defined(_WIN32)
++#error "listeners are called directly only on the x86-64 System V ABI"
++#endif
++
++typedef void (*listener_call_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
++_Static_assert(WL_CLOSURE_MAX_ARGS + 2 == 22,
++	       "listener_call_t takes WL_CLOSURE_MAX_ARGS + 2 arguments");
++
++/* The values of the count arguments of a closure, widened to 64 bits as
++ * the ABI passes them. */
+ static void
+-convert_arguments_to_ffi(const char *signature, uint32_t flags,
+-			 union wl_argument *args,
+-			 int count, ffi_type **ffi_types, void** ffi_args)
++convert_arguments(const char *signature, uint32_t flags,
++		  const union wl_argument *args, int count, uint64_t *values)
+ {
+ 	int i;
+ 	const char *sig_iter;
+@@ -1210,41 +1227,31 @@ convert_arguments_to_ffi(const char *signature, uint32_t flags,
+ 
+ 		switch(arg.type) {
+ 		case WL_ARG_INT:
+-			ffi_types[i] = &ffi_type_sint32;
+-			ffi_args[i] = &args[i].i;
++			values[i] = (uint64_t)(int64_t) args[i].i;
+ 			break;
+ 		case WL_ARG_UINT:
+-			ffi_types[i] = &ffi_type_uint32;
+-			ffi_args[i] = &args[i].u;
++			values[i] = args[i].u;
+ 			break;
+ 		case WL_ARG_FIXED:
+-			ffi_types[i] = &ffi_type_sint32;
+-			ffi_args[i] = &args[i].f;
++			values[i] = (uint64_t)(int64_t) args[i].f;
+ 			break;
+ 		case WL_ARG_STRING:
+-			ffi_types[i] = &ffi_type_pointer;
+-			ffi_args[i] = &args[i].s;
++			values[i] = (uintptr_t) args[i].s;
+ 			break;
+ 		case WL_ARG_OBJECT:
+-			ffi_types[i] = &ffi_type_pointer;
+-			ffi_args[i] = &args[i].o;
++			values[i] = (uintptr_t) args[i].o;
+ 			break;
+ 		case WL_ARG_NEW_ID:
+-			if (flags & WL_CLOSURE_INVOKE_CLIENT) {
+-				ffi_types[i] = &ffi_type_pointer;
+-				ffi_args[i] = &args[i].o;
+-			} else {
+-				ffi_types[i] = &ffi_type_uint32;
+-				ffi_args[i] = &args[i].n;
+-			}
++			if (flags & WL_CLOSURE_INVOKE_CLIENT)
++				values[i] = (uintptr_t) args[i].o;
++			else
++				values[i] = args[i].n;
+ 			break;
+ 		case WL_ARG_ARRAY:
+-			ffi_types[i] = &ffi_type_pointer;
+-			ffi_args[i] = &args[i].a;
++			values[i] = (uintptr_t) args[i].a;
+ 			break;
+ 		case WL_ARG_FD:
+-			ffi_types[i] = &ffi_type_sint32;
+-			ffi_args[i] = &args[i].h;
++			values[i] = (uint64_t)(int64_t) args[i].h;
+ 			break;
+ 		default:
+ 			wl_abort("unknown type\n");
+@@ -1258,23 +1265,17 @@ wl_closure_invoke(struct wl_closure *closure, uint32_t flags,
+ 		  struct wl_object *target, uint32_t opcode, void *data)
+ {
+ 	int count;
+-	ffi_cif cif;
+-	ffi_type *ffi_types[WL_CLOSURE_MAX_ARGS + 2];
+-	void * ffi_args[WL_CLOSURE_MAX_ARGS + 2];
++	uint64_t v[WL_CLOSURE_MAX_ARGS + 2] = { 0 };
+ 	void (* const *implementation)(void);
++	listener_call_t call;
+ 
+ 	count = arg_count_for_signature(closure->message->signature);
+ 
+-	ffi_types[0] = &ffi_type_pointer;
+-	ffi_args[0] = &data;
+-	ffi_types[1] = &ffi_type_pointer;
+-	ffi_args[1] = &target;
+-
+-	convert_arguments_to_ffi(closure->message->signature, flags, closure->args,
+-				 count, ffi_types + 2, ffi_args + 2);
++	v[0] = (uintptr_t) data;
++	v[1] = (uintptr_t) target;
+ 
+-	ffi_prep_cif(&cif, FFI_DEFAULT_ABI,
+-		     count + 2, &ffi_type_void, ffi_types);
++	convert_arguments(closure->message->signature, flags, closure->args,
++			  count, v + 2);
+ 
+ 	implementation = target->implementation;
+ 	if (!implementation) {
+@@ -1286,7 +1287,8 @@ wl_closure_invoke(struct wl_closure *closure, uint32_t flags,
+ 		wl_abort("listener function for opcode %u of %s is NULL\n",
+ 			 opcode, target->interface->name);
+ 	}
+-	ffi_call(&cif, implementation[opcode], NULL, ffi_args);
++	call = (listener_call_t)(void *) implementation[opcode];
++	call(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15], v[16], v[17], v[18], v[19], v[20], v[21]);
+ 
+ 	wl_closure_clear_fds(closure);
+ }
+diff --git a/src/meson.build b/src/meson.build
+index 06724c1..1fe2c8a 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -99,7 +99,7 @@ if get_option('libraries')
+ 			'connection.c',
+ 			'wayland-os.c'
+ 		],
+-		dependencies: [ ffi_dep, rt_dep ]
++		dependencies: [ rt_dep ]
+ 	)
+ 
+ 	wayland_private_dep = declare_dependency(
+@@ -172,7 +172,6 @@ if get_option('libraries')
+ 		# libwayland-client.so.0.x.y.
+ 		version: '.'.join(['0', wayland_version[1], wayland_version[2]]),
+ 		dependencies: [
+-			ffi_dep,
+ 			wayland_private_dep,
+ 			wayland_util_dep,
+ 			mathlib_dep,
