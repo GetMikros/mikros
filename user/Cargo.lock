@@ -1872,6 +1872,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtiogpu"
+version = "0.0.0"
+
+[[package]]
 name = "volumes"
 version = "0.0.0"
 dependencies = [

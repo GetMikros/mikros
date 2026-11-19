@@ -1,0 +1,10 @@
+# The manifest of the virtio-gpu driver, installed as
+# system/drivers/system.driver.virtiogpu/driver.yaml.
+name: virtiogpu
+binary: /system/drivers/system.driver.virtiogpu/virtiogpu
+match: [pci:v1af4d1050]
+kind: normal
+needs: [dma]
+# To ask the permission broker whether a client may own the display, and
+# to read the log that it shows while none does.
+permissions: [system.permissions.read, admin.logs.read]
