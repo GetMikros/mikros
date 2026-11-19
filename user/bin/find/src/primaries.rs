@@ -238,32 +238,12 @@ pub fn help() -> String {
     text
 }
 
-/// The type that msh's `extern` writes for `kind`.
-#[cfg(test)]
-fn declared(kind: Option<Kind>) -> String {
-    match kind {
-        None => "bool".into(),
-        Some(Kind::Int) => "int".into(),
-        Some(Kind::File) => "file".into(),
-        Some(Kind::Command) => "command".into(),
-        Some(Kind::Choice(words)) => format!("[{}]", words.join(" ")),
-        Some(_) => "string".into(),
-    }
-}
-
-/// The declaration for msh (MIKSPEC-0084.R67): that of `COMMAND`, with
-/// every primary as an option with only a short form.
+/// The declaration of find for msh: its options and paths, ending in
+/// `complete`, so that msh asks find itself for its primaries and their
+/// values (MIKSPEC-0084.R67, MIKSPEC-0084.R69).
 #[cfg(test)]
 pub fn declaration() -> String {
-    let items: Vec<String> = PRIMARIES
-        .iter()
-        .map(|p| {
-            let kind = declared(p.value.map(|(_, k)| k));
-            format!("-{}: {kind} \"{}\"", p.name, p.help)
-        })
-        .collect();
-    let end = format!(",\n    {}\n) complete\n", items.join(",\n    "));
-    COMMAND.declaration().replacen("\n) complete\n", &end, 1)
+    COMMAND.declaration()
 }
 
 static FILE_VALUE: Spec = Spec {
