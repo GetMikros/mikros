@@ -39,19 +39,20 @@ const F11: u32 = 0xFFC8;
 #[cfg(mikros_diag)]
 const SWITCH_VT_11: u32 = 0x1008_FE0B;
 
-/// The keysyms of F1, which with Ctrl and Alt shows text console 1, and
-/// of `XF86Switch_VT_1`, which xkb's PC layouts give it while Ctrl and Alt
-/// are held; those of F2 to F6 follow them.
+/// The keysyms of F1, which with Ctrl and Alt shows screen 1, and of
+/// `XF86Switch_VT_1`, which xkb's PC layouts give it while Ctrl and Alt
+/// are held; those of F2 to F7 follow them.
 const F1: u32 = 0xFFBE;
 const SWITCH_VT_1: u32 = 0x1008_FE01;
-/// The number of text consoles that keys show.
-const CONSOLES: u32 = 6;
+/// The number of screens that keys show: the desktop's, when one is
+/// installed, and those of the six text consoles.
+const SCREENS: u32 = 7;
 
-/// The text console, 1 to 6, that `keysym` shows with Ctrl and Alt.
-fn console_key(keysym: u32) -> Option<u8> {
+/// The screen, 1 to 7, that `keysym` shows with Ctrl and Alt.
+fn screen_key(keysym: u32) -> Option<u8> {
     [F1, SWITCH_VT_1]
         .into_iter()
-        .find_map(|first| keysym.checked_sub(first).filter(|&i| i < CONSOLES))
+        .find_map(|first| keysym.checked_sub(first).filter(|&i| i < SCREENS))
         .map(|i| i as u8 + 1)
 }
 
@@ -108,7 +109,7 @@ impl Keyboard {
         }
         if mods.ctrl
             && mods.alt
-            && let Some(number) = console_key(keysym)
+            && let Some(number) = screen_key(keysym)
         {
             return Pressed::Switch(number);
         }

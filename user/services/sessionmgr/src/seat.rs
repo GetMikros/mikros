@@ -1,31 +1,316 @@
-//! The seat: the display and the input devices that the session manager
-//! opens and gives to their owner through `Seat`, the text console or
-//! the compositor in greeter mode, with the screen that it shows. The
-//! console is not told of the desktop's screen yet, so a request to
-//! switch to another owner's screen is ignored.
+//! The seat: the displays and the input devices that the session manager
+//! opens and gives through `Seat` to their owner, the compositor while
+//! one runs and otherwise the text console, with the screen that it
+//! shows. Each connection is opened with a revocation event of its own;
+//! to change the owner, the session manager signals those events, which
+//! make the drivers close the connections, and opens and gives new ones
+//! to the new owner (MIKSPEC-0066.R2). Screens are numbered after the
+//! function keys: with a desktop installed, screen 1 is the desktop and
+//! screens 2 to 7 are the text consoles 1 to 6; otherwise screens 1 to 6
+//! are the text consoles (MIKSPEC-0066.R12, MIKSPEC-0057.R23).
 
 use crate::{SECOND, now};
 use alloc::collections::BTreeSet;
+use alloc::rc::Rc;
 use alloc::string::String;
-use core::future::{Future, poll_fn};
-use core::pin::pin;
-use core::task::Poll;
+use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
 use mikros_rt::exec::Reactor;
-use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::gpu::{
     Capabilities, Device as Gpu, DeviceAsyncClient as GpuClient, Display,
 };
 use mikros_rt::interfaces::mikros::input::{Device, Input, InputAsyncClient};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{SeatAsyncClient, SeatEvent};
+use mikros_rt::objects;
 
 const GPU: &str = "device.gpu";
 const INPUT: &str = "device.input";
-/// The screen that the console shows first, its first console.
-const FIRST_SCREEN: u8 = 1;
-/// How often the input devices are looked for.
+/// How often the devices are looked for, so that those added later, or
+/// again after their driver restarted, reach the owner.
 const POLL: i64 = SECOND;
+/// How long, and how often, a device is opened again while the
+/// connection of the previous owner is still being closed.
+const REOPEN_FOR: i64 = 2 * SECOND;
+const REOPEN_EVERY: i64 = SECOND / 20;
+/// The signal that revokes a connection, and the rights that a
+/// duplicate keeps.
+const SIGNALED: u32 = 1 << 3;
+const SAME_RIGHTS: u32 = 1 << 31;
 
+/// Who owns the seat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    Console,
+    Compositor,
+}
+
+impl Owner {
+    /// The owner's name in the log.
+    fn name(self) -> &'static str {
+        match self {
+            Owner::Console => "console",
+            Owner::Compositor => "compositor",
+        }
+    }
+}
+
+/// The seat and its owners.
+pub struct Seats {
+    directory: Rc<DirectoryAsyncClient>,
+    reactor: Reactor,
+    /// Whether a desktop is installed, which gives it screen 1.
+    desktop: bool,
+    console: Rc<SeatAsyncClient>,
+    compositor: RefCell<Option<Rc<SeatAsyncClient>>>,
+    owner: Cell<Owner>,
+    /// The revocation events of the connections given to the owner, and
+    /// the instances they are of.
+    leases: RefCell<Vec<OwnedHandle>>,
+    displays: RefCell<BTreeSet<String>>,
+    inputs: RefCell<BTreeSet<String>>,
+    /// Counts the changes of owner, so that giving devices to an earlier
+    /// owner stops.
+    generation: Cell<u64>,
+    /// Whether devices are being given, which happens once at a time.
+    giving: Cell<bool>,
+}
+
+impl Seats {
+    /// The seat of the text console `console`, its owner until a
+    /// compositor runs, on the screen of its console 1.
+    pub fn new(
+        directory: Rc<DirectoryAsyncClient>,
+        reactor: Reactor,
+        desktop: bool,
+        console: SeatAsyncClient,
+    ) -> Rc<Seats> {
+        let _ = console.set_screen(1 + u8::from(desktop));
+        Rc::new(Seats {
+            directory,
+            reactor,
+            desktop,
+            console: Rc::new(console),
+            compositor: RefCell::new(None),
+            owner: Cell::new(Owner::Console),
+            leases: RefCell::new(Vec::new()),
+            displays: RefCell::new(BTreeSet::new()),
+            inputs: RefCell::new(BTreeSet::new()),
+            generation: Cell::new(0),
+            giving: Cell::new(false),
+        })
+    }
+
+    fn seat(&self, owner: Owner) -> Option<Rc<SeatAsyncClient>> {
+        match owner {
+            Owner::Console => Some(self.console.clone()),
+            Owner::Compositor => self.compositor.borrow().clone(),
+        }
+    }
+
+    /// Makes `owner` the owner: revokes the connections of the previous
+    /// one, and gives `owner` new ones.
+    pub async fn give(&self, owner: Owner) {
+        for lease in self.leases.borrow_mut().drain(..) {
+            let _ = objects::signal(lease.raw(), 0, SIGNALED);
+        }
+        self.displays.borrow_mut().clear();
+        self.inputs.borrow_mut().clear();
+        self.owner.set(owner);
+        self.generation.set(self.generation.get() + 1);
+        mikros_rt::log!(Info, "sessionmgr: the seat's owner is the {}", owner.name());
+        self.hand_out().await;
+    }
+
+    /// Makes `seat` the compositor's, and the compositor the owner; or,
+    /// without one, the text console the owner on the screen of its
+    /// console 1.
+    pub async fn set_compositor(&self, seat: Option<Rc<SeatAsyncClient>>) {
+        match seat {
+            Some(seat) => {
+                *self.compositor.borrow_mut() = Some(seat);
+                self.give(Owner::Compositor).await;
+            }
+            None => {
+                *self.compositor.borrow_mut() = None;
+                if self.owner.get() == Owner::Compositor {
+                    self.give(Owner::Console).await;
+                    let _ = self.console.set_screen(self.console_screen(1));
+                }
+            }
+        }
+    }
+
+    /// The screen of text console `console`.
+    fn console_screen(&self, console: u8) -> u8 {
+        console + u8::from(self.desktop)
+    }
+
+    /// Switches to `screen`, ignoring one that does not exist.
+    pub async fn switch(&self, screen: u8) {
+        let first = self.console_screen(1);
+        if self.desktop && screen == 1 {
+            if self.compositor.borrow().is_none() {
+                mikros_rt::log!(Info, "sessionmgr: no desktop runs for screen 1");
+                return;
+            }
+            if self.owner.get() != Owner::Compositor {
+                self.give(Owner::Compositor).await;
+            }
+            return;
+        }
+        if !(first..first + 6).contains(&screen) {
+            mikros_rt::log!(Info, "sessionmgr: there is no screen {screen}");
+            return;
+        }
+        if self.owner.get() != Owner::Console {
+            self.give(Owner::Console).await;
+        }
+        let _ = self.console.set_screen(screen);
+    }
+
+    /// Opens the displays and input devices that the owner has not been
+    /// given yet, and gives them to it, until the owner changes.
+    async fn hand_out(&self) {
+        while self.giving.replace(true) {
+            let _ = self.reactor.sleep_until(now() + REOPEN_EVERY).await;
+        }
+        let generation = self.generation.get();
+        let owner = self.owner.get();
+        if let Some(seat) = self.seat(owner) {
+            self.hand_out_displays(&seat, generation).await;
+            self.hand_out_inputs(&seat, generation).await;
+        }
+        self.giving.set(false);
+    }
+
+    /// A revocation event, kept as a lease, and a duplicate for a driver.
+    fn lease(&self) -> Option<OwnedHandle> {
+        let event = objects::event(0).ok()?;
+        let copy = objects::duplicate(event.raw(), SAME_RIGHTS).ok()?;
+        self.leases.borrow_mut().push(event);
+        Some(copy)
+    }
+
+    /// Gives the owner the first display that it can open, which is the
+    /// one that the owners draw on.
+    async fn hand_out_displays(&self, seat: &SeatAsyncClient, generation: u64) {
+        for instance in instances(&self.directory, GPU).await {
+            if !self.displays.borrow().is_empty() {
+                return;
+            }
+            let Some(device) = connect::<Gpu>(&self.directory, GPU, &instance).await else {
+                continue;
+            };
+            let device = GpuClient::new(device, self.reactor.clone());
+            match device.get_info().await {
+                Ok(r) if r.info.capabilities.contains(Capabilities::DISPLAY) => {}
+                _ => continue,
+            }
+            let until = now() + REOPEN_FOR;
+            let display = loop {
+                if self.generation.get() != generation {
+                    return;
+                }
+                let (Ok((display, server)), Some(revoke)) = (endpoints::<Display>(), self.lease())
+                else {
+                    return;
+                };
+                match device.open_display(server, Some(revoke)).await {
+                    Ok(Ok(_)) => break Some(display),
+                    Ok(Err(Status::AlreadyExists)) if now() < until => {
+                        let _ = self.reactor.sleep_until(now() + REOPEN_EVERY).await;
+                    }
+                    other => {
+                        mikros_rt::log!(Error, "sessionmgr: opening {instance}: {other:?}");
+                        break None;
+                    }
+                }
+            };
+            let Some(display) = display else { continue };
+            if self.generation.get() != generation {
+                return;
+            }
+            match seat.add_display(instance.clone(), display) {
+                Ok(()) => mikros_rt::log!(
+                    Info,
+                    "sessionmgr: gave the {} the display",
+                    self.owner.get().name()
+                ),
+                Err(_) => mikros_rt::log!(Error, "sessionmgr: the owner took no display"),
+            }
+            self.displays.borrow_mut().insert(instance);
+        }
+    }
+
+    async fn hand_out_inputs(&self, seat: &SeatAsyncClient, generation: u64) {
+        for instance in instances(&self.directory, INPUT).await {
+            let name = instance.starts_with(|c: char| c.is_ascii_lowercase());
+            if !name || self.inputs.borrow().contains(&instance) {
+                continue;
+            }
+            let Some(input) = connect::<Input>(&self.directory, INPUT, &instance).await else {
+                continue;
+            };
+            let input = InputAsyncClient::new(input, self.reactor.clone());
+            let until = now() + REOPEN_FOR;
+            let device = loop {
+                if self.generation.get() != generation {
+                    return;
+                }
+                let (Ok((device, server)), Some(revoke)) = (endpoints::<Device>(), self.lease())
+                else {
+                    return;
+                };
+                match input.open(server, Some(revoke)).await {
+                    Ok(Ok(_)) => break Some(device),
+                    Ok(Err(Status::AlreadyExists)) if now() < until => {
+                        let _ = self.reactor.sleep_until(now() + REOPEN_EVERY).await;
+                    }
+                    other => {
+                        mikros_rt::log!(Error, "sessionmgr: opening {instance}: {other:?}");
+                        break None;
+                    }
+                }
+            };
+            let Some(device) = device else { continue };
+            if self.generation.get() != generation {
+                return;
+            }
+            if seat.add_input(instance.clone(), device, true).is_err() {
+                return;
+            }
+            self.inputs.borrow_mut().insert(instance);
+        }
+    }
+
+    /// Gives the owner the devices as they come, for as long as the
+    /// session manager runs.
+    pub async fn keep_giving(self: Rc<Self>) {
+        loop {
+            self.hand_out().await;
+            let _ = self.reactor.sleep_until(now() + POLL).await;
+        }
+    }
+
+    /// Switches screens as the owner of `seat` asks, until it closes it.
+    pub async fn switches(self: Rc<Self>, seat: Rc<SeatAsyncClient>) {
+        while let Ok(event) = seat.next_event().await {
+            if let SeatEvent::OnSwitchRequested(e) = event {
+                self.switch(e.screen).await;
+            }
+        }
+    }
+
+    /// The console's seat, for its requests to switch.
+    pub fn console(&self) -> Rc<SeatAsyncClient> {
+        self.console.clone()
+    }
+}
+
+/// A new connection to the instance `instance` of `service`.
 async fn connect<P>(
     directory: &DirectoryAsyncClient,
     service: &str,
@@ -38,116 +323,10 @@ async fn connect<P>(
     matches!(connected, Ok(Ok(_))).then_some(client)
 }
 
-async fn instances(directory: &DirectoryAsyncClient, service: &str) -> alloc::vec::Vec<String> {
+/// The instances of `service` now.
+async fn instances(directory: &DirectoryAsyncClient, service: &str) -> Vec<String> {
     match directory.list(service.into()).await {
         Ok(Ok(listed)) => listed.instances,
-        _ => alloc::vec::Vec::new(),
+        _ => Vec::new(),
     }
-}
-
-/// Opens the first display, once one is published, and gives it to
-/// `seat`. GPU devices without `DISPLAY`, such as a render device, are
-/// passed over.
-async fn display(
-    directory: &DirectoryAsyncClient,
-    reactor: &Reactor,
-    seat: &SeatAsyncClient,
-    owner: &str,
-) {
-    loop {
-        for instance in instances(directory, GPU).await {
-            let Some(device) = connect::<Gpu>(directory, GPU, &instance).await else {
-                continue;
-            };
-            let device = GpuClient::new(device, reactor.clone());
-            match device.get_info().await {
-                Ok(r) if r.info.capabilities.contains(Capabilities::DISPLAY) => {}
-                _ => continue,
-            }
-            let Ok((display, server)) = endpoints::<Display>() else {
-                continue;
-            };
-            match device.open_display(server, None).await {
-                Ok(Ok(_)) => {
-                    match seat.add_display(instance.clone(), display) {
-                        Ok(()) => mikros_rt::log!(Info, "sessionmgr: gave the {owner} the display"),
-                        Err(_) => mikros_rt::log!(Error, "sessionmgr: the {owner} took no display"),
-                    }
-                    return;
-                }
-                other => mikros_rt::log!(Error, "sessionmgr: opening {instance}: {other:?}"),
-            }
-        }
-        let _ = reactor.sleep_until(now() + POLL).await;
-    }
-}
-
-/// Opens every input device as it is published and gives it to `seat`,
-/// accepted, for as long as the owner runs. Each device is opened under
-/// its name, which starts with a letter: the device manager also
-/// registers it under its service ID, a number, and a device has one
-/// reader at a time.
-async fn inputs(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &SeatAsyncClient) {
-    let mut given = BTreeSet::new();
-    loop {
-        for instance in instances(directory, INPUT).await {
-            let name = instance.starts_with(|c: char| c.is_ascii_lowercase());
-            if !name || given.contains(&instance) {
-                continue;
-            }
-            let Some(input) = connect::<Input>(directory, INPUT, &instance).await else {
-                continue;
-            };
-            let input = InputAsyncClient::new(input, reactor.clone());
-            let Ok((device, server)) = endpoints::<Device>() else {
-                continue;
-            };
-            if !matches!(input.open(server, None).await, Ok(Ok(_))) {
-                mikros_rt::log!(Error, "sessionmgr: opening {instance} failed");
-                continue;
-            }
-            if seat.add_input(instance.clone(), device, true).is_err() {
-                return;
-            }
-            given.insert(instance);
-        }
-        let _ = reactor.sleep_until(now() + POLL).await;
-    }
-}
-
-/// Reads the owner's events until it closes the seat, ignoring a
-/// request to switch to a screen, which switching does not handle yet.
-async fn switches(seat: &SeatAsyncClient) {
-    while let Ok(event) = seat.next_event().await {
-        if let SeatEvent::OnSwitchRequested(e) = event {
-            mikros_rt::log!(Info, "sessionmgr: there is no screen {}", e.screen);
-        }
-    }
-}
-
-/// Gives `owner` the display, the screen to show and the input
-/// devices.
-pub async fn serve(
-    directory: &DirectoryAsyncClient,
-    reactor: &Reactor,
-    seat: SeatAsyncClient,
-    owner: &str,
-) {
-    display(directory, reactor, &seat, owner).await;
-    let _ = seat.set_screen(FIRST_SCREEN);
-    first(inputs(directory, reactor, &seat), switches(&seat)).await;
-}
-
-/// Completes when the first of `a` and `b` completes.
-async fn first<A: Future, B: Future>(a: A, b: B) {
-    let mut a = pin!(a);
-    let mut b = pin!(b);
-    poll_fn(|cx| {
-        if a.as_mut().poll(cx).is_ready() || b.as_mut().poll(cx).is_ready() {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await
 }

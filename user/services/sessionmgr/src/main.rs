@@ -170,7 +170,17 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         else {
             return;
         };
-        let Some(arguments) = spawn::block(&[CONSOLE], &[]) else {
+        // With a desktop installed, the console's screens follow the
+        // desktop's.
+        let desktop = match (&system, &config) {
+            (Some(system), Some(config)) => greeter::installed(system, config, &reactor).await,
+            _ => false,
+        };
+        let console_arguments: &[&str] = match desktop {
+            true => &[CONSOLE, "--desktop"],
+            false => &[CONSOLE],
+        };
+        let Some(arguments) = spawn::block(console_arguments, &[]) else {
             return;
         };
         let request = SpawnRequest {
@@ -212,11 +222,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 return;
             }
         }
-        let seat = SeatAsyncClient::new(seat, reactor.clone());
-        let desktop = match (&system, &config) {
-            (Some(system), Some(config)) => greeter::installed(system, config, &reactor).await,
-            _ => false,
-        };
+        let seats = seat::Seats::new(
+            directory.clone(),
+            reactor.clone(),
+            desktop,
+            SeatAsyncClient::new(seat, reactor.clone()),
+        );
+        spawner.spawn(seats.clone().switches(seats.console()));
+        spawner.spawn(seats.clone().keep_giving());
         let greeting = match desktop {
             true => connect_accounts(&directory, &reactor).await,
             false => None,
@@ -231,10 +244,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             // The compositor in greeter mode owns the seat while it runs,
             // and the console once the compositor failed.
             if let Some(accounts) = greeting {
-                greeter::run(d.clone(), l, Rc::new(accounts), r.clone(), s).await;
+                greeter::run(d, l, Rc::new(accounts), seats, r, s).await;
                 mikros_rt::log!(Error, "sessionmgr: the text console's login takes over");
             }
-            seat::serve(&d, &r, seat, "console").await
         });
         let login = ServerEnd::new(login_server.into_handle());
         login::serve(login, accounts, launcher, requests, reactor, spawner).await;

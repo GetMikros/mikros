@@ -8,7 +8,10 @@
 //! setup or of the user's session. It runs six such text consoles, each
 //! with its own login prompt, setup or session, and shows one at a time:
 //! Ctrl, Alt and F1 to F6 show the others, which keep their contents
-//! meanwhile. While no session runs on the console shown, the system log
+//! meanwhile. With a desktop installed, which the session manager says
+//! with the argument `--desktop`, screen 1 is the desktop's and the text
+//! consoles are screens 2 to 7: Ctrl, Alt and F1 ask the session manager
+//! to switch to the desktop, and F2 to F7 show the consoles. While no session runs on the console shown, the system log
 //! fills the rows above the login prompt or setup's terminal, and while
 //! Ctrl, Alt and F12 are held, the whole screen. In the diagnostic build,
 //! the system overview fills the screen while Ctrl, Alt and F11 are
@@ -71,6 +74,13 @@ struct Layout {
 }
 
 pub struct Console {
+    /// Whether a desktop is installed, whose screen is 1.
+    desktop: bool,
+    /// The `Seat` channel, for requests to switch to the desktop.
+    seat: RefCell<Option<Rc<SeatAsyncServer>>>,
+    /// The instance of the display drawn on, which is drawn on again when
+    /// the session manager gives it again.
+    display_instance: RefCell<Option<String>>,
     reactor: Reactor,
     spawner: Spawner,
     directory: DirectoryAsyncClient,
@@ -130,6 +140,20 @@ impl Console {
     /// The text console shown.
     fn vt(&self) -> &Rc<Vt> {
         &self.vts[self.shown.get()]
+    }
+
+    /// Shows `screen`: asks the session manager for the desktop's, and
+    /// shows a text console's itself.
+    fn switch_to_screen(&self, screen: u8) {
+        match (self.desktop, screen) {
+            (false, number) => self.switch_to(number),
+            (true, 1) => {
+                if let Some(seat) = self.seat.borrow().as_ref() {
+                    let _ = seat.server().send_on_switch_requested(1);
+                }
+            }
+            (true, number) => self.switch_to(number - 1),
+        }
     }
 
     /// Shows text console `number`, 1 to 6, as it was left, unless the
@@ -313,13 +337,19 @@ impl Console {
         }
     }
 
+    /// Draws on the display `display` of `instance`: the first one
+    /// given, or the same one given again after it was taken away.
     async fn add_display(
         self: Rc<Self>,
+        instance: String,
         display: ClientEnd<mikros_rt::interfaces::mikros::gpu::Display>,
     ) {
-        if self.renderer.borrow().is_some() {
+        let drawn_on = self.display_instance.borrow().clone();
+        if drawn_on.is_some_and(|drawn_on| drawn_on != instance) {
             return;
         }
+        *self.display_instance.borrow_mut() = Some(instance);
+        *self.renderer.borrow_mut() = None;
         let display = DisplayAsyncClient::new(display, self.reactor.clone());
         let renderer = match Renderer::new(display, process::current()).await {
             Ok(renderer) => renderer,
@@ -370,7 +400,9 @@ impl Console {
             );
             return;
         }
-        if self.keyboard.borrow().is_none() {
+        // A keyboard given again starts without held keys, whose releases
+        // went to the other owner.
+        {
             let names = xkb::Names {
                 layout: LAYOUT.into(),
                 ..Default::default()
@@ -436,7 +468,7 @@ impl Console {
                         );
                         self.deliver(route);
                     }
-                    Some(Pressed::Switch(number)) => self.switch_to(number),
+                    Some(Pressed::Switch(screen)) => self.switch_to_screen(screen),
                     Some(Pressed::LogView) | Some(Pressed::Nothing) | None => {}
                     #[cfg(mikros_diag)]
                     Some(Pressed::Overview) => {}
@@ -446,11 +478,16 @@ impl Console {
     }
 
     async fn serve_seat(self: Rc<Self>, seat: OwnedHandle) {
-        let server = SeatAsyncServer::new(ServerEnd::new(seat), self.reactor.clone());
+        let server = Rc::new(SeatAsyncServer::new(
+            ServerEnd::new(seat),
+            self.reactor.clone(),
+        ));
+        *self.seat.borrow_mut() = Some(server.clone());
         while let Ok(request) = server.next().await {
             match request {
-                SeatRequest::AddDisplay(SeatAddDisplayRequest { display, .. }) => {
-                    self.spawner.spawn(self.clone().add_display(display));
+                SeatRequest::AddDisplay(SeatAddDisplayRequest { instance, display }) => {
+                    self.spawner
+                        .spawn(self.clone().add_display(instance, display));
                 }
                 SeatRequest::AddInput(SeatAddInputRequest {
                     instance,
@@ -460,9 +497,11 @@ impl Console {
                     self.spawner
                         .spawn(self.clone().add_input(instance, device, accepted));
                 }
-                // No desktop is installed, so screens 1 to 6 are the
-                // consoles 1 to 6.
-                SeatRequest::SetScreen(screen) => self.switch_to(screen.screen),
+                // The desktop's screen is not the console's to show.
+                SeatRequest::SetScreen(screen) => match (self.desktop, screen.screen) {
+                    (true, 1) => {}
+                    (_, screen) => self.switch_to_screen(screen),
+                },
             }
         }
     }
@@ -496,6 +535,9 @@ pub fn main() {
     let reactor = executor.reactor().clone();
     let spawner = executor.spawner().clone();
     let console = Rc::new(Console {
+        desktop: std::env::args().skip(1).any(|a| a == "--desktop"),
+        seat: RefCell::new(None),
+        display_instance: RefCell::new(None),
         reactor: reactor.clone(),
         spawner: spawner.clone(),
         directory: DirectoryAsyncClient::new(ClientEnd::new(directory), reactor.clone()),

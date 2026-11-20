@@ -6,6 +6,7 @@
 //! and the input devices. When it has exited three times within 60
 //! seconds, the text console's login takes over until the next boot.
 
+use crate::seat::Seats;
 use crate::spawn::block;
 use crate::{SECOND, now};
 use alloc::collections::VecDeque;
@@ -119,6 +120,7 @@ pub async fn run(
     directory: Rc<DirectoryAsyncClient>,
     launcher: Rc<LauncherAsyncClient>,
     accounts: Rc<AccountsAsyncClient>,
+    seats: Rc<Seats>,
     reactor: Reactor,
     spawner: Spawner,
 ) {
@@ -168,14 +170,15 @@ pub async fn run(
             Info,
             "sessionmgr: started the compositor in greeter mode as pid {pid}"
         );
-        let seat = SeatAsyncClient::new(seat, reactor.clone());
-        let (d, r) = (directory.clone(), reactor.clone());
-        spawner.spawn(async move { crate::seat::serve(&d, &r, seat, "compositor").await });
+        let seat = Rc::new(SeatAsyncClient::new(seat, reactor.clone()));
+        spawner.spawn(seats.clone().switches(seat.clone()));
+        seats.set_compositor(Some(seat)).await;
         let login =
             LoginAsyncServer::new(ServerEnd::new(login_server.into_handle()), reactor.clone());
         let (d, a, r) = (directory.clone(), accounts.clone(), reactor.clone());
         spawner.spawn(async move { serve(login, &d, &a, &r).await });
         exited(&launcher, pid).await;
+        seats.set_compositor(None).await;
         let at = now();
         exits.push_back(at);
         while exits.front().is_some_and(|&t| at - t > EXIT_WINDOW) {
