@@ -1,0 +1,35 @@
+# SDL3, as libSDL3.dlib, the library that windowed programs reach their
+# windows, input and Vulkan surfaces through. It is built from the commit
+# of the `mikros` branch of the Mikros fork, GetMikros/SDL, whose commits
+# stand on the release-3.4.20 tag of upstream (MIKSPEC-0062.R9). The
+# branch's changes:
+# - the CMake build knows Mikros as a platform, whose C library has the
+#   pthread functions and no libpthread;
+# - the Wayland driver's check does not ask for EGL, which Mikros does not
+#   have, though for the libraries of cursor themes and EGL windows,
+#   which its libwayland has;
+# - Vulkan is offered on Mikros, with the loader libvulkan.dlib.
+# Only the Wayland video driver is built, with the dummy and offscreen
+# ones, and no audio but the dummy and disk drivers; libwayland and
+# xkbcommon are linked, not loaded when they are first used.
+
+[source]
+url = "https://github.com/GetMikros/SDL/archive/d6b20e95132d1d528796b991a3cf017eabe3fba9.tar.gz"
+sha256 = "d9b88777c271a563c3d423d65d4f3a1897ec2b1c0a165e8f833854df26857858"
+dir = "SDL-d6b20e95132d1d528796b991a3cf017eabe3fba9"
+
+[build]
+options = [
+    "-DSDL_SHARED=ON",
+    "-DSDL_STATIC=OFF",
+    "-DSDL_TESTS=OFF",
+    "-DSDL_TEST_LIBRARY=OFF",
+    "-DSDL_EXAMPLES=OFF",
+    "-DSDL_X11=OFF",
+    "-DSDL_WAYLAND=ON",
+    "-DSDL_WAYLAND_LIBDECOR=OFF",
+    "-DSDL_DEPS_SHARED=OFF",
+    "-DSDL_OPENGL=OFF",
+    "-DSDL_OPENGLES=OFF",
+    "-DSDL_KMSDRM=OFF",
+]

@@ -205,6 +205,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", mesa.display());
     let vulkan = crate::vulkan::loader()?;
     println!("built    {}", vulkan.display());
+    let sdl = crate::sdl::build()?;
+    println!("built    {}", sdl.display());
     let fonts = crate::fonts::fetch()?;
     println!("ok       {}", fonts.ttf.display());
     let mut first_boot_image = None;

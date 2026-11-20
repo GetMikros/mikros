@@ -30,6 +30,18 @@ const LOCALSTATEDIR: &str = "state";
 /// options `options`, and returns the directory its prefix was installed
 /// in.
 pub fn cmake(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
+    cmake_with_env(name, source, options, &[])
+}
+
+/// Builds the CMake project in `source` as `name`, as `cmake` does, with
+/// the environment variables `env` set for configuring it, such as
+/// those that point `pkg-config` at the sysroot.
+pub fn cmake_with_env(
+    name: &str,
+    source: &Path,
+    options: &[String],
+    env: &[(&str, &Path)],
+) -> Result<PathBuf> {
     crate::sysroot::build()?;
     let cmake = crate::cmake::build()?;
     let toolchain = crate::sysroot::cmake_toolchain_file();
@@ -47,6 +59,7 @@ pub fn cmake(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
         .arg(format!("-DCMAKE_INSTALL_SYSCONFDIR={SYSCONFDIR}"))
         .arg(format!("-DCMAKE_INSTALL_LOCALSTATEDIR={LOCALSTATEDIR}"))
         .args(options);
+    set_env(&mut configure, env);
     configured(
         name,
         &mut configure,
@@ -54,8 +67,11 @@ pub fn cmake(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
         source,
         &crate::cmake::patches_stamp(),
     )?;
-    crate::port::run(Command::new(&cmake).arg("--build").arg(&build))
-        .with_context(|| format!("building {name}"))?;
+    // Ninja may configure the project again, with the same environment.
+    let mut compile = Command::new(&cmake);
+    compile.arg("--build").arg(&build);
+    set_env(&mut compile, env);
+    crate::port::run(&mut compile).with_context(|| format!("building {name}"))?;
     crate::port::run(
         Command::new(&cmake)
             .arg("--install")
@@ -65,6 +81,17 @@ pub fn cmake(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
     )
     .with_context(|| format!("installing {name}"))?;
     Ok(staging.join(&PREFIX[1..]))
+}
+
+/// Sets `env` on `command`, and with it, drops the build host's
+/// `PKG_CONFIG_PATH`, which `pkg-config` would search before the
+/// directories that `env` names.
+fn set_env(command: &mut Command, env: &[(&str, &Path)]) {
+    if !env.is_empty() {
+        command
+            .env_remove("PKG_CONFIG_PATH")
+            .envs(env.iter().copied());
+    }
 }
 
 /// Builds the Meson project in `source` as `name`, with the further

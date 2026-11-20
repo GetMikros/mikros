@@ -43,6 +43,7 @@ mod root_disk;
 mod run;
 mod rust_std;
 mod scenario;
+mod sdl;
 mod secure_boot;
 mod setup;
 mod symbolize;
