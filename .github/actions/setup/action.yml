@@ -86,12 +86,13 @@ runs:
       id: llvm-restored
       shell: sh
       run: echo "deps=${{ hashFiles('target/llvm/build/.ninja_deps') }}" >> "$GITHUB_OUTPUT"
-    # LLVM's libraries for Mikros, from user/ports/llvm, take long to build
-    # too, so their build is kept the same way, with the sysroot it was
-    # built against and the build of the C++ runtimes, whose headers it
-    # holds: a sysroot made afresh would give every header a new time, and
-    # Ninja would compile all of it again. xtask updates the restored
-    # sysroot, rewriting only the files that changed.
+    # LLVM's libraries and Mesa for Mikros, from user/ports/llvm and
+    # user/ports/mesa, take long to build too, so their builds are kept
+    # the same way, with the sysroot they were built against and the build
+    # of the C++ runtimes, whose headers it holds: a sysroot made afresh
+    # would give every header a new time, and Ninja would compile all of
+    # them again. xtask updates the restored sysroot, rewriting only the
+    # files that changed.
     - name: Restore the build of LLVM for Mikros
       id: llvm-port
       uses: actions/cache/restore@v4
@@ -99,15 +100,16 @@ runs:
         path: |
           target/ported/llvm
           target/ported/llvm-runtimes
+          target/ported/mesa
           target/sysroot
-        key: llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'user/ports/llvm/**') }}-newest
+        key: llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'xtask/src/mesa.rs', 'user/ports/llvm/**', 'user/ports/mesa/**') }}-newest
         restore-keys: |
-          llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'user/ports/llvm/**') }}-
+          llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'xtask/src/mesa.rs', 'user/ports/llvm/**', 'user/ports/mesa/**') }}-
           llvm-port-
     - name: Note the restored build of LLVM for Mikros
       id: llvm-port-restored
       shell: sh
-      run: echo "deps=${{ hashFiles('target/ported/llvm/build/.ninja_deps') }}" >> "$GITHUB_OUTPUT"
+      run: echo "deps=${{ hashFiles('target/ported/llvm/build/.ninja_deps', 'target/ported/mesa/build/.ninja_deps') }}" >> "$GITHUB_OUTPUT"
     # The firmware, the Meson, CMake, musl and port downloads with their
     # patched sources, and the builds of CMake and musl. xtask extracts a
     # source again when its patches change, and Ninja and make rebuild
@@ -121,8 +123,9 @@ runs:
           target/meson
           target/cmake
           target/musl
+          target/glslang
           target/sources
-        key: tools-${{ hashFiles('xtask/src/firmware.rs', 'xtask/src/meson.rs', 'xtask/src/cmake.rs', 'xtask/src/musl.rs', 'xtask/src/ports.rs', 'tools/meson/patches/**', 'tools/cmake/patches/**', 'user/ports/**') }}
+        key: tools-${{ hashFiles('xtask/src/firmware.rs', 'xtask/src/meson.rs', 'xtask/src/cmake.rs', 'xtask/src/musl.rs', 'xtask/src/glslang.rs', 'xtask/src/ports.rs', 'tools/meson/patches/**', 'tools/cmake/patches/**', 'user/ports/**') }}
         restore-keys: tools-
     # The target directories of every Rust build, and the standard library
     # that the programs with std build from the patched copy in

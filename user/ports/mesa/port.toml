@@ -1,0 +1,46 @@
+# Mesa, for lavapipe, the CPU Vulkan driver, as libvulkan_lvp.dlib with
+# its driver manifest. Nothing else of Mesa is built: no OpenGL, EGL,
+# GBM or window systems yet. It is built against libLLVM.dlib of the
+# llvm port, which Meson finds through LLVM's CMake package, without
+# RTTI as LLVM is, and glslang compiles its shaders on the build host.
+# The patches:
+# - 0001: the build names Mikros's libraries lib<name>.dlib, defines
+#   _GNU_SOURCE there, as Mikros's C library needs for the functions
+#   that Mesa uses, and finds LLVM through its CMake package, since
+#   Mikros has no llvm-config for it.
+# - 0002: Mikros is a POSIX system for Mesa's checks of the operating
+#   system, takes its memory size from sysconf, and the DRM header takes
+#   ioctl numbers from <sys/ioctl.h>.
+
+[source]
+url = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"
+sha256 = "4e4e438eac7b840a9383988cbb7c08dad8041da544b9319fc26d319fa7348961"
+dir = "mesa-26.3.1"
+
+[build]
+options = [
+    "-Dplatforms=",
+    "-Dvulkan-drivers=swrast",
+    "-Dgallium-drivers=llvmpipe",
+    "-Dopengl=false",
+    "-Dgles1=disabled",
+    "-Dgles2=disabled",
+    "-Degl=disabled",
+    "-Dgbm=disabled",
+    "-Dglx=disabled",
+    "-Dllvm=enabled",
+    "-Dshared-llvm=enabled",
+    "-Dcpp_rtti=false",
+    "-Dshader-cache=disabled",
+    "-Dxmlconfig=disabled",
+    "-Dexpat=disabled",
+    "-Dzstd=disabled",
+    "-Dzlib=disabled",
+    "-Dvalgrind=disabled",
+    "-Dlibunwind=disabled",
+    "-Dlmsensors=disabled",
+    "-Dbuild-tests=false",
+    "-Dvulkan-layers=",
+    "-Dvideo-codecs=",
+    "-Dspirv-tools=disabled",
+]

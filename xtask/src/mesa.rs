@@ -1,0 +1,48 @@
+//! Mesa for Mikros, from the port in `user/ports/mesa`: lavapipe, the CPU
+//! Vulkan driver, as `libvulkan_lvp.dlib` with its driver manifest,
+//! built against `libLLVM.dlib` of the llvm port (`crate::llvm_port`),
+//! which Meson finds through LLVM's CMake package, and with the shaders
+//! that Mesa builds into it compiled by glslang on the build host
+//! (`crate::glslang`).
+
+use anyhow::Result;
+use std::path::PathBuf;
+
+/// The driver's file name in `/system/libraries`, which is its soname.
+pub const DRIVER: &str = "libvulkan_lvp.dlib";
+/// Its driver manifest, relative to the prefix, in the directory of
+/// Vulkan driver manifests.
+pub const MANIFEST: &str = "share/vulkan/icd.d/lvp_icd.x86_64.json";
+
+/// The patched source of the port.
+fn source(port: &crate::ports::Port) -> Result<PathBuf> {
+    let dir = crate::workspace_root()
+        .join("target/sources")
+        .join(&port.name);
+    let archive = dir.join(format!("{}.tar.xz", port.source));
+    let what = format!("{} source", port.name);
+    crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
+    crate::port::patched_source(&archive, &dir, &port.source, &port.dir.join("patches"), &[])
+}
+
+/// Builds Mesa, and returns the directory its prefix, `/system`, was
+/// installed in.
+pub fn build() -> Result<PathBuf> {
+    let port = crate::ports::load("mesa")?;
+    let source = source(&port)?;
+    let llvm = crate::llvm_port::build_library()?;
+    let mut options = port.options.clone();
+    options.push(format!("-Dcmake_prefix_path={}", llvm.display()));
+    options.push(format!(
+        "--native-file={}",
+        crate::glslang::native_file()?.display()
+    ));
+    let install = crate::build_systems::meson(&port.name, &source, &options)?;
+    crate::build_systems::check_installed(
+        &install,
+        &[&format!("libraries/{DRIVER}"), MANIFEST],
+        &[],
+    )?;
+    crate::build_systems::check_sonames(&install, &[DRIVER])?;
+    Ok(install)
+}

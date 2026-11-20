@@ -26,7 +26,7 @@ jobs:
             build-essential ca-certificates curl git \
             qemu-system-x86 gdb btrfs-progs exfatprogs \
             cmake ninja-build clang lld python3 zstd bison \
-            libexpat1-dev pkg-config
+            libexpat1-dev pkg-config python3-mako python3-packaging
       - uses: actions/checkout@v4
         with:
           # The commit checks look at every commit since the base branch.
@@ -82,6 +82,7 @@ jobs:
             target/meson
             target/cmake
             target/musl
+            target/glslang
             target/sources
           key: ${{ steps.setup.outputs.tools-key }}
       - name: Save the Rust builds
@@ -113,18 +114,19 @@ jobs:
         with:
           path: target/llvm
           key: llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}-${{ hashFiles('target/llvm/build/.ninja_deps') }}
-      # The build of LLVM for Mikros likewise, once libLLVM.dlib is
-      # installed, with the sysroot it was built against and the build of
-      # the C++ runtimes.
+      # The builds of LLVM and Mesa for Mikros likewise, once lavapipe is
+      # installed, with the sysroot they were built against and the build
+      # of the C++ runtimes.
       - name: Save the build of LLVM for Mikros
         if: >-
           always() &&
-          hashFiles('target/ported/llvm/install/system/lib/libLLVM.dlib') != '' &&
-          hashFiles('target/ported/llvm/build/.ninja_deps') != steps.setup.outputs.llvm-port-deps
+          hashFiles('target/ported/mesa/install/system/libraries/libvulkan_lvp.dlib') != '' &&
+          hashFiles('target/ported/llvm/build/.ninja_deps', 'target/ported/mesa/build/.ninja_deps') != steps.setup.outputs.llvm-port-deps
         uses: actions/cache/save@v4
         with:
           path: |
             target/ported/llvm
             target/ported/llvm-runtimes
+            target/ported/mesa
             target/sysroot
-          key: llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'user/ports/llvm/**') }}-${{ hashFiles('target/ported/llvm/build/.ninja_deps') }}
+          key: llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'xtask/src/mesa.rs', 'user/ports/llvm/**', 'user/ports/mesa/**') }}-${{ hashFiles('target/ported/llvm/build/.ninja_deps', 'target/ported/mesa/build/.ninja_deps') }}

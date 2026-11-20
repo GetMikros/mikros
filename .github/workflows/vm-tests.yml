@@ -27,7 +27,7 @@ jobs:
             build-essential ca-certificates curl git \
             qemu-system-x86 gdb btrfs-progs exfatprogs \
             cmake ninja-build clang lld python3 zstd bison \
-            libexpat1-dev pkg-config
+            libexpat1-dev pkg-config python3-mako python3-packaging
       - uses: actions/checkout@v4
       - name: Set up the build
         uses: ./.github/actions/setup
@@ -53,7 +53,7 @@ jobs:
             build-essential ca-certificates curl git \
             qemu-system-x86 gdb btrfs-progs exfatprogs \
             cmake ninja-build clang lld python3 zstd bison \
-            libexpat1-dev pkg-config
+            libexpat1-dev pkg-config python3-mako python3-packaging
       - uses: actions/checkout@v4
       - name: Set up the build
         uses: ./.github/actions/setup

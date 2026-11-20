@@ -1,0 +1,50 @@
+diff -ruN a/include/drm-uapi/drm.h b/include/drm-uapi/drm.h
+--- a/include/drm-uapi/drm.h
++++ b/include/drm-uapi/drm.h
+@@ -45,7 +45,7 @@
+ 
+ #include <stdint.h>
+ #include <sys/types.h>
+-#if defined(__GNU__)
++#if defined(__GNU__) || defined(__mikros__)
+ #include <sys/ioctl.h>
+ #else
+ #include <sys/ioccom.h>
+diff -ruN a/src/util/detect_os.h b/src/util/detect_os.h
+--- a/src/util/detect_os.h
++++ b/src/util/detect_os.h
+@@ -91,6 +91,12 @@
+ #define DETECT_OS_POSIX 1
+ #endif
+ 
++/* Mikros, whose C library has the POSIX interfaces that Mesa uses. */
++#if defined(__mikros__)
++#define DETECT_OS_MIKROS 1
++#define DETECT_OS_POSIX 1
++#endif
++
+ 
+ /*
+  * Make sure DETECT_OS_* are always defined, so that they can be used with #if
+@@ -146,5 +152,8 @@
+ #ifndef DETECT_OS_MANAGARM
+ #define DETECT_OS_MANAGARM 0
+ #endif
++#ifndef DETECT_OS_MIKROS
++#define DETECT_OS_MIKROS 0
++#endif
+ 
+ #endif /* DETECT_OS_H */
+diff -ruN a/src/util/os_misc.c b/src/util/os_misc.c
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -60,7 +60,8 @@
+ #  include <unistd.h>
+ #  include <android/log.h>
+ #  include <sys/system_properties.h>
+-#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
++#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM || \
++      DETECT_OS_MIKROS
+ #  include <unistd.h>
+ #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
+ #  include <sys/resource.h>
