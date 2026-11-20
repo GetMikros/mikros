@@ -1,0 +1,10 @@
+[package]
+name = "compositor"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }
