@@ -6,7 +6,7 @@ use std::sync::Mutex;
 /// The mock kernel's handle count is shared, so tests run one at a time.
 static SERIAL: Mutex<()> = Mutex::new(());
 
-fn serial() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -16,12 +16,12 @@ const HEADER: Header = Header {
     flags: 0,
 };
 
-fn owned(raw: u32) -> OwnedHandle {
+pub(crate) fn owned(raw: u32) -> OwnedHandle {
     // SAFETY: tests hand each new mock handle to exactly one owner.
     unsafe { OwnedHandle::from_raw(raw) }
 }
 
-fn everything() -> Everything {
+pub(crate) fn everything() -> Everything {
     Everything {
         a: 7,
         b: -2,
@@ -307,7 +307,7 @@ fn checks_and_reduces_handle_rights() {
     assert_eq!(mock::open_handles(), before + 1);
 }
 
-fn serve(server: CalcServer) {
+pub(crate) fn serve(server: CalcServer) {
     loop {
         match server.next(i64::MAX) {
             Ok(CalcRequest::Add(r, responder)) => {

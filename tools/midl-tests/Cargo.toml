@@ -6,4 +6,5 @@ license = "MPL-2.0"
 publish = false
 
 [build-dependencies]
+cc = "1"
 midlc = { path = "../midlc" }

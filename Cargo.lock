@@ -831,6 +831,7 @@ dependencies = [
 name = "midl-tests"
 version = "0.0.0"
 dependencies = [
+ "cc",
  "midlc",
 ]
 

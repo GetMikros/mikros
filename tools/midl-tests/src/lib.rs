@@ -1,5 +1,5 @@
-//! Tests of the Rust bindings that midlc generates, run on the host
-//! against a mock kernel.
+//! Tests of the Rust and C bindings that midlc generates, run on the
+//! host against a mock kernel.
 
 extern crate alloc;
 
@@ -10,5 +10,7 @@ pub mod midl {
     include!(concat!(env!("OUT_DIR"), "/midl.rs"));
 }
 
+#[cfg(test)]
+mod c_tests;
 #[cfg(test)]
 mod tests;
