@@ -32,6 +32,21 @@ fn main() {
     }
     let path = PathBuf::from(env::var("OUT_DIR").expect("cargo sets it")).join("protocols.rs");
     fs::write(path, out).expect("a writable output directory");
+    link_vulkan(&manifest);
+}
+
+/// Links the Vulkan loader, which `cargo xtask` builds as a port before
+/// the programs with std, on Mikros; the host builds only the tests.
+fn link_vulkan(manifest: &Path) {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("mikros") {
+        return;
+    }
+    let lib = manifest.join("../../../target/ported/vulkan-loader/install/system/libraries");
+    println!("cargo:rustc-link-search=native={}", lib.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        lib.join("libvulkan.dlib").display()
+    );
 }
 
 /// The protocol files in `dir`, sorted, or None when it does not exist.
