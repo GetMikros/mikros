@@ -375,3 +375,209 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         std::thread::yield_now();
     }
 }
+
+/// The system calls that the C bindings' runtime makes, as
+/// `c/mikros/syscalls.h` declares them, on the mock kernel.
+pub mod c {
+    use std::slice;
+
+    const INVALID_ARGS: i64 = -10;
+    const BUFFER_TOO_SMALL: i64 = -12;
+
+    fn status(result: Result<(), i32>) -> i64 {
+        result.map_or_else(i64::from, |()| 0)
+    }
+
+    /// The `len` items at `data`, which may be NULL when there are none.
+    ///
+    /// # Safety
+    ///
+    /// `data` must point at `len` items when `len` is not 0.
+    unsafe fn items<'a, T>(data: *const T, len: u64) -> &'a [T] {
+        match len {
+            0 => &[],
+            // SAFETY: the caller's pointer and length.
+            _ => unsafe { slice::from_raw_parts(data, len as usize) },
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn mikros_handle_close(handle: u32) -> i64 {
+        super::handle_close(handle);
+        0
+    }
+
+    /// # Safety
+    ///
+    /// `out` must be writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mikros_handle_replace(handle: u32, rights: u32, out: *mut u32) -> i64 {
+        match super::handle_replace(handle, rights) {
+            Ok(h) => {
+                // SAFETY: the caller's out pointer.
+                unsafe { *out = h };
+                0
+            }
+            Err(s) => i64::from(s),
+        }
+    }
+
+    /// The basic record only: the object type at 16 and the rights at 20.
+    ///
+    /// # Safety
+    ///
+    /// `buf` must have room for `len` bytes and `out_len` be writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mikros_object_get_info(
+        handle: u32,
+        topic: u32,
+        buf: *mut u8,
+        len: u64,
+        out_len: *mut u64,
+    ) -> i64 {
+        if topic != 1 || len < 24 {
+            return INVALID_ARGS;
+        }
+        let Some((kind, rights)) = super::handle_info(handle) else {
+            return i64::from(super::BAD_HANDLE);
+        };
+        // SAFETY: the caller's buffer has room for the record.
+        let record = unsafe { slice::from_raw_parts_mut(buf, 24) };
+        record.fill(0);
+        record[16..20].copy_from_slice(&kind.to_le_bytes());
+        record[20..24].copy_from_slice(&rights.to_le_bytes());
+        // SAFETY: the caller's out pointer.
+        unsafe { *out_len = 24 };
+        0
+    }
+
+    /// Waits until the channel is readable or its peer closed.
+    ///
+    /// # Safety
+    ///
+    /// `observed` must be writable.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mikros_object_wait_one(
+        handle: u32,
+        _signals: u32,
+        deadline: i64,
+        observed: *mut u32,
+    ) -> i64 {
+        // SAFETY: the caller's out pointer.
+        unsafe { *observed = 1 };
+        status(super::wait_readable(handle, deadline))
+    }
+
+    /// # Safety
+    ///
+    /// `bytes` and `handles` must point at `len` and `count` items.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mikros_channel_write(
+        channel: u32,
+        bytes: *const u8,
+        len: u64,
+        handles: *const u32,
+        count: u64,
+    ) -> i64 {
+        // SAFETY: the caller's pointers and lengths.
+        let (bytes, handles) = unsafe { (items(bytes, len), items(handles, count)) };
+        status(super::channel_write(channel, bytes, handles))
+    }
+
+    /// Copies a received message into the caller's buffers.
+    ///
+    /// # Safety
+    ///
+    /// The buffers must have room for their capacities and the out
+    /// pointers be writable.
+    unsafe fn copy_out(
+        (data, handles): (Vec<u8>, Vec<u32>),
+        bytes: *mut u8,
+        bytes_cap: u64,
+        handle_buf: *mut u32,
+        handles_cap: u64,
+        out_len: *mut u64,
+        out_count: *mut u64,
+    ) -> i64 {
+        if data.len() as u64 > bytes_cap || handles.len() as u64 > handles_cap {
+            handles.into_iter().for_each(super::handle_close);
+            return BUFFER_TOO_SMALL;
+        }
+        // SAFETY: the caller's buffers have room, as just checked.
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), bytes, data.len());
+            std::ptr::copy_nonoverlapping(handles.as_ptr(), handle_buf, handles.len());
+            *out_len = data.len() as u64;
+            *out_count = handles.len() as u64;
+        }
+        0
+    }
+
+    /// # Safety
+    ///
+    /// As for `copy_out`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mikros_channel_read(
+        channel: u32,
+        bytes: *mut u8,
+        bytes_cap: u64,
+        handles: *mut u32,
+        handles_cap: u64,
+        out_len: *mut u64,
+        out_count: *mut u64,
+    ) -> i64 {
+        match super::channel_read(channel) {
+            // SAFETY: the caller's buffers and out pointers.
+            Ok(message) => unsafe {
+                copy_out(
+                    message,
+                    bytes,
+                    bytes_cap,
+                    handles,
+                    handles_cap,
+                    out_len,
+                    out_count,
+                )
+            },
+            Err(s) => i64::from(s),
+        }
+    }
+
+    /// The call's arguments are eight words: the request's bytes and
+    /// their length, its handles and their count, and the buffers for the
+    /// reply's bytes and handles with their capacities. `out` gets the
+    /// reply's length and handle count.
+    ///
+    /// # Safety
+    ///
+    /// `args` must point at the eight words, which describe valid
+    /// buffers, and `out` at room for two.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mikros_channel_call(
+        channel: u32,
+        _options: u32,
+        deadline: i64,
+        args: *const u8,
+        out: *mut u8,
+    ) -> i64 {
+        // SAFETY: the caller's arguments, as the function says.
+        unsafe {
+            let a = slice::from_raw_parts(args.cast::<u64>(), 8);
+            let bytes = items(a[0] as *const u8, a[1]);
+            let handles = items(a[2] as *const u32, a[3]);
+            let out = out.cast::<u64>();
+            match super::channel_call(channel, bytes, handles, deadline) {
+                Ok(reply) => copy_out(
+                    reply,
+                    a[4] as *mut u8,
+                    a[5],
+                    a[6] as *mut u32,
+                    a[7],
+                    out,
+                    out.add(1),
+                ),
+                Err(s) => i64::from(s),
+            }
+        }
+    }
+}
