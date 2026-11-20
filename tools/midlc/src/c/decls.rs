@@ -74,6 +74,33 @@ impl Gen<'_> {
                 writeln!(out, "typedef {};\n", self.cdecl(ty, &self.own(&d.name))).unwrap();
             }
         }
+        // The prototypes first, since types may hold each other through
+        // pointers and vectors.
+        let optional = |d: &Decl| match d.kind {
+            DeclKind::Union { .. } => ", bool optional",
+            _ => "",
+        };
+        let names = compound
+            .iter()
+            .map(|d| (self.own(&d.name), optional(d)))
+            .chain(methods.iter().map(|s| (s.name.clone(), "")));
+        for (c, optional) in names {
+            writeln!(out, "static inline void {c}_encode(mikros_midl_encoder_t *e, uint32_t at, const {c} *v{optional});").unwrap();
+        }
+        if !compound.is_empty() || !methods.is_empty() {
+            out.push('\n');
+        }
+        for d in &compound {
+            match &d.kind {
+                DeclKind::Struct(fields) => self.struct_encoder(&self.own(&d.name), fields, out),
+                DeclKind::Union { members, .. } => self.union_encoder(&d.name, members, out),
+                DeclKind::Table(members) => self.table_encoder(&d.name, members, out),
+                _ => unreachable!("only compound declarations have encoders"),
+            }
+        }
+        for s in &methods {
+            self.struct_encoder(&s.name, s.fields, out);
+        }
     }
 
     fn constant(&self, d: &Decl, ty: &Type, value: &Value, out: &mut String) {
@@ -294,6 +321,75 @@ impl Gen<'_> {
             );
         }
         out.push_str("};\n\n");
+    }
+
+    fn struct_encoder(&self, c: &str, fields: &[Field], out: &mut String) {
+        let offsets = self.layout.struct_shape(fields).1;
+        let mut encode = String::new();
+        for (f, offset) in fields.iter().zip(&offsets) {
+            let field = format!("v->{}", ident(&f.name));
+            encode.push_str(&self.encode(&f.ty, &field, &format!("at + {offset}u")));
+        }
+        let body = format!(
+            "static inline void {c}_encode(mikros_midl_encoder_t *e, uint32_t at, const {c} *v)\n{{\n{encode}(void)e;\n(void)at;\n(void)v;\n}}\n"
+        );
+        out.push_str(&super::indented(&body));
+        out.push('\n');
+    }
+
+    /// The encoder of a union: its ordinal and envelope inline, its
+    /// member out of line. An absent optional union stays zero.
+    fn union_encoder(&self, name: &str, members: &[OrdinalField], out: &mut String) {
+        let c = self.own(name);
+        let mut encode = String::new();
+        for m in members {
+            let (size, ordinal) = (self.size(&m.ty), m.ordinal);
+            let o = self.fresh("o");
+            writeln!(
+                encode,
+                "case UINT64_C({ordinal}): {{\nmikros_midl_put_u64(e, at, UINT64_C({ordinal}));\nuint32_t {o} = mikros_midl_append(e, {size}u);\n{}break;\n}}",
+                self.encode(&m.ty, &format!("v->{}", member(&m.name)), &o)
+            )
+            .unwrap();
+        }
+        let body = format!(
+            "static inline void {c}_encode(mikros_midl_encoder_t *e, uint32_t at, const {c} *v, bool optional)\n{{\nmikros_midl_mark_t start = mikros_midl_begin_envelope(e);\nswitch (v->ordinal) {{\ncase 0: {{\nif (!optional) {{\nmikros_midl_encoder_fail(e, MIKROS_MIDL_TOO_LONG);\n}}\nreturn;\n}}\n{encode}default: {{\nmikros_midl_encoder_fail(e, MIKROS_MIDL_UNKNOWN_MEMBER);\nreturn;\n}}\n}}\nmikros_midl_end_envelope(e, at + 8u, start);\n}}\n"
+        );
+        out.push_str(&super::indented(&body));
+        out.push('\n');
+    }
+
+    /// The members of a table by their ordinals.
+    fn by_ordinal(members: &[OrdinalField]) -> Vec<&OrdinalField> {
+        let mut members: Vec<&OrdinalField> = members.iter().collect();
+        members.sort_by_key(|m| m.ordinal);
+        members
+    }
+
+    /// The encoder of a table: a vector of envelopes up to the highest
+    /// field that is set, and the fields out of line in their order.
+    fn table_encoder(&self, name: &str, members: &[OrdinalField], out: &mut String) {
+        let c = self.own(name);
+        let (mut count, mut encode) = (String::new(), String::new());
+        for m in Self::by_ordinal(members) {
+            let (size, ordinal) = (self.size(&m.ty), m.ordinal);
+            let field = format!("v->{}", ident(&m.name));
+            writeln!(count, "if (v->has_{}) {{\ncount = {ordinal}u;\n}}", m.name).unwrap();
+            let (slot, start, o) = (self.fresh("slot"), self.fresh("start"), self.fresh("o"));
+            writeln!(
+                encode,
+                "if (v->has_{}) {{\nuint32_t {slot} = envelopes + {}u;\nmikros_midl_mark_t {start} = mikros_midl_begin_envelope(e);\nuint32_t {o} = mikros_midl_append(e, {size}u);\n{}mikros_midl_end_envelope(e, {slot}, {start});\nmikros_midl_put_present(e, {slot} + 8u);\n}}",
+                m.name,
+                (ordinal - 1) * 16,
+                self.encode(&m.ty, &field, &o)
+            )
+            .unwrap();
+        }
+        let body = format!(
+            "static inline void {c}_encode(mikros_midl_encoder_t *e, uint32_t at, const {c} *v)\n{{\nuint64_t count = 0;\n{count}mikros_midl_put_vector(e, at, count, UINT64_MAX);\nuint32_t envelopes = mikros_midl_append(e, count * 16u);\n(void)envelopes;\n{encode}(void)v;\n}}\n"
+        );
+        out.push_str(&super::indented(&body));
+        out.push('\n');
     }
 }
 

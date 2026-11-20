@@ -6,10 +6,13 @@
 //! name, its dots made underscores: `mikros.gpu.Render` is
 //! `mikros_gpu_Render`.
 
+use crate::layout::Layout;
 use crate::model::*;
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
+mod codec;
 mod decls;
 
 const RUNTIME: &str = include_str!("runtime.h.in");
@@ -19,7 +22,12 @@ const RUNTIME: &str = include_str!("runtime.h.in");
 pub fn generate(model: &Model) -> Vec<(String, String)> {
     let mut files = vec![("runtime.h".to_string(), RUNTIME.to_string())];
     for library in &model.libraries {
-        let g = Gen { model, library };
+        let g = Gen {
+            model,
+            layout: Layout { model },
+            library,
+            counter: Cell::new(0),
+        };
         files.push((format!("{}.h", library.name), g.header()));
     }
     files
@@ -28,7 +36,10 @@ pub fn generate(model: &Model) -> Vec<(String, String)> {
 /// What generating one library's header needs.
 pub(crate) struct Gen<'a> {
     model: &'a Model,
+    layout: Layout<'a>,
     library: &'a Library,
+    /// For fresh variable names.
+    counter: Cell<u32>,
 }
 
 impl Gen<'_> {
@@ -117,6 +128,16 @@ impl Gen<'_> {
         &self.model.decl(full).expect("checked names exist").kind
     }
 
+    fn fresh(&self, base: &str) -> String {
+        let n = self.counter.get();
+        self.counter.set(n + 1);
+        format!("{base}{n}")
+    }
+
+    fn size(&self, ty: &Type) -> u64 {
+        self.layout.shape(ty).size
+    }
+
     /// The C type of `ty`, for any type but an array.
     fn ctype(&self, ty: &Type) -> String {
         match ty {
@@ -189,6 +210,16 @@ fn int_type(int: Int) -> &'static str {
     }
 }
 
+/// The unsigned C type of `int`'s width, and the runtime's name for it.
+fn wire_int(int: Int) -> (&'static str, &'static str) {
+    match int.size() {
+        1 => ("uint8_t", "u8"),
+        2 => ("uint16_t", "u16"),
+        4 => ("uint32_t", "u32"),
+        _ => ("uint64_t", "u64"),
+    }
+}
+
 /// `value` as a C constant of `int`.
 fn int_literal(int: Int, value: i128) -> String {
     let t = int_type(int);
@@ -253,5 +284,30 @@ fn string_literal(s: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+/// `code`, a statement, label or brace on each line, indented four
+/// spaces for each brace that is open.
+fn indented(code: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for line in code.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        let closing = line.starts_with('}');
+        if closing {
+            depth = depth.saturating_sub(1);
+        }
+        // The lines of a comment after its first line.
+        let lead = if line.starts_with('*') { " " } else { "" };
+        writeln!(out, "{}{lead}{line}", "    ".repeat(depth)).unwrap();
+        let opens = line.matches('{').count();
+        let closes = line.matches('}').count() - usize::from(closing);
+        depth = (depth + opens).saturating_sub(closes);
+    }
     out
 }

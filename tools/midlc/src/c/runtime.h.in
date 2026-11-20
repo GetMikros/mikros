@@ -100,6 +100,223 @@ static inline void *mikros_midl_alloc(mikros_midl_arena_t *arena, size_t size)
     return arena->base + at;
 }
 
+/* Builds one message. Once a step fails, the encoder keeps its status,
+ * writes nothing more and closes the handles it is given, so that a
+ * call consumes its handles also when it fails. */
+typedef struct {
+    uint8_t *bytes;
+    uint32_t len;
+    mikros_handle_t handles[MIKROS_MIDL_MESSAGE_HANDLES];
+    uint32_t handle_count;
+    mikros_midl_status_t status;
+} mikros_midl_encoder_t;
+
+static inline void mikros_midl_encoder_fail(mikros_midl_encoder_t *e, mikros_midl_status_t s)
+{
+    if (e->status == MIKROS_MIDL_OK)
+        e->status = s;
+}
+
+static inline void mikros_midl_put(mikros_midl_encoder_t *e, uint32_t at, const void *data, uint32_t len)
+{
+    if (e->status != MIKROS_MIDL_OK)
+        return;
+    if (at > e->len || len > e->len - at) {
+        mikros_midl_encoder_fail(e, MIKROS_MIDL_TOO_LONG);
+        return;
+    }
+    memcpy(e->bytes + at, data, len);
+}
+
+static inline void mikros_midl_put_u8(mikros_midl_encoder_t *e, uint32_t at, uint8_t v)
+{
+    mikros_midl_put(e, at, &v, 1);
+}
+
+static inline void mikros_midl_put_u16(mikros_midl_encoder_t *e, uint32_t at, uint16_t v)
+{
+    uint8_t b[2] = {(uint8_t)v, (uint8_t)(v >> 8)};
+    mikros_midl_put(e, at, b, 2);
+}
+
+static inline void mikros_midl_put_u32(mikros_midl_encoder_t *e, uint32_t at, uint32_t v)
+{
+    uint8_t b[4];
+    for (int i = 0; i < 4; i++)
+        b[i] = (uint8_t)(v >> (8 * i));
+    mikros_midl_put(e, at, b, 4);
+}
+
+static inline void mikros_midl_put_u64(mikros_midl_encoder_t *e, uint32_t at, uint64_t v)
+{
+    uint8_t b[8];
+    for (int i = 0; i < 8; i++)
+        b[i] = (uint8_t)(v >> (8 * i));
+    mikros_midl_put(e, at, b, 8);
+}
+
+static inline void mikros_midl_put_f32(mikros_midl_encoder_t *e, uint32_t at, float v)
+{
+    uint32_t bits;
+    memcpy(&bits, &v, 4);
+    mikros_midl_put_u32(e, at, bits);
+}
+
+static inline void mikros_midl_put_f64(mikros_midl_encoder_t *e, uint32_t at, double v)
+{
+    uint64_t bits;
+    memcpy(&bits, &v, 8);
+    mikros_midl_put_u64(e, at, bits);
+}
+
+/* Appends a zeroed object of `size` bytes, padded to 8, and returns its
+ * offset; 0 once the encoder has failed. */
+static inline uint32_t mikros_midl_append(mikros_midl_encoder_t *e, uint64_t size)
+{
+    if (e->status != MIKROS_MIDL_OK)
+        return 0;
+    uint64_t padded = (size + 7u) & ~(uint64_t)7u;
+    if (size > MIKROS_MIDL_MESSAGE_BYTES || padded > MIKROS_MIDL_MESSAGE_BYTES - e->len) {
+        mikros_midl_encoder_fail(e, MIKROS_MIDL_TOO_LONG);
+        return 0;
+    }
+    uint32_t at = e->len;
+    memset(e->bytes + at, 0, (size_t)padded);
+    e->len += (uint32_t)padded;
+    return at;
+}
+
+/* Starts a message in `arena` with its header and room for a body whose
+ * inline part takes `body` bytes. */
+static inline void mikros_midl_encoder_init(mikros_midl_encoder_t *e, mikros_midl_arena_t *arena,
+                                            uint32_t txid, uint32_t ordinal, uint16_t flags,
+                                            uint64_t body)
+{
+    e->len = 0;
+    e->handle_count = 0;
+    e->status = MIKROS_MIDL_OK;
+    e->bytes = (uint8_t *)mikros_midl_alloc(arena, MIKROS_MIDL_MESSAGE_BYTES);
+    if (e->bytes == NULL) {
+        e->status = MIKROS_MIDL_NO_ROOM;
+        return;
+    }
+    mikros_midl_append(e, MIKROS_MIDL_HEADER_SIZE);
+    mikros_midl_put_u32(e, 0, txid);
+    mikros_midl_put_u32(e, 4, ordinal);
+    mikros_midl_put_u16(e, 8, 1);
+    mikros_midl_put_u16(e, 10, flags);
+    mikros_midl_append(e, body);
+}
+
+/* Whether the `len` bytes at `s` are UTF-8. */
+static inline bool mikros_midl_utf8(const uint8_t *s, uint64_t len)
+{
+    uint64_t i = 0;
+    while (i < len) {
+        uint8_t c = s[i];
+        unsigned n;
+        uint32_t cp;
+        if (c < 0x80) {
+            i++;
+            continue;
+        } else if (c >= 0xc2 && c <= 0xdf) {
+            n = 1;
+            cp = c & 0x1f;
+        } else if (c >= 0xe0 && c <= 0xef) {
+            n = 2;
+            cp = c & 0x0f;
+        } else if (c >= 0xf0 && c <= 0xf4) {
+            n = 3;
+            cp = c & 0x07;
+        } else {
+            return false;
+        }
+        if (len - i <= n)
+            return false;
+        for (unsigned k = 1; k <= n; k++) {
+            if ((s[i + k] & 0xc0) != 0x80)
+                return false;
+            cp = (cp << 6) | (s[i + k] & 0x3f);
+        }
+        if ((n == 2 && (cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff))) ||
+            (n == 3 && (cp < 0x10000 || cp > 0x10ffff)))
+            return false;
+        i += n + 1;
+    }
+    return true;
+}
+
+/* The inline part of a present string or vector of `count` elements, at
+ * most `max`. */
+static inline void mikros_midl_put_vector(mikros_midl_encoder_t *e, uint32_t at, uint64_t count,
+                                          uint64_t max)
+{
+    if (count > max) {
+        mikros_midl_encoder_fail(e, MIKROS_MIDL_TOO_LONG);
+        return;
+    }
+    mikros_midl_put_u64(e, at, count);
+    mikros_midl_put_u64(e, at + 8, UINT64_MAX);
+}
+
+/* A present vector of `count` bytes, at most `max`, out of line. */
+static inline void mikros_midl_put_bytes(mikros_midl_encoder_t *e, uint32_t at, const void *data,
+                                         uint64_t count, uint64_t max)
+{
+    mikros_midl_put_vector(e, at, count, max);
+    uint32_t o = mikros_midl_append(e, count);
+    if (count > 0)
+        mikros_midl_put(e, o, data, (uint32_t)count);
+}
+
+/* The presence marker of an optional structure. */
+static inline void mikros_midl_put_present(mikros_midl_encoder_t *e, uint32_t at)
+{
+    mikros_midl_put_u64(e, at, UINT64_MAX);
+}
+
+/* A handle, which the encoder takes: it is sent with the message, or
+ * closed when the message is not sent. */
+static inline void mikros_midl_put_handle(mikros_midl_encoder_t *e, uint32_t at, mikros_handle_t h)
+{
+    if (e->status == MIKROS_MIDL_OK && e->handle_count == MIKROS_MIDL_MESSAGE_HANDLES)
+        mikros_midl_encoder_fail(e, MIKROS_MIDL_TOO_LONG);
+    if (e->status != MIKROS_MIDL_OK) {
+        mikros_handle_close(h);
+        return;
+    }
+    mikros_midl_put_u32(e, at, UINT32_MAX);
+    e->handles[e->handle_count++] = h;
+}
+
+/* Where an envelope's contents start, for mikros_midl_end_envelope. */
+typedef struct {
+    uint32_t bytes;
+    uint32_t handles;
+} mikros_midl_mark_t;
+
+static inline mikros_midl_mark_t mikros_midl_begin_envelope(const mikros_midl_encoder_t *e)
+{
+    mikros_midl_mark_t m = {e->len, e->handle_count};
+    return m;
+}
+
+/* Stores at `at` the byte and handle counts of what was added since
+ * `start`. */
+static inline void mikros_midl_end_envelope(mikros_midl_encoder_t *e, uint32_t at, mikros_midl_mark_t start)
+{
+    mikros_midl_put_u32(e, at, e->len - start.bytes);
+    mikros_midl_put_u32(e, at + 4, e->handle_count - start.handles);
+}
+
+/* Closes the handles of a message that is not sent. */
+static inline void mikros_midl_encoder_discard(mikros_midl_encoder_t *e)
+{
+    for (uint32_t i = 0; i < e->handle_count; i++)
+        mikros_handle_close(e->handles[i]);
+    e->handle_count = 0;
+}
+
 #ifdef __cplusplus
 }
 #endif
