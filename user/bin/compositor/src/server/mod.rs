@@ -6,7 +6,11 @@
 //! to the code of the resource; a request that breaks the protocol is a
 //! protocol error, which is sent to the client and ends its connection.
 
-use crate::wayland::protocols::{wl_callback, wl_display, wl_registry};
+mod surface;
+
+pub use surface::{Rect, Surface, SurfaceId};
+
+use crate::wayland::protocols::{wl_callback, wl_compositor, wl_display, wl_registry};
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -25,6 +29,9 @@ pub enum Resource {
     Display,
     Registry,
     Callback,
+    Compositor,
+    Surface(SurfaceId),
+    Region,
 }
 
 /// An object of a client.
@@ -153,14 +160,31 @@ pub struct Server {
     clients: BTreeMap<ClientId, Client>,
     next_client: ClientId,
     pub globals: Vec<Global>,
+    surfaces: BTreeMap<SurfaceId, Surface>,
+    next_surface: SurfaceId,
+    /// The rectangles of each client's regions, added or, when false,
+    /// taken away, in order.
+    regions: BTreeMap<(ClientId, ObjectId), Vec<(bool, Rect)>>,
     /// The serial of the last event that needs one.
     serial: u32,
 }
 
 impl Server {
-    /// A server, so far without globals.
+    /// A server with the globals that every client gets.
     pub fn new() -> Server {
-        Server::default()
+        let mut server = Server::default();
+        server.add_global(
+            &wl_compositor::INTERFACE,
+            wl_compositor::VERSION,
+            Resource::Compositor,
+        );
+        server
+    }
+
+    fn client_mut(&mut self, request: Request) -> &mut Client {
+        self.clients
+            .get_mut(&request.client)
+            .expect("a dispatched client")
     }
 
     pub fn add_global(&mut self, interface: &'static Interface, version: u32, resource: Resource) {
@@ -180,13 +204,19 @@ impl Server {
         self.next_client
     }
 
-    /// Removes a client whose connection ended.
+    /// Removes a client whose connection ended, with its surfaces.
     pub fn disconnect(&mut self, client: ClientId) {
         self.clients.remove(&client);
+        self.surfaces.retain(|_, s| s.client != client);
+        self.regions.retain(|(c, _), _| *c != client);
     }
 
     pub fn client(&mut self, client: ClientId) -> Option<&mut Client> {
         self.clients.get_mut(&client)
+    }
+
+    pub fn surfaces(&self) -> impl Iterator<Item = (&SurfaceId, &Surface)> {
+        self.surfaces.iter()
     }
 
     fn next_serial(&mut self) -> u32 {
@@ -277,6 +307,9 @@ impl Server {
                 wl_registry::Request::decode(header.opcode, args).map_err(decoded)?,
             )?,
             Resource::Callback => {}
+            Resource::Compositor | Resource::Surface(_) | Resource::Region => {
+                self.surface_request(request, resource, args)?
+            }
         }
         Ok(rest)
     }
@@ -360,15 +393,7 @@ struct Request {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::wayland::protocols::{wl_callback, wl_compositor};
-
-    /// A server with a global for clients to bind, whose objects stand
-    /// for nothing yet.
-    fn with_global() -> Server {
-        let mut server = Server::new();
-        server.add_global(&wl_compositor::INTERFACE, 6, Resource::Callback);
-        server
-    }
+    use crate::wayland::protocols::wl_callback;
     use crate::wayland::wire::{Arg, Message};
 
     /// A client of a server, which sends requests and reads the events
@@ -476,7 +501,7 @@ pub(crate) mod tests {
 
     #[test]
     fn lists_and_binds_the_globals() {
-        let mut server = with_global();
+        let mut server = Server::new();
         let client = TestClient::new(&mut server);
         client.send(&mut server, 1, 1, vec![Arg::NewId(NewId(2))]);
         let events = client.events(&mut server, &|_| &wl_registry::EVENTS);
@@ -485,12 +510,12 @@ pub(crate) mod tests {
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);
         assert_eq!(client.error(&mut server), None);
         let object = server.client(client.id).unwrap().object(3).unwrap();
-        assert_eq!((object.version, object.resource), (6, Resource::Callback));
+        assert_eq!((object.version, object.resource), (6, Resource::Compositor));
     }
 
     #[test]
     fn ends_connections_that_break_the_protocol() {
-        let mut server = with_global();
+        let mut server = Server::new();
         // An object that does not exist.
         let client = TestClient::new(&mut server);
         client.send(&mut server, 9, 0, vec![]);
