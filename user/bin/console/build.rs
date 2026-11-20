@@ -1,5 +1,5 @@
-//! Links FreeType and xkbcommon, which `cargo xtask` builds as ports
-//! before the programs with std.
+//! Links FreeType, which `cargo xtask` builds as a port before the
+//! programs with std.
 
 use std::path::PathBuf;
 
@@ -10,19 +10,12 @@ fn main() {
     }
     let root =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo")).join("../../..");
-    for port in ["freetype", "xkbcommon"] {
-        let lib = root
-            .join("target/ported")
-            .join(port)
-            .join("install/system/libraries");
-        println!("cargo:rustc-link-search=native={}", lib.display());
-        // Relinked whenever the library is built again, whose name it
-        // needs.
-        println!(
-            "cargo:rerun-if-changed={}",
-            lib.join(format!("lib{port}.dlib")).display()
-        );
-    }
+    let lib = root.join("target/ported/freetype/install/system/libraries");
+    println!("cargo:rustc-link-search=native={}", lib.display());
+    // Relinked whenever the library is built again, whose name it needs.
+    println!(
+        "cargo:rerun-if-changed={}",
+        lib.join("libfreetype.dlib").display()
+    );
     println!("cargo:rustc-link-lib=dylib=freetype");
-    println!("cargo:rustc-link-lib=dylib=xkbcommon");
 }

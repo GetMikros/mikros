@@ -4,8 +4,12 @@
 //! session manager starts the compositor in greeter mode and gives it the
 //! display, and the compositor starts the probe, a system app, which
 //! draws a fullscreen toplevel in one colour with Vulkan. The run takes
-//! screen dumps until that colour covers the screen, and keeps the last in
-//! `desktop.ppm`.
+//! screen dumps until that colour covers the screen. Then it presses
+//! Ctrl, Alt and F2, which the compositor turns into a switch to the
+//! screen of text console 1, waits until the colour has left the screen,
+//! and presses Ctrl, Alt and F1, which the console turns into a switch
+//! back to the desktop, until the colour covers the screen again. It
+//! keeps the last screen dump in `desktop.ppm`.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -23,8 +27,10 @@ const GREETER: &str = "compositor: started the greeter as pid";
 /// may be from it.
 const COLOUR: [u8; 3] = [200, 40, 120];
 const TOLERANCE: u8 = 2;
-/// The share of the screen that the colour must cover.
+/// The share of the screen that the colour must cover, and the share
+/// that it may still cover on a text console's screen.
 const COVERED: f64 = 0.9;
+const GONE: f64 = 0.1;
 /// How often the screen is dumped while the run waits for the colour.
 const DUMP_EVERY: Duration = Duration::from_secs(1);
 
@@ -59,27 +65,39 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
     let socket = scenario::monitor_socket(dir);
     let mut qemu = scenario::start(machine, dir, false)?;
     let deadline = Instant::now() + timeout;
-    let ended = (|| -> Result<f64> {
+    let ended = (|| -> Result<()> {
         scenario::wait_for_line(&log, STARTED, &mut qemu, deadline)?;
         scenario::wait_for_line(&log, GREETER, &mut qemu, deadline)?;
         let dump = dir.join("desktop.ppm");
-        loop {
-            let ppm = scenario::screen_dump(&socket, &dump)?;
-            let share = colour_share(&ppm).context("the screen dump is not a PPM image")?;
-            if share >= COVERED {
-                return Ok(share);
+        // Until the share of the colour on the screen is as `wanted`
+        // says, which `what` names.
+        let mut until = |wanted: &dyn Fn(f64) -> bool, what: &str| -> Result<()> {
+            loop {
+                let ppm = scenario::screen_dump(&socket, &dump)?;
+                let share = colour_share(&ppm).context("the screen dump is not a PPM image")?;
+                if wanted(share) {
+                    return Ok(());
+                }
+                if qemu.try_wait()?.is_some() {
+                    bail!("QEMU exited before {what}");
+                }
+                if Instant::now() > deadline {
+                    bail!(
+                        "timed out before {what}, with the probe's colour on {:.0}% of the screen",
+                        share * 100.0
+                    );
+                }
+                std::thread::sleep(DUMP_EVERY);
             }
-            if qemu.try_wait()?.is_some() {
-                bail!("QEMU exited before the probe's colour covered the screen");
-            }
-            if Instant::now() > deadline {
-                bail!(
-                    "timed out with the probe's colour on {:.0}% of the screen",
-                    share * 100.0
-                );
-            }
-            std::thread::sleep(DUMP_EVERY);
-        }
+        };
+        until(
+            &|share| share >= COVERED,
+            "the probe's colour covered the screen",
+        )?;
+        scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
+        until(&|share| share <= GONE, "the text console's screen showed")?;
+        scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
+        until(&|share| share >= COVERED, "the desktop showed again")
     })();
     let _ = qemu.kill();
     let _ = qemu.wait();

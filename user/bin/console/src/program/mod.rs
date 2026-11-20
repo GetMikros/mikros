@@ -30,7 +30,6 @@ mod process;
 mod render;
 mod term;
 mod vt;
-mod xkb;
 
 use crate::emulator::screen::{Modes, Screen};
 use crate::input::{Owner, Route, Router, TerminalInput};
@@ -403,11 +402,11 @@ impl Console {
         // A keyboard given again starts without held keys, whose releases
         // went to the other owner.
         {
-            let names = xkb::Names {
+            let names = mikros_xkb::Names {
                 layout: LAYOUT.into(),
                 ..Default::default()
             };
-            match xkb::Keymap::new(&names) {
+            match mikros_xkb::Keymap::new(&names) {
                 Some(keymap) => *self.keyboard.borrow_mut() = Some(Keyboard::new(keymap)),
                 None => {
                     eprintln!("console: the keymap cannot be compiled");

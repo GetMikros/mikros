@@ -4,7 +4,7 @@
 
 use crate::emulator::keys::{Key, Modifiers, encode};
 use crate::emulator::screen::Modes;
-use crate::program::xkb::Keymap;
+use mikros_xkb::Keymap;
 
 /// The xkb keysyms of the keys that send sequences rather than text.
 fn special(keysym: u32) -> Option<Key> {

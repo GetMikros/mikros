@@ -9,6 +9,7 @@
 //! image is shown.
 
 mod imports;
+mod keys;
 mod output;
 mod parts;
 mod render;
@@ -79,6 +80,9 @@ pub struct Compositor {
     store: RefCell<Store>,
     /// The display, once the session manager gave one.
     output: RefCell<Option<Output>>,
+    /// The instance of the display shown on, which is shown on again when
+    /// the session manager gives it again.
+    display_instance: RefCell<Option<String>>,
     /// The channels of the clients.
     channels: RefCell<BTreeMap<ClientId, OwnedHandle>>,
     /// Set when a surface committed, or the display came.
@@ -106,15 +110,23 @@ fn milliseconds() -> u32 {
 }
 
 impl Compositor {
-    /// Serves the `Seat` channel: the first display becomes the output.
+    /// Serves the `Seat` channel: the first display becomes the output,
+    /// also when it is given again after it was taken away, and the
+    /// keyboards are read for the keys that switch screens.
     async fn serve_seat(self: Rc<Self>, seat: OwnedHandle) {
-        let server = SeatAsyncServer::new(ServerEnd::new(seat), self.reactor.clone());
+        let server = Rc::new(SeatAsyncServer::new(
+            ServerEnd::new(seat),
+            self.reactor.clone(),
+        ));
         while let Ok(request) = server.next().await {
             match request {
                 SeatRequest::AddDisplay(added) => {
-                    if self.output.borrow().is_some() {
+                    let shown_on = self.display_instance.borrow().clone();
+                    if shown_on.is_some_and(|shown_on| shown_on != added.instance) {
                         continue;
                     }
+                    *self.display_instance.borrow_mut() = Some(added.instance.clone());
+                    *self.output.borrow_mut() = None;
                     let display = DisplayAsyncClient::new(added.display, self.reactor.clone());
                     match Output::new(display, &self.renderer).await {
                         Ok(output) => {
@@ -135,8 +147,14 @@ impl Compositor {
                         ),
                     }
                 }
-                // Input comes with window management.
-                SeatRequest::AddInput(_) | SeatRequest::SetScreen(_) => {}
+                SeatRequest::AddInput(added) => {
+                    let (reactor, server) = (self.reactor.clone(), server.clone());
+                    let (instance, device) = (added.instance, added.device);
+                    let reading = keys::read(reactor, server, instance, device, added.accepted);
+                    self.spawner.spawn(reading);
+                }
+                // The compositor shows only the desktop's screen.
+                SeatRequest::SetScreen(_) => {}
             }
         }
     }
@@ -266,7 +284,10 @@ impl Compositor {
             if let Err(e) = output.show().await {
                 mikros_rt::log!(Error, "compositor: showing a frame: {e:?}");
             }
-            *self.output.borrow_mut() = Some(output);
+            // Unless the display was given again meanwhile.
+            if self.output.borrow().is_none() {
+                *self.output.borrow_mut() = Some(output);
+            }
             self.server.borrow_mut().frames_done(milliseconds());
             self.flush_all();
         }
@@ -374,6 +395,7 @@ pub fn main() {
         renderer,
         store: RefCell::default(),
         output: RefCell::new(None),
+        display_instance: RefCell::new(None),
         channels: RefCell::default(),
         changed: Notify::default(),
     });

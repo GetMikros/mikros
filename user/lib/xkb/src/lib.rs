@@ -1,5 +1,6 @@
-//! xkbcommon: compiling a keymap from the keymap data and turning key
-//! presses into keysyms and text.
+//! xkbcommon, which `cargo xtask` builds as a port: compiling a keymap
+//! from the keymap data and turning key presses into keysyms and text,
+//! for the text console and the compositor.
 
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr;

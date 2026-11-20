@@ -1,0 +1,10 @@
+[package]
+name = "mikros-xkb"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+# It needs the standard library, and links xkbcommon.
+[package.metadata.mikros]
+runtime = "std"

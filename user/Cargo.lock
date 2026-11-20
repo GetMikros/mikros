@@ -272,7 +272,9 @@ name = "compositor"
 version = "0.0.0"
 dependencies = [
  "ash",
+ "mikros-evdev",
  "mikros-rt",
+ "mikros-xkb",
  "mikros-yaml",
  "roxmltree",
 ]
@@ -284,6 +286,7 @@ dependencies = [
  "mikros-evdev",
  "mikros-logview",
  "mikros-rt",
+ "mikros-xkb",
 ]
 
 [[package]]
@@ -999,6 +1002,10 @@ version = "0.0.0"
 dependencies = [
  "mikros-rt",
 ]
+
+[[package]]
+name = "mikros-xkb"
+version = "0.0.0"
 
 [[package]]
 name = "mikros-yaml"

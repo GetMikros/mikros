@@ -9,6 +9,7 @@ publish = false
 mikros-evdev = { path = "../../lib/evdev" }
 mikros-logview = { path = "../../lib/logview" }
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+mikros-xkb = { path = "../../lib/xkb" }
 
 # The diagnostic build sets `mikros_diag`, and the parts that only run on
 # Mikros are left out of the host's tests.
