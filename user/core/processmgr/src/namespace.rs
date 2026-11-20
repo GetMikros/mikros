@@ -1044,10 +1044,6 @@ impl Namespaces {
                     &mut origins,
                     none(tmp(&tmpfs, &path, "/tmp", budget, reactor).await?),
                 );
-                if user != 0 {
-                    // The folders of the user's app need the user's name.
-                    return Err(Status::NotSupported);
-                }
             }
             if kind == Manifest::Driver {
                 // Its own folders for temporary files and state.
@@ -1067,13 +1063,20 @@ impl Namespaces {
                     self.entry(shared, &ready, &state, RW).await?,
                 );
             }
+            // The name of the process's user, which `<user>` in a listed
+            // path stands for, from the user's record, without which a
+            // process of another user than 0 does not start
+            // (MIKSPEC-0050.R24).
+            let user_name = match user {
+                0 => None,
+                _ => Some(crate::users::name(shared, user).await?),
+            };
             for (path, text) in listed {
-                if path.contains("<user>") {
-                    match user {
-                        0 => continue,
-                        _ => return Err(Status::NotSupported),
-                    }
-                }
+                let path = match (&user_name, path.contains("<user>")) {
+                    (None, true) => continue,
+                    (Some(name), true) => path.replace("<user>", name),
+                    (_, false) => path,
+                };
                 let path = path::normalize(&path).ok_or(Status::NotFound)?;
                 // Only the accounts service reaches its data, which only
                 // entries in `/system/state` can: `/system` itself comes
