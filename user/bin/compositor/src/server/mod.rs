@@ -1,0 +1,544 @@
+//! The compositor's side of its clients' Wayland connections. Each
+//! client has its objects, by ID, each an object of an interface at a
+//! version that stands for a resource of the compositor. `Server::dispatch`
+//! takes the messages of a channel message, decodes each request by its
+//! object's interface, checks it against the object's version and hands it
+//! to the code of the resource; a request that breaks the protocol is a
+//! protocol error, which is sent to the client and ends its connection.
+
+use crate::wayland::protocols::{wl_callback, wl_display, wl_registry};
+use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
+use std::collections::{BTreeMap, VecDeque};
+
+/// The first ID of the objects that the compositor would create, beyond
+/// those that clients create.
+const SERVER_IDS: u32 = 0xff00_0000;
+
+/// The ID of the display object of every client.
+const DISPLAY: ObjectId = 1;
+
+pub type ClientId = u64;
+
+/// What a client's object stands for in the compositor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resource {
+    Display,
+    Registry,
+    Callback,
+}
+
+/// An object of a client.
+#[derive(Debug)]
+pub struct Object {
+    pub interface: &'static Interface,
+    pub version: u32,
+    pub resource: Resource,
+}
+
+/// A protocol error, which ends the client's connection.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProtocolError {
+    pub object: ObjectId,
+    pub code: u32,
+    pub message: String,
+}
+
+impl ProtocolError {
+    pub fn new(object: ObjectId, code: u32, message: impl Into<String>) -> ProtocolError {
+        ProtocolError {
+            object,
+            code,
+            message: message.into(),
+        }
+    }
+
+    fn invalid_object(message: impl Into<String>) -> ProtocolError {
+        ProtocolError::new(DISPLAY, wl_display::error::INVALID_OBJECT, message)
+    }
+
+    fn invalid_method(object: ObjectId, message: impl Into<String>) -> ProtocolError {
+        ProtocolError::new(object, wl_display::error::INVALID_METHOD, message)
+    }
+}
+
+/// A client's connection.
+#[derive(Default)]
+pub struct Client {
+    objects: BTreeMap<ObjectId, Object>,
+    /// The events to send to the client.
+    pub out: Outgoing,
+    /// The protocol error that ended the connection, once one did.
+    pub error: Option<ProtocolError>,
+}
+
+impl Client {
+    fn new() -> Client {
+        let mut client = Client::default();
+        client.objects.insert(
+            DISPLAY,
+            Object {
+                interface: &wl_display::INTERFACE,
+                version: 1,
+                resource: Resource::Display,
+            },
+        );
+        client
+    }
+
+    pub fn object(&self, id: ObjectId) -> Option<&Object> {
+        self.objects.get(&id)
+    }
+
+    /// Adds the object `id` that a request of an object at `version`
+    /// creates, as `resource` of `interface`.
+    fn create(
+        &mut self,
+        id: NewId,
+        interface: &'static Interface,
+        version: u32,
+        resource: Resource,
+    ) -> Result<(), ProtocolError> {
+        if id.0 >= SERVER_IDS || self.objects.contains_key(&id.0) {
+            return Err(ProtocolError::invalid_object(format!(
+                "invalid new ID {} for {}",
+                id.0, interface.name
+            )));
+        }
+        let object = Object {
+            interface,
+            version,
+            resource,
+        };
+        self.objects.insert(id.0, object);
+        Ok(())
+    }
+
+    /// Removes the object `id`, whose ID the client may then use again.
+    fn destroy(&mut self, id: ObjectId) {
+        if self.objects.remove(&id).is_some() {
+            wl_display::send_delete_id(&mut self.out, DISPLAY, id);
+        }
+    }
+
+    /// The resource of the object `id` that the request of `from` names,
+    /// which must be of `interface`.
+    fn resource(
+        &self,
+        from: ObjectId,
+        id: ObjectId,
+        interface: &Interface,
+    ) -> Result<Resource, ProtocolError> {
+        match self.objects.get(&id) {
+            Some(object) if std::ptr::eq(object.interface, interface) => Ok(object.resource),
+            _ => Err(ProtocolError::invalid_object(format!(
+                "object {id} of a request of {from} is not a {}",
+                interface.name
+            ))),
+        }
+    }
+}
+
+/// A global that clients bind through their registries.
+pub struct Global {
+    pub name: u32,
+    pub interface: &'static Interface,
+    pub version: u32,
+    /// What its objects stand for.
+    pub resource: Resource,
+}
+
+/// Every client and the state of the protocols they speak.
+#[derive(Default)]
+pub struct Server {
+    clients: BTreeMap<ClientId, Client>,
+    next_client: ClientId,
+    pub globals: Vec<Global>,
+    /// The serial of the last event that needs one.
+    serial: u32,
+}
+
+impl Server {
+    /// A server, so far without globals.
+    pub fn new() -> Server {
+        Server::default()
+    }
+
+    pub fn add_global(&mut self, interface: &'static Interface, version: u32, resource: Resource) {
+        let name = self.globals.len() as u32 + 1;
+        self.globals.push(Global {
+            name,
+            interface,
+            version,
+            resource,
+        });
+    }
+
+    /// Adds a client, and returns its ID.
+    pub fn connect(&mut self) -> ClientId {
+        self.next_client += 1;
+        self.clients.insert(self.next_client, Client::new());
+        self.next_client
+    }
+
+    /// Removes a client whose connection ended.
+    pub fn disconnect(&mut self, client: ClientId) {
+        self.clients.remove(&client);
+    }
+
+    pub fn client(&mut self, client: ClientId) -> Option<&mut Client> {
+        self.clients.get_mut(&client)
+    }
+
+    fn next_serial(&mut self) -> u32 {
+        self.serial = self.serial.wrapping_add(1);
+        self.serial
+    }
+
+    /// Handles the requests in `bytes`, a channel message of `client`, with
+    /// the handles of their file descriptors. A protocol error is sent to
+    /// the client and recorded in its `error`, and ends its requests.
+    pub fn dispatch(&mut self, client: ClientId, bytes: &[u8], handles: Vec<Fd>) {
+        let mut fds = VecDeque::from(handles);
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            if self.clients.get(&client).is_none_or(|c| c.error.is_some()) {
+                return;
+            }
+            match self.message(client, rest, &mut fds) {
+                Ok(after) => rest = after,
+                Err(error) => {
+                    if let Some(c) = self.clients.get_mut(&client) {
+                        let message = error.message.as_str();
+                        wl_display::send_error(
+                            &mut c.out,
+                            DISPLAY,
+                            error.object,
+                            error.code,
+                            message,
+                        );
+                        c.error = Some(error);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Handles the message at the start of `bytes`, and returns the bytes
+    /// after it.
+    fn message<'a>(
+        &mut self,
+        client: ClientId,
+        bytes: &'a [u8],
+        fds: &mut VecDeque<Fd>,
+    ) -> Result<&'a [u8], ProtocolError> {
+        let (header, body, rest) = wire::split(bytes).map_err(|e| {
+            ProtocolError::invalid_method(DISPLAY, format!("a broken message: {e:?}"))
+        })?;
+        let c = self.clients.get(&client).expect("a dispatched client");
+        let Some(object) = c.objects.get(&header.sender) else {
+            return Err(ProtocolError::invalid_object(format!(
+                "invalid object {}",
+                header.sender
+            )));
+        };
+        let (interface, version, resource) = (object.interface, object.version, object.resource);
+        let name = interface.name;
+        let message = interface
+            .requests
+            .get(usize::from(header.opcode))
+            .filter(|m| m.since <= version)
+            .ok_or_else(|| {
+                ProtocolError::invalid_method(
+                    header.sender,
+                    format!("invalid opcode {} for {name}", header.opcode),
+                )
+            })?;
+        let args = wire::decode(message, body, fds).map_err(|e| {
+            ProtocolError::invalid_method(
+                header.sender,
+                format!("invalid arguments for {name}.{}: {e:?}", message.name),
+            )
+        })?;
+        let request = Request {
+            client,
+            object: header.sender,
+            version,
+            opcode: header.opcode,
+        };
+        let decoded = |e| ProtocolError::invalid_method(header.sender, format!("{e:?}"));
+        match resource {
+            Resource::Display => self.display(
+                request,
+                wl_display::Request::decode(header.opcode, args).map_err(decoded)?,
+            )?,
+            Resource::Registry => self.registry(
+                request,
+                wl_registry::Request::decode(header.opcode, args).map_err(decoded)?,
+            )?,
+            Resource::Callback => {}
+        }
+        Ok(rest)
+    }
+
+    fn display(
+        &mut self,
+        request: Request,
+        decoded: wl_display::Request,
+    ) -> Result<(), ProtocolError> {
+        let serial = self.next_serial();
+        let c = self
+            .clients
+            .get_mut(&request.client)
+            .expect("a dispatched client");
+        match decoded {
+            wl_display::Request::Sync { callback } => {
+                c.create(callback, &wl_callback::INTERFACE, 1, Resource::Callback)?;
+                wl_callback::send_done(&mut c.out, callback.0, serial);
+                c.destroy(callback.0);
+            }
+            wl_display::Request::GetRegistry { registry } => {
+                c.create(registry, &wl_registry::INTERFACE, 1, Resource::Registry)?;
+                for global in &self.globals {
+                    let name = global.interface.name;
+                    wl_registry::send_global(
+                        &mut c.out,
+                        registry.0,
+                        global.name,
+                        name,
+                        global.version,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn registry(
+        &mut self,
+        request: Request,
+        decoded: wl_registry::Request,
+    ) -> Result<(), ProtocolError> {
+        let wl_registry::Request::Bind {
+            name,
+            id_interface,
+            id_version,
+            id,
+        } = decoded;
+        let global = self
+            .globals
+            .iter()
+            .find(|g| g.name == name && g.interface.name == id_interface)
+            .ok_or_else(|| {
+                ProtocolError::invalid_object(format!("invalid global {id_interface} ({name})"))
+            })?;
+        if id_version == 0 || id_version > global.version {
+            return Err(ProtocolError::invalid_object(format!(
+                "invalid version {id_version} of {id_interface}"
+            )));
+        }
+        let (interface, resource) = (global.interface, global.resource);
+        let c = self
+            .clients
+            .get_mut(&request.client)
+            .expect("a dispatched client");
+        c.create(id, interface, id_version, resource)
+    }
+}
+
+/// Where a request came from.
+#[derive(Clone, Copy, Debug)]
+struct Request {
+    client: ClientId,
+    /// The object it was sent to.
+    object: ObjectId,
+    /// The object's version, which the objects it creates get.
+    version: u32,
+    opcode: u16,
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::wayland::protocols::{wl_callback, wl_compositor};
+
+    /// A server with a global for clients to bind, whose objects stand
+    /// for nothing yet.
+    fn with_global() -> Server {
+        let mut server = Server::new();
+        server.add_global(&wl_compositor::INTERFACE, 6, Resource::Callback);
+        server
+    }
+    use crate::wayland::wire::{Arg, Message};
+
+    /// A client of a server, which sends requests and reads the events
+    /// the server sent it.
+    pub struct TestClient {
+        pub id: ClientId,
+    }
+
+    impl TestClient {
+        pub fn new(server: &mut Server) -> TestClient {
+            TestClient {
+                id: server.connect(),
+            }
+        }
+
+        /// Sends the request `opcode` of `object` with `args`.
+        pub fn send(&self, server: &mut Server, object: ObjectId, opcode: u16, args: Vec<Arg>) {
+            let mut out = Outgoing::default();
+            out.send(object, opcode, args);
+            let (bytes, fds) = out.take().unwrap();
+            server.dispatch(self.id, &bytes, fds);
+        }
+
+        /// The events sent since the last call, as their object, opcode
+        /// and arguments, decoded by the tables of `events`, which gives
+        /// an object's events by its ID.
+        pub fn events(
+            &self,
+            server: &mut Server,
+            events: &dyn Fn(ObjectId) -> &'static [Message],
+        ) -> Vec<(ObjectId, u16, Vec<Arg>)> {
+            let c = server.client(self.id).unwrap();
+            let mut all = Vec::new();
+            while let Some((bytes, fds)) = c.out.take() {
+                let mut fds = VecDeque::from(fds);
+                let mut rest = bytes.as_slice();
+                while !rest.is_empty() {
+                    let (header, body, after) = wire::split(rest).unwrap();
+                    let message = &events(header.sender)[usize::from(header.opcode)];
+                    all.push((
+                        header.sender,
+                        header.opcode,
+                        wire::decode(message, body, &mut fds).unwrap(),
+                    ));
+                    rest = after;
+                }
+            }
+            all
+        }
+
+        /// Drops the events sent since the last call.
+        pub fn drain(&self, server: &mut Server) {
+            let c = server.client(self.id).unwrap();
+            while c.out.take().is_some() {}
+        }
+
+        pub fn error(&self, server: &mut Server) -> Option<u32> {
+            server
+                .client(self.id)
+                .unwrap()
+                .error
+                .as_ref()
+                .map(|e| e.code)
+        }
+
+        /// Binds the global of `interface` as `id`.
+        pub fn bind(
+            &self,
+            server: &mut Server,
+            registry: ObjectId,
+            interface: &Interface,
+            id: u32,
+        ) {
+            let global = server
+                .globals
+                .iter()
+                .find(|g| g.interface.name == interface.name)
+                .unwrap();
+            let args = vec![
+                Arg::Uint(global.name),
+                Arg::Untyped {
+                    interface: interface.name.into(),
+                    version: global.version,
+                    id: NewId(id),
+                },
+            ];
+            self.send(server, registry, 0, args);
+        }
+    }
+
+    #[test]
+    fn answers_sync_with_a_callback_that_it_destroys() {
+        let mut server = Server::new();
+        let client = TestClient::new(&mut server);
+        client.send(&mut server, 1, 0, vec![Arg::NewId(NewId(2))]);
+        let events = client.events(&mut server, &|id| match id {
+            1 => &wl_display::EVENTS,
+            _ => &wl_callback::EVENTS,
+        });
+        assert_eq!(events.len(), 2);
+        assert_eq!((events[0].0, events[0].1), (2, 0));
+        assert_eq!(events[1], (1, 1, vec![Arg::Uint(2)]));
+        assert!(server.client(client.id).unwrap().object(2).is_none());
+    }
+
+    #[test]
+    fn lists_and_binds_the_globals() {
+        let mut server = with_global();
+        let client = TestClient::new(&mut server);
+        client.send(&mut server, 1, 1, vec![Arg::NewId(NewId(2))]);
+        let events = client.events(&mut server, &|_| &wl_registry::EVENTS);
+        let names: Vec<&Arg> = events.iter().map(|e| &e.2[1]).collect();
+        assert_eq!(names, [&Arg::String(Some("wl_compositor".into()))]);
+        client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);
+        assert_eq!(client.error(&mut server), None);
+        let object = server.client(client.id).unwrap().object(3).unwrap();
+        assert_eq!((object.version, object.resource), (6, Resource::Callback));
+    }
+
+    #[test]
+    fn ends_connections_that_break_the_protocol() {
+        let mut server = with_global();
+        // An object that does not exist.
+        let client = TestClient::new(&mut server);
+        client.send(&mut server, 9, 0, vec![]);
+        assert_eq!(
+            client.error(&mut server),
+            Some(wl_display::error::INVALID_OBJECT)
+        );
+        let events = client.events(&mut server, &|_| &wl_display::EVENTS);
+        assert_eq!(events[0].0, 1);
+        assert_eq!(events[0].2[0], Arg::Object(Some(1)));
+        // An opcode that the interface lacks.
+        let client = TestClient::new(&mut server);
+        client.send(&mut server, 1, 7, vec![]);
+        assert_eq!(
+            client.error(&mut server),
+            Some(wl_display::error::INVALID_METHOD)
+        );
+        // A new ID in use, a global that does not exist, and a version
+        // beyond the global's.
+        let client = TestClient::new(&mut server);
+        client.send(&mut server, 1, 1, vec![Arg::NewId(NewId(1))]);
+        assert_eq!(
+            client.error(&mut server),
+            Some(wl_display::error::INVALID_OBJECT)
+        );
+        let client = TestClient::new(&mut server);
+        client.send(&mut server, 1, 1, vec![Arg::NewId(NewId(2))]);
+        let bind = |name, version| {
+            vec![
+                Arg::Uint(name),
+                Arg::Untyped {
+                    interface: "wl_compositor".into(),
+                    version,
+                    id: NewId(3),
+                },
+            ]
+        };
+        client.send(&mut server, 2, 0, bind(9, 1));
+        assert_eq!(
+            client.error(&mut server),
+            Some(wl_display::error::INVALID_OBJECT)
+        );
+        let client = TestClient::new(&mut server);
+        client.send(&mut server, 1, 1, vec![Arg::NewId(NewId(2))]);
+        client.send(&mut server, 2, 0, bind(1, 7));
+        assert_eq!(
+            client.error(&mut server),
+            Some(wl_display::error::INVALID_OBJECT)
+        );
+    }
+}
