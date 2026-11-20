@@ -7,10 +7,11 @@
 //! protocol error, which is sent to the client and ends its connection.
 
 mod surface;
+mod xdg;
 
-pub use surface::{Rect, Surface, SurfaceId};
+pub use surface::{Rect, Role, Surface, SurfaceId};
 
-use crate::wayland::protocols::{wl_callback, wl_compositor, wl_display, wl_registry};
+use crate::wayland::protocols::{wl_callback, wl_compositor, wl_display, wl_registry, xdg_wm_base};
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -32,6 +33,10 @@ pub enum Resource {
     Compositor,
     Surface(SurfaceId),
     Region,
+    WmBase,
+    Positioner,
+    XdgSurface(SurfaceId),
+    Toplevel(SurfaceId),
 }
 
 /// An object of a client.
@@ -167,6 +172,8 @@ pub struct Server {
     regions: BTreeMap<(ClientId, ObjectId), Vec<(bool, Rect)>>,
     /// The serial of the last event that needs one.
     serial: u32,
+    /// The size of the screen, which fullscreen toplevels get.
+    pub screen: Option<(i32, i32)>,
 }
 
 impl Server {
@@ -178,6 +185,7 @@ impl Server {
             wl_compositor::VERSION,
             Resource::Compositor,
         );
+        server.add_global(&xdg_wm_base::INTERFACE, 1, Resource::WmBase);
         server
     }
 
@@ -310,6 +318,10 @@ impl Server {
             Resource::Compositor | Resource::Surface(_) | Resource::Region => {
                 self.surface_request(request, resource, args)?
             }
+            Resource::WmBase
+            | Resource::Positioner
+            | Resource::XdgSurface(_)
+            | Resource::Toplevel(_) => self.xdg_request(request, resource, args)?,
         }
         Ok(rest)
     }
@@ -506,7 +518,13 @@ pub(crate) mod tests {
         client.send(&mut server, 1, 1, vec![Arg::NewId(NewId(2))]);
         let events = client.events(&mut server, &|_| &wl_registry::EVENTS);
         let names: Vec<&Arg> = events.iter().map(|e| &e.2[1]).collect();
-        assert_eq!(names, [&Arg::String(Some("wl_compositor".into()))]);
+        assert_eq!(
+            names,
+            [
+                &Arg::String(Some("wl_compositor".into())),
+                &Arg::String(Some("xdg_wm_base".into()))
+            ]
+        );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);
         assert_eq!(client.error(&mut server), None);
         let object = server.client(client.id).unwrap().object(3).unwrap();

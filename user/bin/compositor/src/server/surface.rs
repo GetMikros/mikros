@@ -21,6 +21,7 @@ pub struct Rect {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     None,
+    Toplevel,
 }
 
 /// The state of a surface that its requests set and a commit applies.
@@ -73,6 +74,8 @@ pub struct Surface {
     /// committed state, which the next frame answers.
     pending_frames: Vec<ObjectId>,
     pub frames: Vec<ObjectId>,
+    /// The state of its xdg_surface, once it has one.
+    pub xdg: Option<super::xdg::XdgState>,
 }
 
 impl Server {
@@ -135,6 +138,7 @@ impl Server {
                         current: SurfaceState::default(),
                         pending_frames: Vec::new(),
                         frames: Vec::new(),
+                        xdg: None,
                     },
                 );
             }
@@ -309,7 +313,7 @@ impl Server {
             wl_surface::Request::Offset { x, y } => {
                 self.surface_mut(id)?.pending.offset = (x, y);
             }
-            wl_surface::Request::Commit => self.commit(id)?,
+            wl_surface::Request::Commit => self.commit(request, id)?,
         }
         Ok(())
     }
@@ -322,9 +326,11 @@ impl Server {
             .ok_or_else(|| ProtocolError::invalid_object("a destroyed surface"))
     }
 
-    /// Applies the pending state of the surface `id`.
-    fn commit(&mut self, id: SurfaceId) -> Result<(), ProtocolError> {
-        let surface = self.surface_mut(id)?;
+    /// Applies the pending state of the surface `id`, after its role
+    /// checked it.
+    fn commit(&mut self, request: Request, id: SurfaceId) -> Result<(), ProtocolError> {
+        self.check_commit(request, id)?;
+        let surface = self.surfaces.get_mut(&id).expect("a checked surface");
         let pending = &mut surface.pending;
         let current = &mut surface.current;
         if surface.attached {
@@ -340,6 +346,7 @@ impl Server {
         current.offset = std::mem::take(&mut pending.offset);
         let frames = std::mem::take(&mut surface.pending_frames);
         surface.frames.extend(frames);
+        self.committed(request, id);
         Ok(())
     }
 
