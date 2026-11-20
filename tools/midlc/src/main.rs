@@ -1,6 +1,6 @@
 //! The `midlc` command: checks MIDL files and writes what they describe.
 //!
-//! Usage: `midlc [--version N] [--json FILE] [--rust FILE --kernel PATH] FILE.midl...`
+//! Usage: `midlc [--version N] [--json FILE] [--rust FILE --kernel PATH] [--c DIR] FILE.midl...`
 
 use std::process::ExitCode;
 
@@ -16,7 +16,7 @@ fn main() -> ExitCode {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let (mut version, mut json, mut inputs) = (None, None, Vec::new());
-    let (mut rust, mut kernel) = (None, None);
+    let (mut rust, mut kernel, mut c) = (None, None, None);
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
@@ -28,6 +28,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             "--json" => json = Some(value("--json")?),
             "--rust" => rust = Some(value("--rust")?),
             "--kernel" => kernel = Some(value("--kernel")?),
+            "--c" => c = Some(value("--c")?),
             _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
             _ => inputs.push(arg),
         }
@@ -37,7 +38,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     }
     if inputs.is_empty() {
         return Err(
-            "usage: midlc [--version N] [--json FILE] [--rust FILE --kernel PATH] FILE.midl..."
+            "usage: midlc [--version N] [--json FILE] [--rust FILE --kernel PATH] [--c DIR] FILE.midl..."
                 .into(),
         );
     }
@@ -59,6 +60,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
     if let (Some(path), Some(kernel)) = (rust, kernel) {
         let text = midlc::rust::generate(&model, &midlc::rust::Options { kernel });
         std::fs::write(&path, text).map_err(|e| format!("writing {path}: {e}"))?;
+    }
+    if let Some(dir) = c {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("creating {dir}: {e}"))?;
+        for (name, text) in midlc::c::generate(&model) {
+            let path = std::path::Path::new(&dir).join(name);
+            std::fs::write(&path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        }
     }
     Ok(())
 }

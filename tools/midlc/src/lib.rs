@@ -3,6 +3,7 @@
 
 pub mod analysis;
 pub mod ast;
+pub mod c;
 pub mod check;
 pub mod json;
 pub mod layout;
