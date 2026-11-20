@@ -10,13 +10,14 @@
 //! a switch to the desktop, until the colour covers the screen, and
 //! Ctrl, Alt and F2, which the compositor turns into a switch back to the
 //! console, until the colour has left the screen again. In dee's session
-//! it then runs `desktop`, which starts dee's desktop: the run waits until
-//! the compositor's background covers the screen, and until the desktop's
-//! shell, the shell probe, connected to the service manager's `Control`,
-//! whose question the compositor cancels, and was refused. It then
-//! presses Ctrl, Alt and F2 until the background has left the screen, and
-//! ends the session with `exit`, which ends the desktop too. It keeps the
-//! last screen dump in `desktop.ppm`.
+//! it then runs `desktop`, which starts dee's desktop, whose shell is the
+//! shell probe: the run waits until the wallpaper that its desktop part
+//! hands the compositor covers the screen, and until its taskbar part
+//! connected to the service manager's `Control`, whose question the
+//! compositor cancels, and was refused. It then presses Ctrl, Alt and F2
+//! until the wallpaper has left the screen, and ends the session with
+//! `exit`, which ends the desktop too. It keeps the last screen dump in
+//! `desktop.ppm`.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -39,12 +40,12 @@ const DESKTOP_ENDED: &str = "sessionmgr: the desktop of dee ended";
 /// question, and once the shell probe exited, which it does with 0 when
 /// it was refused.
 const CANCELLED: &str = "compositor: cancelled the question";
-const SHELL_EXITED: &str = "compositor: the part desktop of system.mikros.shell_probe exited";
-/// The probe's colour and the compositor's background, [0.11, 0.12,
-/// 0.14] in unsigned normalized bytes, in the bytes of the display, and
-/// how far a pixel may be from them.
+const SHELL_EXITED: &str = "compositor: the part taskbar of system.mikros.shell_probe exited";
+/// The probe's colour and the test colour of the shell probe's
+/// wallpaper, in the bytes of the display, and how far a pixel may be
+/// from them.
 const COLOUR: [u8; 3] = [200, 40, 120];
-const BACKGROUND: [u8; 3] = [28, 31, 36];
+const WALLPAPER: [u8; 3] = [40, 90, 160];
 const TOLERANCE: u8 = 2;
 /// The share of the screen that the colour must cover, and the share
 /// that it may still cover on a text console's screen.
@@ -142,7 +143,7 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         crate::console::type_keys(&socket, "d e s k t o p ret")?;
         scenario::wait_for_line(&log, DESKTOP_STARTED, &mut qemu, deadline)?;
         let what = "dee's desktop showed";
-        screen.until(&mut qemu, BACKGROUND, &covered, what)?;
+        screen.until(&mut qemu, WALLPAPER, &covered, what)?;
         scenario::wait_for_line(&log, CANCELLED, &mut qemu, deadline)?;
         let serial = scenario::wait_for_line(&log, SHELL_EXITED, &mut qemu, deadline)?;
         let exited = serial
@@ -154,7 +155,7 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         }
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
         let what = "the console showed from dee's desktop";
-        screen.until(&mut qemu, BACKGROUND, &gone, what)?;
+        screen.until(&mut qemu, WALLPAPER, &gone, what)?;
         crate::console::type_keys(&socket, "e x i t ret")?;
         scenario::wait_for_line(&log, DESKTOP_ENDED, &mut qemu, deadline).map(drop)
     })();
@@ -182,9 +183,14 @@ mod tests {
 
     #[test]
     fn counts_the_pixels_near_the_colour() {
-        let screen = ppm(&[[200, 40, 120], [201, 39, 122], [28, 31, 36], [200, 40, 120]]);
+        let screen = ppm(&[
+            [200, 40, 120],
+            [201, 39, 122],
+            [40, 90, 160],
+            [200, 40, 120],
+        ]);
         assert_eq!(colour_share(&screen, COLOUR), Some(0.75));
-        assert_eq!(colour_share(&screen, BACKGROUND), Some(0.25));
+        assert_eq!(colour_share(&screen, WALLPAPER), Some(0.25));
         assert_eq!(colour_share(b"not a picture", COLOUR), None);
     }
 }

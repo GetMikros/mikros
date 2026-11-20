@@ -7,11 +7,13 @@
  * `--login <name> <password>`, it then logs that user in through
  * Login. Then it serves the connection until the compositor closes it.
  *
- * With the argument `--control`, as the part of the system app
+ * With the argument `--control`, as a part of the system app
  * system.mikros.shell_probe in a user session, it shows nothing and only
  * connects to the service manager's Control, which needs a user
  * permission whose question the compositor cancels: it exits with 0 when
- * the connection is refused and with 70 when it is not.
+ * the connection is refused and with 70 when it is not. With
+ * `--wallpaper [file]`, as that app's desktop part, it hands the
+ * compositor a wallpaper (wallpaper.c).
  *
  * It exits with the number of the step that failed, if one does. */
 
@@ -319,10 +321,14 @@ static int control(void)
 	return connected == 0 ? 70 : 0;
 }
 
+int wallpaper(const char *file);
+
 int main(int argc, char **argv)
 {
 	if (argc == 2 && strcmp(argv[1], "--control") == 0)
 		return control();
+	if (argc >= 2 && strcmp(argv[1], "--wallpaper") == 0)
+		return wallpaper(argc >= 3 ? argv[2] : NULL);
 	struct state s = {0};
 	mikros_handle_t channel = mikros_take_startup_handle(ROLE_USER, WAYLAND_ID);
 	int fd = channel == 0 ? -1 : mikros_fd_from_handle(channel, KIND_CHANNEL);

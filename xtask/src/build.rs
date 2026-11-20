@@ -2585,19 +2585,35 @@ fn greeter_probe(
     let name = "greeter-probe";
     let dir = c_dir(name);
     fs::create_dir_all(&dir)?;
-    let xml = crate::wayland::protocols()?.join("xdg-shell.xml");
-    let code = dir.join("xdg-shell-protocol.c");
-    for (mode, out) in [
-        ("client-header", dir.join("xdg-shell-client-protocol.h")),
-        ("private-code", code.clone()),
+    // The client code of xdg-shell, and of the compositor's buffer and
+    // shell protocols, with that of xdg-activation, which the shell's
+    // names.
+    let staged = crate::wayland::protocols()?;
+    let own = crate::workspace_root().join("user/bin/compositor/protocols");
+    let mut code = Vec::new();
+    for (xml, stem) in [
+        (staged.join("xdg-shell.xml"), "xdg-shell"),
+        (own.join("mikros-buffer-v1.xml"), "mikros-buffer-v1"),
+        (staged.join("xdg-activation-v1.xml"), "xdg-activation-v1"),
+        (own.join("mikros-shell-v1.xml"), "mikros-shell-v1"),
     ] {
-        crate::port::run(
-            Command::new(wayland.scanner_program())
-                .arg(mode)
-                .arg(&xml)
-                .arg(out),
-        )
-        .context("generating the xdg-shell code of greeter-probe")?;
+        let source = dir.join(format!("{stem}-protocol.c"));
+        for (mode, out) in [
+            (
+                "client-header",
+                dir.join(format!("{stem}-client-protocol.h")),
+            ),
+            ("private-code", source.clone()),
+        ] {
+            crate::port::run(
+                Command::new(wayland.scanner_program())
+                    .arg(mode)
+                    .arg(&xml)
+                    .arg(out),
+            )
+            .with_context(|| format!("generating the {stem} code of greeter-probe"))?;
+        }
+        code.push(source.display().to_string());
     }
     let args = [
         "-Wall".to_string(),
@@ -2612,8 +2628,11 @@ fn greeter_probe(
             .display()
             .to_string(),
     ];
-    let code = code.display().to_string();
-    let sources = ["user/tests/greeter-probe/greeter.c", code.as_str()];
+    let mut sources = vec![
+        "user/tests/greeter-probe/greeter.c",
+        "user/tests/greeter-probe/wallpaper.c",
+    ];
+    sources.extend(code.iter().map(String::as_str));
     let program = c_build(name, &sources, Linking::Dynamic, &args)?;
     println!("built    {}", program.display());
     let greeter = crate::system_apps::SystemApp {
@@ -2626,8 +2645,9 @@ fn greeter_probe(
                       arguments: [\"--login\", dee, dee-password]\n",
         files: vec![(name.to_owned(), program.clone(), true)],
     };
-    // The shell of the desktop run's user session, whose part connects to
-    // the service manager's Control and so asks a question there.
+    // The shell of the desktop run's user session: its desktop part hands
+    // the compositor a wallpaper of a test colour, and its taskbar part
+    // connects to the service manager's Control and so asks a question.
     let shell = crate::system_apps::SystemApp {
         id: "system.mikros.shell_probe",
         version: "1.0.0",
@@ -2635,6 +2655,8 @@ fn greeter_probe(
         description: "The shell of the desktop run",
         executable: name,
         shell_parts: "  - roles: [desktop]\n    executable: greeter-probe\n    \
+                      arguments: [\"--wallpaper\"]\n  \
+                      - roles: [taskbar]\n    executable: greeter-probe\n    \
                       arguments: [\"--control\"]\n",
         files: vec![(name.to_owned(), program, true)],
     };
