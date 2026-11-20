@@ -1,5 +1,6 @@
 /* The startup handles of the calling process that the C library did not
-   install as descriptors, its Directory connection and its own handle. */
+   install as descriptors, its Directory and Launcher connections and its
+   own handle. */
 
 #ifndef MIKROS_STARTUP_H
 #define MIKROS_STARTUP_H
@@ -21,6 +22,12 @@ mikros_handle_t mikros_take_startup_handle(uint32_t role, uint32_t id);
 /* Returns the process's Directory connection, which the C library keeps
    owning: the caller must not close it. Safe to call from any thread. */
 mikros_handle_t mikros_directory(void);
+
+/* Returns the process's Launcher connection from its startup transfer,
+   which the C library keeps owning: the caller must not close it. The
+   caller's calls do not disturb the C library's. Safe to call from any
+   thread. MIKSPEC-0033.R46 */
+mikros_handle_t mikros_launcher(void);
 
 /* Returns the calling process's own handle, with the MAP right, so that
    memory objects can be mapped with vm_map. The C library keeps owning

@@ -32,6 +32,11 @@ pub fn getppid() -> i64 {
     i64::from(PARENT.load(Ordering::Relaxed))
 }
 
+/// The `Launcher` channel of the startup transfer, which stays open.
+pub fn launcher_handle() -> Handle {
+    LAUNCHER.load(Ordering::Relaxed)
+}
+
 /// A client of the `Launcher` channel.
 pub fn launcher() -> ManuallyDrop<LauncherClient> {
     // SAFETY: the channel stays open for as long as the process runs; the
