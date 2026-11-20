@@ -9,6 +9,7 @@
 mod area;
 mod buffer;
 mod material;
+mod panel;
 mod shell;
 mod surface;
 mod theme;
@@ -58,6 +59,7 @@ pub enum Resource {
     Materials,
     Material(SurfaceId),
     Theme,
+    Panel(SurfaceId),
 }
 
 /// An object of a client.
@@ -406,6 +408,7 @@ impl Server {
             Resource::Materials | Resource::Material(_) => {
                 self.material_request(request, resource, args)?
             }
+            Resource::Panel(id) => self.panel_request(request, id, args)?,
             Resource::Theme => {
                 return Err(ProtocolError::invalid_method(
                     header.sender,

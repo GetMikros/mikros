@@ -22,6 +22,7 @@ pub struct Rect {
 pub enum Role {
     None,
     Toplevel,
+    Panel,
 }
 
 /// The state of a surface that its requests set and a commit applies.
@@ -88,6 +89,8 @@ pub struct Surface {
     pub frames: Vec<ObjectId>,
     /// The state of its xdg_surface, once it has one.
     pub xdg: Option<super::xdg::XdgState>,
+    /// The state of its panel, while it has one.
+    pub panel: Option<super::panel::PanelState>,
 }
 
 impl Server {
@@ -154,6 +157,7 @@ impl Server {
                         pending_frames: Vec::new(),
                         frames: Vec::new(),
                         xdg: None,
+                        panel: None,
                     },
                 );
             }
@@ -384,6 +388,7 @@ impl Server {
         let frames = std::mem::take(&mut surface.pending_frames);
         surface.frames.extend(frames);
         self.committed(request, id);
+        self.panel_committed(id);
         self.collect(imports);
         Ok(())
     }

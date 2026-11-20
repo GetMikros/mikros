@@ -143,7 +143,9 @@ impl Compositor {
                                 "compositor: showing {width}x{height} on the display {}",
                                 added.instance
                             );
-                            self.server.borrow_mut().screen = Some((width as i32, height as i32));
+                            self.server
+                                .borrow_mut()
+                                .set_screen((width as i32, height as i32));
                             *self.output.borrow_mut() = Some(output);
                             self.changed.notify();
                         }

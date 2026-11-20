@@ -1,19 +1,22 @@
 //! The output and the shell global. `wl_output` describes the one output
 //! that the compositor shows; `mikros_shell_v1` is offered only on the
 //! connections of the shell's components, each with its roles
-//! (MIKSPEC-0076.R12). Of the shell's requests, only `set_wallpaper` is
-//! served yet: it gives the renderer the buffer's pixels as the output's
-//! wallpaper (MIKSPEC-0075.R22) and then releases the buffer. The others
-//! end the component's connection.
+//! (MIKSPEC-0076.R12). Of the shell's requests, `set_wallpaper` and
+//! `get_panel` are served yet: the first gives the renderer the buffer's
+//! pixels as the output's wallpaper (MIKSPEC-0075.R22) and then releases
+//! the buffer, the second makes a panel (MIKSPEC-0076.R3) of a surface
+//! without a role. The others end the component's connection.
 
 use super::{Imports, ProtocolError, Request, Resource, Server};
-use crate::wayland::protocols::{mikros_shell_v1, wl_buffer, wl_output};
+use crate::wayland::protocols::{
+    mikros_panel_v1, mikros_shell_v1, wl_buffer, wl_output, wl_surface,
+};
 use crate::wayland::wire::{Arg, DecodeError};
 
 /// The protocol error of a request of the shell global that its
 /// component may not make or that is not served, for which the protocol
 /// file defines no code.
-const SHELL_ERROR: u32 = 0;
+pub(super) const SHELL_ERROR: u32 = 0;
 
 impl Server {
     /// Sends the description of the output to `output`, a new object of
@@ -84,6 +87,26 @@ impl Server {
                 }
                 wl_buffer::send_release(&mut self.client_mut(request).out, buffer);
                 Ok(())
+            }
+            mikros_shell_v1::Request::GetPanel {
+                id,
+                surface,
+                output,
+                edge,
+            } => {
+                let c = self.client_mut(request);
+                if !c.has_role("menubar") && !c.has_role("taskbar") {
+                    return Err(error("get_panel needs the role menubar or taskbar"));
+                }
+                c.resource(request.object, output, &wl_output::INTERFACE)?;
+                let Resource::Surface(surface) =
+                    c.resource(request.object, surface, &wl_surface::INTERFACE)?
+                else {
+                    unreachable!("surfaces are wl_surface objects");
+                };
+                let interface = &mikros_panel_v1::INTERFACE;
+                c.create(id, interface, request.version, Resource::Panel(surface))?;
+                self.make_panel(request, id.0, surface, edge)
             }
             _ => Err(error(
                 "a request of the shell global that is not served yet",
