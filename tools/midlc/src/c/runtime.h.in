@@ -317,6 +317,324 @@ static inline void mikros_midl_encoder_discard(mikros_midl_encoder_t *e)
     e->handle_count = 0;
 }
 
+/* Reads and checks one message. Once a step fails, the decoder keeps
+ * its status and reads zeros. */
+typedef struct {
+    const uint8_t *bytes;
+    uint32_t len;
+    uint32_t next;
+    mikros_handle_t *handles;
+    uint32_t handle_count;
+    uint32_t next_handle;
+    mikros_midl_arena_t *arena;
+    mikros_midl_status_t status;
+} mikros_midl_decoder_t;
+
+static inline void mikros_midl_decoder_init(mikros_midl_decoder_t *d, const uint8_t *bytes, uint32_t len,
+                                            mikros_handle_t *handles, uint32_t handle_count,
+                                            mikros_midl_arena_t *arena)
+{
+    d->bytes = bytes;
+    d->len = len;
+    d->next = MIKROS_MIDL_HEADER_SIZE;
+    d->handles = handles;
+    d->handle_count = handle_count;
+    d->next_handle = 0;
+    d->arena = arena;
+    d->status = MIKROS_MIDL_OK;
+}
+
+static inline void mikros_midl_decoder_fail(mikros_midl_decoder_t *d, mikros_midl_status_t s)
+{
+    if (d->status == MIKROS_MIDL_OK)
+        d->status = s;
+}
+
+/* Fails unless the `len` bytes at `at` are in the message. */
+static inline bool mikros_midl_has(mikros_midl_decoder_t *d, uint64_t at, uint64_t len)
+{
+    if (d->status == MIKROS_MIDL_OK && at <= d->len && len <= d->len - at)
+        return true;
+    mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+    return false;
+}
+
+static inline uint64_t mikros_midl_get(mikros_midl_decoder_t *d, uint64_t at, unsigned n)
+{
+    if (!mikros_midl_has(d, at, n))
+        return 0;
+    uint64_t v = 0;
+    for (unsigned i = 0; i < n; i++)
+        v |= (uint64_t)d->bytes[at + i] << (8 * i);
+    return v;
+}
+
+static inline uint8_t mikros_midl_get_u8(mikros_midl_decoder_t *d, uint64_t at)
+{
+    return (uint8_t)mikros_midl_get(d, at, 1);
+}
+
+static inline uint16_t mikros_midl_get_u16(mikros_midl_decoder_t *d, uint64_t at)
+{
+    return (uint16_t)mikros_midl_get(d, at, 2);
+}
+
+static inline uint32_t mikros_midl_get_u32(mikros_midl_decoder_t *d, uint64_t at)
+{
+    return (uint32_t)mikros_midl_get(d, at, 4);
+}
+
+static inline uint64_t mikros_midl_get_u64(mikros_midl_decoder_t *d, uint64_t at)
+{
+    return mikros_midl_get(d, at, 8);
+}
+
+static inline float mikros_midl_get_f32(mikros_midl_decoder_t *d, uint64_t at)
+{
+    uint32_t bits = mikros_midl_get_u32(d, at);
+    float v;
+    memcpy(&v, &bits, 4);
+    return v;
+}
+
+static inline double mikros_midl_get_f64(mikros_midl_decoder_t *d, uint64_t at)
+{
+    uint64_t bits = mikros_midl_get_u64(d, at);
+    double v;
+    memcpy(&v, &bits, 8);
+    return v;
+}
+
+static inline bool mikros_midl_get_bool(mikros_midl_decoder_t *d, uint64_t at)
+{
+    uint8_t b = mikros_midl_get_u8(d, at);
+    if (b > 1)
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+    return b == 1;
+}
+
+/* Fails unless the `len` bytes at `at` are zero. */
+static inline void mikros_midl_zeros(mikros_midl_decoder_t *d, uint64_t at, uint64_t len)
+{
+    if (!mikros_midl_has(d, at, len))
+        return;
+    for (uint64_t i = 0; i < len; i++)
+        if (d->bytes[at + i] != 0) {
+            mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+            return;
+        }
+}
+
+/* Claims the next out-of-line object of `size` bytes, padded to 8 with
+ * zeros, and returns its offset. */
+static inline uint32_t mikros_midl_claim(mikros_midl_decoder_t *d, uint64_t size)
+{
+    uint64_t at = d->next;
+    uint64_t padded = (size + 7u) & ~(uint64_t)7u;
+    if (size > MIKROS_MIDL_MESSAGE_BYTES || !mikros_midl_has(d, at, padded))
+        return 0;
+    mikros_midl_zeros(d, at + size, padded - size);
+    d->next = (uint32_t)(at + padded);
+    return (uint32_t)at;
+}
+
+/* Whether the presence marker at `at` says present. */
+static inline bool mikros_midl_get_presence(mikros_midl_decoder_t *d, uint64_t at)
+{
+    uint64_t v = mikros_midl_get_u64(d, at);
+    if (v != 0 && v != UINT64_MAX)
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+    return v == UINT64_MAX;
+}
+
+/* The element count of the string or vector at `at`, at most `max`;
+ * `*present` tells whether it is there. */
+static inline uint64_t mikros_midl_get_vector(mikros_midl_decoder_t *d, uint64_t at, uint64_t max,
+                                              bool *present)
+{
+    uint64_t count = mikros_midl_get_u64(d, at);
+    *present = mikros_midl_get_presence(d, at + 8);
+    if ((!*present && count != 0) || count > max || count > MIKROS_MIDL_MESSAGE_BYTES)
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+    return d->status == MIKROS_MIDL_OK ? count : 0;
+}
+
+/* Room for `count` decoded elements of `size` bytes in the arena. */
+static inline void *mikros_midl_room(mikros_midl_decoder_t *d, uint64_t count, size_t size)
+{
+    if (d->status != MIKROS_MIDL_OK || count == 0)
+        return NULL;
+    void *p = mikros_midl_alloc(d->arena, (size_t)count * size);
+    if (p == NULL)
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_NO_ROOM);
+    return p;
+}
+
+/* The string at `at`, copied into the arena with a NUL after it. */
+static inline mikros_midl_string_t mikros_midl_get_string(mikros_midl_decoder_t *d, uint64_t at,
+                                                          uint64_t max, bool optional)
+{
+    mikros_midl_string_t s = {NULL, 0};
+    bool present;
+    uint64_t len = mikros_midl_get_vector(d, at, max, &present);
+    if (!present) {
+        if (!optional)
+            mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return s;
+    }
+    uint32_t o = mikros_midl_claim(d, len);
+    if (d->status != MIKROS_MIDL_OK)
+        return s;
+    if (!mikros_midl_utf8(d->bytes + o, len)) {
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return s;
+    }
+    char *copy = (char *)mikros_midl_alloc(d->arena, (size_t)len + 1);
+    if (copy == NULL) {
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_NO_ROOM);
+        return s;
+    }
+    memcpy(copy, d->bytes + o, (size_t)len);
+    copy[len] = 0;
+    s.data = copy;
+    s.size = len;
+    return s;
+}
+
+/* The vector of bytes at `at`, copied into the arena. */
+static inline mikros_midl_vector_t mikros_midl_get_bytes(mikros_midl_decoder_t *d, uint64_t at,
+                                                         uint64_t max, bool optional)
+{
+    mikros_midl_vector_t v = {NULL, 0};
+    bool present;
+    uint64_t count = mikros_midl_get_vector(d, at, max, &present);
+    if (!present) {
+        if (!optional)
+            mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return v;
+    }
+    uint32_t o = mikros_midl_claim(d, count);
+    /* Even an empty vector is present. */
+    uint8_t *copy = (uint8_t *)mikros_midl_alloc(d->arena, count ? (size_t)count : 1);
+    if (d->status != MIKROS_MIDL_OK)
+        return v;
+    if (copy == NULL) {
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_NO_ROOM);
+        return v;
+    }
+    memcpy(copy, d->bytes + o, (size_t)count);
+    v.data = copy;
+    v.count = count;
+    return v;
+}
+
+/* The handle whose marker is at `at`, or 0 when it is absent. When an
+ * object type or rights are declared, it must be of `object`, have at
+ * least `rights`, and is replaced with one that has exactly `rights`. */
+#define MIKROS_MIDL_ANY UINT32_MAX
+
+static inline mikros_handle_t mikros_midl_get_handle(mikros_midl_decoder_t *d, uint64_t at,
+                                                     uint32_t object, uint32_t rights, bool optional)
+{
+    uint32_t marker = mikros_midl_get_u32(d, at);
+    if (marker == 0) {
+        if (!optional)
+            mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return 0;
+    }
+    if (marker != UINT32_MAX || d->next_handle >= d->handle_count) {
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return 0;
+    }
+    if (d->status != MIKROS_MIDL_OK)
+        return 0;
+    uint32_t slot = d->next_handle++;
+    mikros_handle_t h = d->handles[slot];
+    if (object == MIKROS_MIDL_ANY && rights == MIKROS_MIDL_ANY)
+        return h;
+    uint8_t info[24];
+    uint64_t len = 0;
+    if (mikros_object_get_info(h, 1, info, sizeof info, &len) != 0 || len < sizeof info) {
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return 0;
+    }
+    uint32_t kind = (uint32_t)info[16] | (uint32_t)info[17] << 8 | (uint32_t)info[18] << 16 |
+                    (uint32_t)info[19] << 24;
+    uint32_t has = (uint32_t)info[20] | (uint32_t)info[21] << 8 | (uint32_t)info[22] << 16 |
+                   (uint32_t)info[23] << 24;
+    if ((object != MIKROS_MIDL_ANY && kind != object) ||
+        (rights != MIKROS_MIDL_ANY && (has & rights) != rights)) {
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return 0;
+    }
+    if (rights == MIKROS_MIDL_ANY)
+        return h;
+    mikros_handle_t replaced = 0;
+    /* The kernel consumes the handle even when it fails. */
+    mikros_status_t s = mikros_handle_replace(h, rights, &replaced);
+    d->handles[slot] = s == 0 ? replaced : 0;
+    if (s != 0) {
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return 0;
+    }
+    return replaced;
+}
+
+static inline mikros_midl_mark_t mikros_midl_decoder_mark(const mikros_midl_decoder_t *d)
+{
+    mikros_midl_mark_t m = {d->next, d->next_handle};
+    return m;
+}
+
+/* Fails unless exactly `bytes` and `handles` were read since `start`. */
+static inline void mikros_midl_check_envelope(mikros_midl_decoder_t *d, mikros_midl_mark_t start,
+                                              uint32_t bytes, uint32_t handles)
+{
+    if (d->next - start.bytes != bytes || d->next_handle - start.handles != handles)
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+}
+
+/* Skips an unknown envelope's `bytes` and closes its `handles`. */
+static inline void mikros_midl_skip(mikros_midl_decoder_t *d, uint32_t bytes, uint32_t handles)
+{
+    if (bytes % 8 != 0 || !mikros_midl_has(d, d->next, bytes) ||
+        handles > d->handle_count - d->next_handle) {
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+        return;
+    }
+    d->next += bytes;
+    for (uint32_t i = 0; i < handles; i++) {
+        mikros_handle_close(d->handles[d->next_handle]);
+        d->handles[d->next_handle++] = 0;
+    }
+}
+
+/* The message's header: its ordinal and flags, after checking it. */
+static inline void mikros_midl_header(mikros_midl_decoder_t *d, uint32_t *txid, uint32_t *ordinal,
+                                      uint16_t *flags)
+{
+    *txid = mikros_midl_get_u32(d, 0);
+    *ordinal = mikros_midl_get_u32(d, 4);
+    *flags = mikros_midl_get_u16(d, 10);
+    if (mikros_midl_get_u16(d, 8) != 1 || mikros_midl_get_u32(d, 12) != 0 ||
+        (*flags & ~(MIKROS_MIDL_FLAG_UNKNOWN_METHOD | MIKROS_MIDL_FLAG_FLEXIBLE)) != 0)
+        mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);
+}
+
+/* Ends the decoding of a message: it must have been read whole. On
+ * success the handles that the values hold are the caller's; on failure
+ * every handle of the message is closed. */
+static inline mikros_midl_status_t mikros_midl_decoder_finish(mikros_midl_decoder_t *d)
+{
+    if (d->status == MIKROS_MIDL_OK && (d->next != d->len || d->next_handle != d->handle_count))
+        d->status = MIKROS_MIDL_INVALID;
+    if (d->status != MIKROS_MIDL_OK)
+        for (uint32_t i = 0; i < d->handle_count; i++)
+            if (d->handles[i] != 0)
+                mikros_handle_close(d->handles[i]);
+    return d->status;
+}
+
 #ifdef __cplusplus
 }
 #endif

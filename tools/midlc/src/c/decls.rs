@@ -84,8 +84,11 @@ impl Gen<'_> {
             .iter()
             .map(|d| (self.own(&d.name), optional(d)))
             .chain(methods.iter().map(|s| (s.name.clone(), "")));
-        for (c, optional) in names {
+        for (c, optional) in names.clone() {
             writeln!(out, "static inline void {c}_encode(mikros_midl_encoder_t *e, uint32_t at, const {c} *v{optional});").unwrap();
+        }
+        for (c, optional) in names {
+            writeln!(out, "static inline void {c}_decode(mikros_midl_decoder_t *d, uint32_t at, {c} *v{optional});").unwrap();
         }
         if !compound.is_empty() || !methods.is_empty() {
             out.push('\n');
@@ -100,6 +103,20 @@ impl Gen<'_> {
         }
         for s in &methods {
             self.struct_encoder(&s.name, s.fields, out);
+        }
+        for d in &compound {
+            match &d.kind {
+                DeclKind::Struct(fields) => self.struct_decoder(&self.own(&d.name), fields, out),
+                DeclKind::Union {
+                    strictness,
+                    members,
+                } => self.union_decoder(&d.name, *strictness, members, out),
+                DeclKind::Table(members) => self.table_decoder(&d.name, members, out),
+                _ => unreachable!("only compound declarations have decoders"),
+            }
+        }
+        for s in &methods {
+            self.struct_decoder(&s.name, s.fields, out);
         }
     }
 
@@ -337,6 +354,39 @@ impl Gen<'_> {
         out.push('\n');
     }
 
+    /// The decoder of a structure, which checks that its padding is zero.
+    fn struct_decoder(&self, c: &str, fields: &[Field], out: &mut String) {
+        let (shape, offsets) = self.layout.struct_shape(fields);
+        let mut decode = String::new();
+        let mut end = 0;
+        for (f, offset) in fields.iter().zip(&offsets) {
+            if *offset > end {
+                writeln!(
+                    decode,
+                    "mikros_midl_zeros(d, at + {end}u, {});",
+                    offset - end
+                )
+                .unwrap();
+            }
+            end = offset + self.size(&f.ty);
+            let field = format!("v->{}", ident(&f.name));
+            decode.push_str(&self.decode(&f.ty, &field, &format!("at + {offset}u")));
+        }
+        if shape.size > end {
+            writeln!(
+                decode,
+                "mikros_midl_zeros(d, at + {end}u, {});",
+                shape.size - end
+            )
+            .unwrap();
+        }
+        let body = format!(
+            "static inline void {c}_decode(mikros_midl_decoder_t *d, uint32_t at, {c} *v)\n{{\nmemset(v, 0, sizeof *v);\n{decode}(void)d;\n(void)at;\n}}\n"
+        );
+        out.push_str(&super::indented(&body));
+        out.push('\n');
+    }
+
     /// The encoder of a union: its ordinal and envelope inline, its
     /// member out of line. An absent optional union stays zero.
     fn union_encoder(&self, name: &str, members: &[OrdinalField], out: &mut String) {
@@ -354,6 +404,38 @@ impl Gen<'_> {
         }
         let body = format!(
             "static inline void {c}_encode(mikros_midl_encoder_t *e, uint32_t at, const {c} *v, bool optional)\n{{\nmikros_midl_mark_t start = mikros_midl_begin_envelope(e);\nswitch (v->ordinal) {{\ncase 0: {{\nif (!optional) {{\nmikros_midl_encoder_fail(e, MIKROS_MIDL_TOO_LONG);\n}}\nreturn;\n}}\n{encode}default: {{\nmikros_midl_encoder_fail(e, MIKROS_MIDL_UNKNOWN_MEMBER);\nreturn;\n}}\n}}\nmikros_midl_end_envelope(e, at + 8u, start);\n}}\n"
+        );
+        out.push_str(&super::indented(&body));
+        out.push('\n');
+    }
+
+    /// The decoder of a union. A member of a flexible union that this
+    /// version does not declare is skipped, keeping its ordinal.
+    fn union_decoder(
+        &self,
+        name: &str,
+        strictness: Strictness,
+        members: &[OrdinalField],
+        out: &mut String,
+    ) {
+        let c = self.own(name);
+        let mut decode = String::new();
+        for m in members {
+            let (size, ordinal) = (self.size(&m.ty), m.ordinal);
+            let o = self.fresh("o");
+            writeln!(
+                decode,
+                "case UINT64_C({ordinal}): {{\nuint32_t {o} = mikros_midl_claim(d, {size}u);\n{}break;\n}}",
+                self.decode(&m.ty, &format!("v->{}", member(&m.name)), &o)
+            )
+            .unwrap();
+        }
+        let unknown = match strictness {
+            Strictness::Flexible => "mikros_midl_skip(d, bytes, handles);\nreturn;",
+            Strictness::Strict => "mikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);\nreturn;",
+        };
+        let body = format!(
+            "static inline void {c}_decode(mikros_midl_decoder_t *d, uint32_t at, {c} *v, bool optional)\n{{\nuint64_t ordinal = mikros_midl_get_u64(d, at);\nuint32_t bytes = mikros_midl_get_u32(d, at + 8u);\nuint32_t handles = mikros_midl_get_u32(d, at + 12u);\nmemset(v, 0, sizeof *v);\nif (ordinal == 0) {{\nif (bytes != 0 || handles != 0 || !optional) {{\nmikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);\n}}\nreturn;\n}}\nmikros_midl_mark_t start = mikros_midl_decoder_mark(d);\nv->ordinal = ordinal;\nswitch (ordinal) {{\n{decode}default: {{\n{unknown}\n}}\n}}\nmikros_midl_check_envelope(d, start, bytes, handles);\n}}\n"
         );
         out.push_str(&super::indented(&body));
         out.push('\n');
@@ -387,6 +469,30 @@ impl Gen<'_> {
         }
         let body = format!(
             "static inline void {c}_encode(mikros_midl_encoder_t *e, uint32_t at, const {c} *v)\n{{\nuint64_t count = 0;\n{count}mikros_midl_put_vector(e, at, count, UINT64_MAX);\nuint32_t envelopes = mikros_midl_append(e, count * 16u);\n(void)envelopes;\n{encode}(void)v;\n}}\n"
+        );
+        out.push_str(&super::indented(&body));
+        out.push('\n');
+    }
+
+    /// The decoder of a table. Fields that this version does not declare
+    /// are skipped.
+    fn table_decoder(&self, name: &str, members: &[OrdinalField], out: &mut String) {
+        let c = self.own(name);
+        let mut decode = String::new();
+        for m in Self::by_ordinal(members) {
+            let (size, ordinal) = (self.size(&m.ty), m.ordinal);
+            let field = format!("v->{}", ident(&m.name));
+            let o = self.fresh("o");
+            writeln!(
+                decode,
+                "case {ordinal}u: {{\nuint32_t {o} = mikros_midl_claim(d, {size}u);\n{}v->has_{} = true;\nbreak;\n}}",
+                self.decode(&m.ty, &field, &o),
+                m.name
+            )
+            .unwrap();
+        }
+        let body = format!(
+            "static inline void {c}_decode(mikros_midl_decoder_t *d, uint32_t at, {c} *v)\n{{\nmemset(v, 0, sizeof *v);\nbool present;\nuint64_t count = mikros_midl_get_vector(d, at, UINT64_MAX, &present);\nif (!present) {{\nmikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);\n}}\nuint32_t envelopes = mikros_midl_claim(d, count * 16u);\nfor (uint64_t i = 0; i < count && d->status == MIKROS_MIDL_OK; i++) {{\nuint32_t slot = envelopes + (uint32_t)(i * 16u);\nuint32_t bytes = mikros_midl_get_u32(d, slot);\nuint32_t handles = mikros_midl_get_u32(d, slot + 4u);\nif (!mikros_midl_get_presence(d, slot + 8u)) {{\nif (bytes != 0 || handles != 0 || i + 1 == count) {{\nmikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);\n}}\ncontinue;\n}}\nmikros_midl_mark_t start = mikros_midl_decoder_mark(d);\nswitch (i + 1) {{\n{decode}default: {{\nmikros_midl_skip(d, bytes, handles);\ncontinue;\n}}\n}}\nmikros_midl_check_envelope(d, start, bytes, handles);\n}}\n}}\n"
         );
         out.push_str(&super::indented(&body));
         out.push('\n');

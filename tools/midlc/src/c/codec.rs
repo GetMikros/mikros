@@ -137,6 +137,143 @@ impl Gen<'_> {
         }
     }
 
+    /// Statements that decode the value of `ty` whose inline part is at
+    /// `at`, through the decoder `d`, into `out`, a C lvalue.
+    pub(super) fn decode(&self, ty: &Type, out: &str, at: &str) -> String {
+        match ty {
+            Type::Bool => format!("{out} = mikros_midl_get_bool(d, {at});\n"),
+            Type::Int(int) => {
+                let n = wire_int(*int).1;
+                format!(
+                    "{out} = ({})mikros_midl_get_{n}(d, {at});\n",
+                    super::int_type(*int)
+                )
+            }
+            Type::F32 => format!("{out} = mikros_midl_get_f32(d, {at});\n"),
+            Type::F64 => format!("{out} = mikros_midl_get_f64(d, {at});\n"),
+            Type::String { max, optional } => {
+                format!("{out} = mikros_midl_get_string(d, {at}, {max}u, {optional});\n")
+            }
+            Type::Vector {
+                element,
+                max,
+                optional,
+            } if is_byte(element) => {
+                format!("{out} = mikros_midl_get_bytes(d, {at}, {max}u, {optional});\n")
+            }
+            Type::Vector {
+                element,
+                max,
+                optional,
+            } => {
+                let (present, n, base, items, i) = (
+                    self.fresh("present"),
+                    self.fresh("n"),
+                    self.fresh("base"),
+                    self.fresh("items"),
+                    self.fresh("i"),
+                );
+                let size = self.size(element);
+                let inner = self.decode(
+                    element,
+                    &format!("{items}[{i}]"),
+                    &format!("{base} + (uint32_t)({i} * {size}u)"),
+                );
+                let required = match optional {
+                    true => String::new(),
+                    false => format!(
+                        "if (!{present}) {{\nmikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);\n}}\n"
+                    ),
+                };
+                format!(
+                    "{{\nbool {present};\nuint64_t {n} = mikros_midl_get_vector(d, {at}, {max}u, &{present});\n({out}).data = NULL;\n({out}).count = 0;\n{required}if ({present}) {{\nuint32_t {base} = mikros_midl_claim(d, {n} * {size}u);\n{} = ({})mikros_midl_room(d, {n} ? {n} : 1, sizeof({}));\nfor (uint64_t {i} = 0; {i} < {n} && d->status == MIKROS_MIDL_OK; {i}++) {{\n{inner}}}\nif (d->status == MIKROS_MIDL_OK) {{\n({out}).data = {items};\n({out}).count = {n};\n}}\n}}\n}}\n",
+                    self.cdecl(element, &format!("(*{items})")),
+                    self.pointer(element, false),
+                    self.cdecl(element, ""),
+                )
+            }
+            Type::Array { element, len } => {
+                let i = self.fresh("i");
+                let size = self.size(element);
+                let inner = self.decode(
+                    element,
+                    &format!("({out})[{i}]"),
+                    &format!("{at} + {i} * {size}u"),
+                );
+                format!("for (uint32_t {i} = 0; {i} < {len}u; {i}++) {{\n{inner}}}\n")
+            }
+            Type::Handle {
+                object,
+                rights,
+                optional,
+            } => {
+                let any =
+                    |v: &Option<u32>| v.map_or("MIKROS_MIDL_ANY".into(), |v| format!("{v:#x}u"));
+                format!(
+                    "{out} = mikros_midl_get_handle(d, {at}, {}, {}, {optional});\n",
+                    any(object),
+                    any(rights)
+                )
+            }
+            // Endpoints are channels.
+            Type::Endpoint { optional, .. } => {
+                format!(
+                    "{out} = mikros_midl_get_handle(d, {at}, 4u, MIKROS_MIDL_ANY, {optional});\n"
+                )
+            }
+            Type::Named { name, optional } => {
+                let c = self.cname(name);
+                match self.decl_of(name) {
+                    DeclKind::Struct(_) if *optional => {
+                        let (o, s) = (self.fresh("o"), self.fresh("s"));
+                        let size = self.size(&Type::Named {
+                            name: name.clone(),
+                            optional: false,
+                        });
+                        format!(
+                            "{out} = NULL;\nif (mikros_midl_get_presence(d, {at})) {{\nuint32_t {o} = mikros_midl_claim(d, {size}u);\n{c} *{s} = ({c} *)mikros_midl_room(d, 1, sizeof({c}));\nif ({s} != NULL) {{\n{c}_decode(d, {o}, {s});\n{out} = {s};\n}}\n}}\n"
+                        )
+                    }
+                    DeclKind::Union { .. } => {
+                        format!("{c}_decode(d, {at}, &({out}), {optional});\n")
+                    }
+                    DeclKind::Struct(_) | DeclKind::Table(_) => {
+                        format!("{c}_decode(d, {at}, &({out}));\n")
+                    }
+                    DeclKind::Enum {
+                        strictness,
+                        underlying,
+                        ..
+                    } => {
+                        let n = wire_int(*underlying).1;
+                        let check = match strictness {
+                            Strictness::Strict => format!(
+                                "if (!{c}_known({out})) {{\nmikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);\n}}\n"
+                            ),
+                            Strictness::Flexible => String::new(),
+                        };
+                        format!("{out} = ({c})mikros_midl_get_{n}(d, {at});\n{check}")
+                    }
+                    DeclKind::Bits {
+                        strictness,
+                        underlying,
+                        ..
+                    } => {
+                        let n = wire_int(*underlying).1;
+                        let check = match strictness {
+                            Strictness::Strict => format!(
+                                "if ((({out}) & ~{c}_mask()) != 0) {{\nmikros_midl_decoder_fail(d, MIKROS_MIDL_INVALID);\n}}\n"
+                            ),
+                            Strictness::Flexible => String::new(),
+                        };
+                        format!("{out} = ({c})mikros_midl_get_{n}(d, {at});\n{check}")
+                    }
+                    _ => unreachable!("only data types are named as types"),
+                }
+            }
+        }
+    }
+
     /// The C type of a pointer to `ty`, to its const form when `constant`.
     fn pointer(&self, ty: &Type, constant: bool) -> String {
         let t = self.cdecl(ty, "(*)");
