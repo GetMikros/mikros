@@ -633,6 +633,8 @@ pub fn run(args: &Args) -> Result<()> {
                 )?;
                 println!("power-off run passed");
                 system_tests(args, &dir)?;
+                crate::desktop::run(&args.machine, args.kind, &dir.join("desktop"), timeout)?;
+                println!("desktop run passed");
                 crate::volumes::run(
                     &args.machine,
                     args.kind,

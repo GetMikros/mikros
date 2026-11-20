@@ -90,9 +90,15 @@ pub struct Built {
     /// For the test build, the root partition of the takeover run: the
     /// test boot image with a normal driver for QEMU's VGA function.
     pub takeover_image: Option<PathBuf>,
+    /// For the build with the system tests, the system of the desktop
+    /// run: the system image without the session settings.
+    pub desktop_image: Option<PathBuf>,
     /// Where xkbcommon was built.
     pub xkbcommon: crate::ports::Built,
 }
+
+/// The member of the session settings, which turn the desktop off.
+const SESSION_SETTINGS: &str = "system/config/session.yaml";
 
 /// The boot images that can be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,6 +203,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("ok       {}", fonts.ttf.display());
     let mut first_boot_image = None;
     let mut takeover_image = None;
+    let mut desktop_image = None;
     let (boot_image, system_image) = match boot {
         BootImage::System | BootImage::SystemTests => {
             let tests = boot == BootImage::SystemTests;
@@ -319,6 +326,18 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             };
             let system_image = boot_image(kind, name, &whole)?;
             println!("built    {}", system_image.display());
+            if tests {
+                // The desktop run's system: the same without the session
+                // settings, so that a desktop counts as installed.
+                let desktop: Vec<(&str, &Path)> = whole
+                    .iter()
+                    .copied()
+                    .filter(|&(at, _)| at != SESSION_SETTINGS)
+                    .collect();
+                let desktop = boot_image(kind, "desktop.img", &desktop)?;
+                println!("built    {}", desktop.display());
+                desktop_image = Some(desktop);
+            }
             let early: Vec<(&str, &Path)> = early
                 .iter()
                 .map(|(at, path)| (at.as_str(), path.as_path()))
@@ -2038,6 +2057,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         system_image,
         first_boot_image,
         takeover_image,
+        desktop_image,
         xkbcommon,
     })
 }

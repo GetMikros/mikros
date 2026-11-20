@@ -14,6 +14,7 @@ mod console;
 mod debug;
 mod debug_build;
 mod debuginfo;
+mod desktop;
 mod durability;
 mod entry_state;
 mod extended;
