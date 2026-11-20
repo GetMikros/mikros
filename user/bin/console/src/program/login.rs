@@ -3,8 +3,10 @@
 //! terminal of its own on console 1, and the other consoles show only the
 //! log; otherwise a console asks for a name and a password, without
 //! echoing the password, and shows the terminal of the session that
-//! `Login` starts until the session ends. Each terminal is closed after its use, and the login
-//! prompt shows again. The prompt and setup's terminal take the rows
+//! `Login` starts until the session ends. A session that the session
+//! manager hands to a console with `OnHandover` starts there with
+//! `LoginHandover` instead, in place of its login prompt. Each terminal is
+//! closed after its use, and the login prompt shows again. The prompt and setup's terminal take the rows
 //! below the log, and a session's terminal the whole screen.
 
 use crate::authorize::Request;
@@ -43,11 +45,15 @@ fn write(console: &Console, vt: &Vt, text: &[u8]) {
 }
 
 /// Reads a line typed at the login prompt of `vt`, of at most `max`
-/// bytes, echoing it when `echo` is set.
-async fn read_line(console: &Console, vt: &Vt, echo: bool, max: usize) -> String {
+/// bytes, echoing it when `echo` is set; None once a session was handed
+/// to `vt`.
+async fn read_line(console: &Console, vt: &Vt, echo: bool, max: usize) -> Option<String> {
     let mut line: Vec<u8> = Vec::new();
     loop {
         let b = loop {
+            if vt.handover.borrow().is_some() {
+                return None;
+            }
             if let Some(b) = vt.typed.borrow_mut().pop_front() {
                 break b;
             }
@@ -56,7 +62,7 @@ async fn read_line(console: &Console, vt: &Vt, echo: bool, max: usize) -> String
         match b {
             b'\r' | b'\n' => {
                 write(console, vt, b"\r\n");
-                return String::from_utf8_lossy(&line).into_owned();
+                return Some(String::from_utf8_lossy(&line).into_owned());
             }
             0x7F | 0x08 => {
                 // Whole UTF-8 sequences are erased.
@@ -141,6 +147,13 @@ pub async fn events(console: Rc<Console>, text_login: Rc<TextLoginAsyncClient>) 
                 ask: true,
             })),
             TextLoginEvent::OnAuthorizeEnded(e) => console.apply(Event::Ended(e.request)),
+            TextLoginEvent::OnHandover(e) => {
+                let index = usize::from(e.console).wrapping_sub(1);
+                if let Some(vt) = console.vts.get(index) {
+                    *vt.handover.borrow_mut() = Some((e.handover, e.name));
+                    vt.typed_in.notify();
+                }
+            }
         }
     }
     console.closed.set(true);
@@ -154,6 +167,62 @@ pub async fn events(console: Rc<Console>, text_login: Rc<TextLoginAsyncClient>) 
 async fn session_ended(console: &Console, vt: &Vt) -> bool {
     vt.ended.changed().await;
     !console.closed.get()
+}
+
+/// A terminal of the whole screen for a session on `vt`, or None after
+/// saying that there is none.
+async fn session_terminal(console: &Console, vt: &Vt) -> Option<Rc<Term>> {
+    let (cols, rows) = console.grid.get();
+    let term = Term::open(
+        &console.directory,
+        &console.reactor,
+        cols,
+        rows,
+        console.changed.clone(),
+    )
+    .await;
+    if term.is_none() {
+        write(console, vt, b"No terminal for the session.\r\n");
+    }
+    term
+}
+
+/// Shows the terminal `term` of the session that started on `vt` until
+/// the session ends, then closes it: false when the session manager
+/// closed `TextLogin` instead.
+async fn show_session(console: &Console, vt: &Vt, term: Rc<Term>) -> bool {
+    console
+        .spawner
+        .spawn(term.clone().pump(console.reactor.clone()));
+    console.show(vt, View::Terminal(term.clone()), true);
+    if !session_ended(console, vt).await {
+        return false;
+    }
+    term.close();
+    true
+}
+
+/// Starts the session that the session manager handed to `vt`, and shows
+/// it until it ends: false when the session manager closed `TextLogin`.
+async fn handed_over(console: &Console, vt: &Vt, text_login: &TextLoginAsyncClient) -> bool {
+    let Some((handover, name)) = vt.handover.borrow_mut().take() else {
+        return true;
+    };
+    let Some(term) = session_terminal(console, vt).await else {
+        return true;
+    };
+    let Some(token) = term.token() else {
+        return true;
+    };
+    match text_login.login_handover(vt.number, handover, token).await {
+        Ok(Ok(_)) => show_session(console, vt, term).await,
+        Ok(Err(status)) => {
+            let failed = format!("\r\nThe session of {name} failed: {status:?}\r\n");
+            write(console, vt, failed.as_bytes());
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Runs setup and logins on `vt` for as long as the session manager
@@ -193,36 +262,33 @@ pub async fn run(console: Rc<Console>, vt: Rc<Vt>, text_login: Rc<TextLoginAsync
         }
         let greeting = format!("{GREETING} (console {})\r\n\r\nlogin: ", vt.number);
         prompt(&console, vt, &greeting);
-        let name = read_line(&console, vt, true, NAME_MAX).await;
-        write(&console, vt, b"Password: ");
-        let password = read_line(&console, vt, false, PASSWORD_MAX).await;
+        let typed = match read_line(&console, vt, true, NAME_MAX).await {
+            Some(name) => {
+                write(&console, vt, b"Password: ");
+                read_line(&console, vt, false, PASSWORD_MAX)
+                    .await
+                    .map(|password| (name, password))
+            }
+            None => None,
+        };
+        let Some((name, password)) = typed else {
+            if !handed_over(&console, vt, &text_login).await {
+                return;
+            }
+            continue;
+        };
         if name.is_empty() {
             continue;
         }
-        let (cols, rows) = console.grid.get();
-        let Some(term) = Term::open(
-            &console.directory,
-            &console.reactor,
-            cols,
-            rows,
-            console.changed.clone(),
-        )
-        .await
-        else {
-            write(&console, vt, b"No terminal for the session.\r\n");
+        let Some(term) = session_terminal(&console, vt).await else {
             continue;
         };
         let Some(token) = term.token() else { continue };
         match text_login.login(vt.number, name, password, token).await {
             Ok(Ok(_)) => {
-                console
-                    .spawner
-                    .spawn(term.clone().pump(console.reactor.clone()));
-                console.show(vt, View::Terminal(term.clone()), true);
-                if !session_ended(&console, vt).await {
+                if !show_session(&console, vt, term).await {
                     return;
                 }
-                term.close();
             }
             Ok(Err(Status::AccessDenied)) => {
                 write(&console, vt, b"\r\nLogin incorrect\r\n");

@@ -19,4 +19,8 @@ protocol TextLogin {
     @9 -> OnAsk(request u32, console u8, app_id string<128>, via string<128>,
                 permission string<64>, reason string<256>);
     @10 AnswerAsk(request u32, allowed bool) -> () error base.Status;
+    // MIKSPEC-0057.R40
+    @11 -> OnHandover(console u8, handover u64, name string<32>);
+    @12 LoginHandover(console u8, handover u64, terminal base.Token)
+        -> () error base.Status;
 };

@@ -69,6 +69,8 @@ pub struct Requests {
     pub elevations: RefCell<Option<Rc<ElevationsAsyncClient>>>,
     /// The login session of the session on each console.
     pub sessions: RefCell<BTreeMap<u8, u32>>,
+    /// The sessions handed to consoles that have not started them yet.
+    pub handovers: RefCell<BTreeMap<u8, crate::login::Handover>>,
     /// The open requests by number.
     open: RefCell<BTreeMap<u32, Open>>,
     /// The tasks that wait for a console's open request to end.
@@ -89,6 +91,7 @@ impl Requests {
             text_login: RefCell::new(None),
             elevations: RefCell::new(None),
             sessions: RefCell::new(BTreeMap::new()),
+            handovers: RefCell::new(BTreeMap::new()),
             open: RefCell::new(BTreeMap::new()),
             freed: Waiters::default(),
             next: Cell::new(1),

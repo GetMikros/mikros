@@ -32,6 +32,9 @@ pub struct Vt {
     pub typed_in: Notify,
     /// Woken when `OnSessionEnded` names it.
     pub ended: Notify,
+    /// The number and user's name of a session that the session manager
+    /// handed to it, which its login prompt gives way to.
+    pub handover: RefCell<Option<(u64, String)>>,
 }
 
 impl Vt {
@@ -45,6 +48,7 @@ impl Vt {
             typed: RefCell::new(VecDeque::new()),
             typed_in: Notify::default(),
             ended: Notify::default(),
+            handover: RefCell::new(None),
         })
     }
 

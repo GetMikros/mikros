@@ -3,13 +3,14 @@
 //! settings that name the greeter probe as the greeter, boots, the
 //! session manager starts the compositor in greeter mode and gives it the
 //! display, and the compositor starts the probe, a system app, which
-//! draws a fullscreen toplevel in one colour with Vulkan. The run takes
-//! screen dumps until that colour covers the screen. Then it presses
-//! Ctrl, Alt and F2, which the compositor turns into a switch to the
-//! screen of text console 1, waits until the colour has left the screen,
-//! and presses Ctrl, Alt and F1, which the console turns into a switch
-//! back to the desktop, until the colour covers the screen again. It
-//! keeps the last screen dump in `desktop.ppm`.
+//! draws a fullscreen toplevel in one colour with Vulkan, and then logs
+//! in `dee`, whose login mode is `CONSOLE`. The run waits until dee's
+//! session started on text console 1 and its screen shows, without the
+//! colour. Then it presses Ctrl, Alt and F1, which the console turns into
+//! a switch to the desktop, until the colour covers the screen, and
+//! Ctrl, Alt and F2, which the compositor turns into a switch back to the
+//! console, until the colour has left the screen again. It keeps the
+//! last screen dump in `desktop.ppm`.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -23,6 +24,9 @@ use std::time::{Duration, Instant};
 /// compositor once it started the greeter.
 const STARTED: &str = "sessionmgr: started the compositor in greeter mode";
 const GREETER: &str = "compositor: started the greeter as pid";
+/// What the session manager logs once the session of `dee`, whom the
+/// probe logs in, started.
+const LOGGED_IN: &str = "sessionmgr: dee logged in on console 1";
 /// The probe's colour, in the bytes of the display, and how far a pixel
 /// may be from it.
 const COLOUR: [u8; 3] = [200, 40, 120];
@@ -68,6 +72,7 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
     let ended = (|| -> Result<()> {
         scenario::wait_for_line(&log, STARTED, &mut qemu, deadline)?;
         scenario::wait_for_line(&log, GREETER, &mut qemu, deadline)?;
+        scenario::wait_for_line(&log, LOGGED_IN, &mut qemu, deadline)?;
         let dump = dir.join("desktop.ppm");
         // Until the share of the colour on the screen is as `wanted`
         // says, which `what` names.
@@ -90,14 +95,11 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
                 std::thread::sleep(DUMP_EVERY);
             }
         };
-        until(
-            &|share| share >= COVERED,
-            "the probe's colour covered the screen",
-        )?;
-        scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
-        until(&|share| share <= GONE, "the text console's screen showed")?;
+        until(&|share| share <= GONE, "the session's console showed")?;
         scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
-        until(&|share| share >= COVERED, "the desktop showed again")
+        until(&|share| share >= COVERED, "the desktop showed")?;
+        scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
+        until(&|share| share <= GONE, "the console showed again")
     })();
     let _ = qemu.kill();
     let _ = qemu.wait();

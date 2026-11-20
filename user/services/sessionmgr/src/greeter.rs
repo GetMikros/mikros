@@ -6,6 +6,7 @@
 //! and the input devices. When it has exited three times within 60
 //! seconds, the text console's login takes over until the next boot.
 
+use crate::authorize::Requests;
 use crate::seat::Seats;
 use crate::spawn::block;
 use crate::{SECOND, now};
@@ -25,7 +26,7 @@ use mikros_rt::interfaces::mikros::service::{
 };
 use mikros_rt::interfaces::mikros::session::{
     AccountsAsyncClient, Login, LoginAsyncServer, LoginListUsersResponse, LoginLoginResponse,
-    LoginRequest, LoginShutdownResponse, LoginUser, Seat, SeatAsyncClient,
+    LoginMode, LoginRequest, LoginShutdownResponse, LoginUser, Seat, SeatAsyncClient,
 };
 
 const COMPOSITOR: &str = "/system/bin/compositor";
@@ -120,6 +121,7 @@ pub async fn run(
     directory: Rc<DirectoryAsyncClient>,
     launcher: Rc<LauncherAsyncClient>,
     accounts: Rc<AccountsAsyncClient>,
+    requests: Rc<Requests>,
     seats: Rc<Seats>,
     reactor: Reactor,
     spawner: Spawner,
@@ -176,7 +178,8 @@ pub async fn run(
         let login =
             LoginAsyncServer::new(ServerEnd::new(login_server.into_handle()), reactor.clone());
         let (d, a, r) = (directory.clone(), accounts.clone(), reactor.clone());
-        spawner.spawn(async move { serve(login, &d, &a, &r).await });
+        let (q, s) = (requests.clone(), seats.clone());
+        spawner.spawn(async move { serve(login, &d, &a, &q, &s, &r).await });
         exited(&launcher, pid).await;
         seats.set_compositor(None).await;
         let at = now();
@@ -206,6 +209,8 @@ async fn serve(
     login: LoginAsyncServer,
     directory: &DirectoryAsyncClient,
     accounts: &AccountsAsyncClient,
+    requests: &Requests,
+    seats: &Seats,
     reactor: &Reactor,
 ) {
     while let Ok(request) = login.next().await {
@@ -228,10 +233,8 @@ async fn serve(
                 r.reply(s, LoginListUsersResponse { users, last })
             }
             LoginRequest::Login(q, r) => {
-                let result = match accounts.authenticate(q.name, q.password).await {
-                    // Sessions of the desktop come with the compositor of
-                    // a user session.
-                    Ok(Ok(_)) => Err(Status::NotSupported),
+                let result = match accounts.authenticate(q.name.clone(), q.password).await {
+                    Ok(Ok(a)) => log_in(accounts, requests, seats, a.user, &q.name).await,
                     Ok(Err(_)) => Err(Status::AccessDenied),
                     Err(_) => Err(Status::PeerClosed),
                 };
@@ -242,6 +245,30 @@ async fn serve(
                 r.reply(s, result.map(|()| LoginShutdownResponse {}))
             }
         };
+    }
+}
+
+/// Starts the session of `user`, named `name`, whom `Login`
+/// authenticated: a user whose login mode is `CONSOLE` on the lowest text
+/// console without a session, whose screen then shows
+/// (MIKSPEC-0057.R39). Sessions of the desktop come with the compositor
+/// of a user session.
+async fn log_in(
+    accounts: &AccountsAsyncClient,
+    requests: &Requests,
+    seats: &Seats,
+    user: u32,
+    name: &str,
+) -> Result<(), Status> {
+    match accounts.get_login_mode(user).await {
+        Ok(Ok(r)) if r.mode == LoginMode::Console => {
+            let console = crate::login::hand_over(requests, user, name).await?;
+            seats.switch(seats.console_screen(console)).await;
+            Ok(())
+        }
+        Ok(Ok(_)) => Err(Status::NotSupported),
+        Ok(Err(status)) => Err(status),
+        Err(_) => Err(Status::PeerClosed),
     }
 }
 

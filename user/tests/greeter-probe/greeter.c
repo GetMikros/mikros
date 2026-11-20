@@ -1,11 +1,14 @@
 /* The greeter of the desktop run: the one part of the system app
  * system.mikros.greeter_probe, which the compositor starts in greeter
- * mode with its Wayland channel as the USER startup handle 1. It shows a
- * fullscreen toplevel, which Vulkan clears to one colour and presents
- * through the Wayland WSI, and which the desktop run looks for on the
- * screen; then it serves the connection until the compositor closes it.
+ * mode with its Wayland channel as the USER startup handle 1 and its
+ * Login channel as 3. It shows a fullscreen toplevel, which Vulkan
+ * clears to one colour and presents through the Wayland WSI, and which
+ * the desktop run looks for on the screen. With the arguments
+ * `--login <name> <password>`, it then logs that user in through
+ * Login. Then it serves the connection until the compositor closes it.
  * It exits with the number of the step that failed, if one does. */
 
+#include <mikros/midl/mikros.session.h>
 #include <mikros/startup.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,7 +18,10 @@
 #include <vulkan/vulkan.h>
 #include "xdg-shell-client-protocol.h"
 
-enum { ROLE_USER = 16, WAYLAND_ID = 1, KIND_CHANNEL = 9 };
+enum { ROLE_USER = 16, WAYLAND_ID = 1, LOGIN_ID = 3, KIND_CHANNEL = 9 };
+
+/* The memory of the Login call's messages. */
+static uint8_t arena_memory[MIKROS_MIDL_CALL_ROOM + 4096];
 
 /* The colour, in the bytes of a B8G8R8A8_UNORM image: red 200, green 40,
  * blue 120. */
@@ -273,7 +279,26 @@ static int draw(struct wl_display *display, struct wl_surface *surface, struct s
 	return present(device, queue, family, swapchain, images);
 }
 
-int main(void)
+/* Logs `name` in with `password` through the Login channel. */
+static int log_in(const char *name, const char *password)
+{
+	mikros_handle_t login = mikros_take_startup_handle(ROLE_USER, LOGIN_ID);
+	if (login == 0)
+		return 60;
+	mikros_midl_arena_t arena;
+	mikros_midl_arena_init(&arena, arena_memory, sizeof arena_memory);
+	mikros_midl_string_t n = {name, strlen(name)};
+	mikros_midl_string_t p = {password, strlen(password)};
+	mikros_base_Status error;
+	mikros_midl_status_t called =
+		mikros_session_Login_Login(login, n, p, &error, INT64_MAX, &arena);
+	/* A status that Login replied with: 100 and its value's magnitude. */
+	if (called == MIKROS_MIDL_ERROR)
+		return 100 - (int)error;
+	return called == MIKROS_MIDL_OK ? 0 : 61;
+}
+
+int main(int argc, char **argv)
 {
 	struct state s = {0};
 	mikros_handle_t channel = mikros_take_startup_handle(ROLE_USER, WAYLAND_ID);
@@ -303,6 +328,8 @@ int main(void)
 		return 21;
 
 	int failed = draw(display, surface, &s);
+	if (!failed && argc == 4 && strcmp(argv[1], "--login") == 0)
+		failed = log_in(argv[2], argv[3]);
 	if (failed) {
 		fprintf(stderr, "greeter-probe: step %d failed\n", failed);
 		return failed;

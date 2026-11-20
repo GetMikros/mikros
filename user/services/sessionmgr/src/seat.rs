@@ -144,7 +144,7 @@ impl Seats {
     }
 
     /// The screen of text console `console`.
-    fn console_screen(&self, console: u8) -> u8 {
+    pub fn console_screen(&self, console: u8) -> u8 {
         console + u8::from(self.desktop)
     }
 

@@ -240,11 +240,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             launcher.clone(),
             spawner.clone(),
         );
+        let q = requests.clone();
         spawner.spawn(async move {
             // The compositor in greeter mode owns the seat while it runs,
             // and the console once the compositor failed.
             if let Some(accounts) = greeting {
-                greeter::run(d, l, Rc::new(accounts), seats, r, s).await;
+                greeter::run(d, l, Rc::new(accounts), q, seats, r, s).await;
                 mikros_rt::log!(Error, "sessionmgr: the text console's login takes over");
             }
         });

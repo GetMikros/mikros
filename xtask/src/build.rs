@@ -335,14 +335,19 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", system_image.display());
             if tests {
                 // The desktop run's system: the same without the session
-                // settings, so that a desktop counts as installed, and with
-                // shell settings that name the greeter probe.
+                // settings, so that a desktop counts as installed, with
+                // shell settings that name the greeter probe, and with
+                // the user that the probe logs in.
                 let shell = crate::workspace_root().join(PROBE_SHELL.1);
+                let users = desktop_users(kind)?;
                 let desktop: Vec<(&str, &Path)> = whole
                     .iter()
                     .copied()
                     .filter(|&(at, _)| at != SESSION_SETTINGS)
-                    .chain([(PROBE_SHELL.0, shell.as_path())])
+                    .chain([
+                        (PROBE_SHELL.0, shell.as_path()),
+                        ("state/accounts/users", users.as_path()),
+                    ])
                     .collect();
                 let desktop = boot_image(kind, "desktop.img", &desktop)?;
                 println!("built    {}", desktop.display());
@@ -2101,6 +2106,30 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Writes the users file of the desktop run for `kind` and returns its
+/// path: `dee`, an administrator whose login mode is `CONSOLE`, with the
+/// password `dee-password`, which the greeter probe logs in. A fixed salt
+/// keeps the file the same from one build to the next.
+fn desktop_users(kind: Kind) -> Result<PathBuf> {
+    use mikros_userdb::{Kind as UserKind, LoginMode, Users, encode, hash};
+    let mut users = Users::new();
+    let salt = [7; hash::SALT_LEN];
+    let phc = hash::hash(b"dee-password", &salt).context("hashing a password")?;
+    let id = users
+        .create("dee", "Dee", UserKind::Admin, phc)
+        .map_err(|r| anyhow::anyhow!("adding dee: {r:?}"))?;
+    users
+        .set_login_mode(id, LoginMode::Console)
+        .map_err(|r| anyhow::anyhow!("setting the login mode of dee: {r:?}"))?;
+    let dir = crate::workspace_root()
+        .join("target/boot")
+        .join(kind.name());
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("desktop-users");
+    fs::write(&path, encode(&users)).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 /// The files of Vulkan that the system image holds: the loader `loader`,
 /// lavapipe, the CPU driver, from `mesa`, with its manifest where
 /// drivers' manifests go, and LLVM's library from `llvm`, which it needs.
@@ -2592,7 +2621,8 @@ fn greeter_probe(
         name: "Greeter probe",
         description: "The greeter of the desktop run",
         executable: name,
-        shell_parts: "  - roles: [greeter]\n    executable: greeter-probe\n",
+        shell_parts: "  - roles: [greeter]\n    executable: greeter-probe\n    \
+                      arguments: [\"--login\", dee, dee-password]\n",
         files: vec![(name.to_owned(), program, true)],
     };
     crate::system_apps::members(&app, &dir.join("app"))

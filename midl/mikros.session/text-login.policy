@@ -7,3 +7,4 @@ TextLogin.Login: public
 TextLogin.Answer: public
 TextLogin.Cancel: public
 TextLogin.AnswerAsk: public
+TextLogin.LoginHandover: public

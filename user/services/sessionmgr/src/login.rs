@@ -2,10 +2,14 @@
 //! numbered 1 to 6: first-boot setup, and logins, which start the user's
 //! session on the console's terminal and end it once its leader exits.
 //! Each console has at most one session, and the sessions of different
-//! consoles run at the same time.
+//! consoles run at the same time. A user whom the greeter authenticated
+//! is handed to the lowest console without a session: `OnHandover` tells
+//! the console a new random number, with which it calls `LoginHandover`
+//! within 30 seconds (MIKSPEC-0057.R40).
 
 use crate::authorize::Requests;
 use crate::spawn::{block, standard};
+use crate::wait::{Either, Slot, select};
 use crate::{SECOND, now};
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -22,8 +26,9 @@ use mikros_rt::interfaces::mikros::process::{
 };
 use mikros_rt::interfaces::mikros::session::{
     AccountsAsyncClient, TextLogin, TextLoginAnswerAskResponse, TextLoginAnswerResponse,
-    TextLoginAsyncServer, TextLoginCancelResponse, TextLoginLoginResponse,
-    TextLoginNeedsSetupResponse, TextLoginRequest, TextLoginRunSetupResponse,
+    TextLoginAsyncServer, TextLoginCancelResponse, TextLoginLoginHandoverResponse,
+    TextLoginLoginResponse, TextLoginNeedsSetupResponse, TextLoginRequest,
+    TextLoginRunSetupResponse,
 };
 
 const SETUP: &str = "/system/bin/setup";
@@ -43,6 +48,161 @@ const TERM_VALUE: &str = "TERM=xterm-256color";
 /// The numbers of the consoles, and the one that setup runs on.
 const CONSOLES: core::ops::RangeInclusive<u8> = 1..=6;
 const SETUP_CONSOLE: u8 = 1;
+/// How long a handover's number stays valid.
+const HANDOVER_FOR: i64 = 30 * SECOND;
+
+/// A session handed to a console, until the console starts it.
+pub struct Handover {
+    number: u64,
+    user: u32,
+    name: String,
+    at: i64,
+    /// Whether the console started the session.
+    started: Rc<Slot<Result<(), Status>>>,
+}
+
+/// Hands the session of `user`, named `name`, whom the greeter
+/// authenticated, to the lowest console without a session, and returns
+/// that console once the session runs there. Fails with `BAD_STATE`
+/// without such a console or a console that serves `TextLogin`, and with
+/// `TIMED_OUT` when the console does not start the session in time.
+pub async fn hand_over(requests: &Requests, user: u32, name: &str) -> Result<u8, Status> {
+    let server = requests
+        .text_login
+        .borrow()
+        .clone()
+        .ok_or(Status::BadState)?;
+    let console = CONSOLES
+        .clone()
+        .find(|c| {
+            !requests.sessions.borrow().contains_key(c)
+                && !requests.handovers.borrow().contains_key(c)
+        })
+        .ok_or(Status::BadState)?;
+    let mut number = [0u8; 8];
+    mikros_rt::objects::random(&mut number).map_err(|_| Status::Internal)?;
+    let number = u64::from_le_bytes(number);
+    let started = Rc::new(Slot::default());
+    let at = now();
+    requests.handovers.borrow_mut().insert(
+        console,
+        Handover {
+            number,
+            user,
+            name: name.into(),
+            at,
+            started: started.clone(),
+        },
+    );
+    if server
+        .server()
+        .send_on_handover(console, number, name.into())
+        .is_err()
+    {
+        requests.handovers.borrow_mut().remove(&console);
+        return Err(Status::PeerClosed);
+    }
+    let late = requests.reactor.sleep_until(at + HANDOVER_FOR);
+    match select(started.take(), late).await {
+        Either::Left(started) => started.map(|()| console),
+        Either::Right(_) => {
+            let mut handovers = requests.handovers.borrow_mut();
+            if handovers.get(&console).is_some_and(|h| h.number == number) {
+                handovers.remove(&console);
+            }
+            Err(Status::TimedOut)
+        }
+    }
+}
+
+/// What starting a session needs, and the consoles with one.
+struct Sessions {
+    launcher: Rc<LauncherAsyncClient>,
+    requests: Rc<Requests>,
+    server: Rc<TextLoginAsyncServer>,
+    running: Rc<RefCell<BTreeSet<u8>>>,
+    reactor: Reactor,
+    spawner: Spawner,
+}
+
+impl Sessions {
+    /// Starts the session of `user`, named `name`, on `console` with the
+    /// terminal of `token`, and a task that ends it once its leader exits
+    /// and then sends `OnSessionEnded`.
+    async fn start(
+        &self,
+        console: u8,
+        user: u32,
+        name: String,
+        token: &OwnedHandle,
+    ) -> Result<(), Status> {
+        let environment = environment(&name);
+        let home = Some(format!("/users/{name}"));
+        let started = start(
+            &self.launcher,
+            SHELL,
+            SHELL_APP,
+            user,
+            home,
+            &environment,
+            token,
+        );
+        let pid = match started.await {
+            Ok(pid) => pid,
+            Err(status) => {
+                mikros_rt::log!(Error, "sessionmgr: starting {SHELL} failed: {status:?}");
+                return Err(status);
+            }
+        };
+        mikros_rt::log!(
+            Info,
+            "sessionmgr: {name} logged in on console {console}, session {pid}"
+        );
+        self.running.borrow_mut().insert(console);
+        // The session's login session has the shell's process ID.
+        self.requests.sessions.borrow_mut().insert(console, pid);
+        let (launcher, reactor) = (self.launcher.clone(), self.reactor.clone());
+        let (server, running) = (self.server.clone(), self.running.clone());
+        let requests = self.requests.clone();
+        self.spawner.spawn(async move {
+            end_session(&launcher, &reactor, pid).await;
+            mikros_rt::log!(Info, "sessionmgr: ended session {pid}");
+            requests.sessions.borrow_mut().remove(&console);
+            running.borrow_mut().remove(&console);
+            let _ = server.server().send_on_session_ended(console);
+        });
+        Ok(())
+    }
+
+    /// Starts the session handed to `console` with `number`, without a
+    /// password, on the terminal of `token`.
+    async fn hand_over(&self, console: u8, number: u64, token: &OwnedHandle) -> Result<(), Status> {
+        let handover = {
+            let mut handovers = self.requests.handovers.borrow_mut();
+            match handovers.get(&console) {
+                Some(h) if h.number == number => handovers.remove(&console),
+                _ => None,
+            }
+        };
+        let handover = handover.ok_or(Status::NotFound)?;
+        if now() - handover.at > HANDOVER_FOR {
+            return Err(Status::NotFound);
+        }
+        let started = match self.running.borrow().contains(&console) {
+            true => Err(Status::BadState),
+            false => Ok(()),
+        };
+        let started = match started {
+            Ok(()) => {
+                self.start(console, handover.user, handover.name, token)
+                    .await
+            }
+            Err(status) => Err(status),
+        };
+        handover.started.give(started);
+        started
+    }
+}
 
 /// Whether a user account exists.
 async fn any_user(accounts: &AccountsAsyncClient) -> Result<bool, Status> {
@@ -182,6 +342,14 @@ pub async fn serve(
     let accounts = Rc::new(accounts);
     // The consoles on which a session runs.
     let running: Rc<RefCell<BTreeSet<u8>>> = Rc::new(RefCell::new(BTreeSet::new()));
+    let sessions = Sessions {
+        launcher: launcher.clone(),
+        requests: requests.clone(),
+        server: server.clone(),
+        running: running.clone(),
+        reactor: reactor.clone(),
+        spawner: spawner.clone(),
+    };
     // Whether the setup program runs.
     let in_setup = Rc::new(Cell::new(false));
     while let Ok(request) = server.next().await {
@@ -227,45 +395,12 @@ pub async fn serve(
                         continue;
                     }
                 };
-                let environment = environment(&q.name);
-                let started = start(
-                    &launcher,
-                    SHELL,
-                    SHELL_APP,
-                    user,
-                    Some(format!("/users/{}", q.name)),
-                    &environment,
-                    &q.terminal,
-                )
-                .await;
-                let pid = match started {
-                    Ok(pid) => pid,
-                    Err(status) => {
-                        mikros_rt::log!(Error, "sessionmgr: starting {SHELL} failed: {status:?}");
-                        let _ = r.reply(s, Err(status));
-                        continue;
-                    }
-                };
-                let console = q.console;
-                mikros_rt::log!(
-                    Info,
-                    "sessionmgr: {} logged in on console {console}, session {pid}",
-                    q.name
-                );
-                running.borrow_mut().insert(console);
-                // The session's login session has the shell's process ID.
-                requests.sessions.borrow_mut().insert(console, pid);
-                let _ = r.reply(s, Ok(TextLoginLoginResponse {}));
-                let (launcher, reactor) = (launcher.clone(), reactor.clone());
-                let (server, running) = (server.clone(), running.clone());
-                let requests = requests.clone();
-                spawner.spawn(async move {
-                    end_session(&launcher, &reactor, pid).await;
-                    mikros_rt::log!(Info, "sessionmgr: ended session {pid}");
-                    requests.sessions.borrow_mut().remove(&console);
-                    running.borrow_mut().remove(&console);
-                    let _ = server.server().send_on_session_ended(console);
-                });
+                let started = sessions.start(q.console, user, q.name, &q.terminal).await;
+                let _ = r.reply(s, started.map(|()| TextLoginLoginResponse {}));
+            }
+            TextLoginRequest::LoginHandover(q, r) => {
+                let started = sessions.hand_over(q.console, q.handover, &q.terminal).await;
+                let _ = r.reply(s, started.map(|()| TextLoginLoginHandoverResponse {}));
             }
             // The password is checked in a task of its own, so that the
             // console's other requests, Cancel among them, go on.
