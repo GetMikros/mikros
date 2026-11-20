@@ -24,6 +24,7 @@ mod fuzz;
 mod image;
 mod input;
 mod llvm;
+mod llvm_port;
 mod loader_check;
 mod machine_state;
 mod meson;

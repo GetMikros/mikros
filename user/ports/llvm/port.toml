@@ -1,0 +1,13 @@
+# LLVM for Mikros: the C++ runtimes libunwind, libc++abi and libc++.
+# Its release is the toolchain's, pinned in xtask/src/llvm.rs, and xtask
+# refuses to build when the two differ; the source archive is the one
+# the toolchain fetched. Only the parts of the source that the port
+# builds are unpacked, without their tests, in target/sources/llvm. The
+# patches:
+# - 0001: libc++ takes the locale functions of the Linux support header
+#   on Mikros, whose C library has them.
+
+[source]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/llvm-project-23.1.4.src.tar.xz"
+sha256 = "819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2"
+dir = "llvm-project-23.1.4.src"

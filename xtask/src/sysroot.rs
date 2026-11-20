@@ -137,7 +137,7 @@ fn make() -> Result<PathBuf> {
     keep_if_unchanged(&crti)?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
     assemble(&cfg, "user/runtime/libc/crt/crt1.S", &lib.join("crt1.o"))?;
-    llvm::build_cxx_runtimes(&cmake_toolchain_file(), &sysroot)?;
+    crate::llvm_port::build_cxx_runtimes(&cmake_toolchain_file(), &sysroot)?;
     Ok(sysroot)
 }
 
