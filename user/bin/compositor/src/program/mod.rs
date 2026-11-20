@@ -119,11 +119,20 @@ impl Compositor {
                     match Output::new(display, &self.renderer).await {
                         Ok(output) => {
                             let (width, height) = output.size();
+                            mikros_rt::log!(
+                                Info,
+                                "compositor: showing {width}x{height} on the display {}",
+                                added.instance
+                            );
                             self.server.borrow_mut().screen = Some((width as i32, height as i32));
                             *self.output.borrow_mut() = Some(output);
                             self.changed.notify();
                         }
-                        Err(e) => eprintln!("compositor: the display {}: {e}", added.instance),
+                        Err(e) => mikros_rt::log!(
+                            Error,
+                            "compositor: the display {}: {e}",
+                            added.instance
+                        ),
                     }
                 }
                 // Input comes with window management.
@@ -247,7 +256,7 @@ impl Compositor {
                 self.renderer.draw(output.back(), BACKGROUND, &layers)
             };
             if let Err(e) = drawn {
-                eprintln!("compositor: drawing a frame: {e:?}");
+                mikros_rt::log!(Error, "compositor: drawing a frame: {e:?}");
             }
             // No frame reads the buffers that surfaces no longer show.
             let releases = self.server.borrow_mut().take_releases();
@@ -255,7 +264,7 @@ impl Compositor {
                 self.store.borrow().reach(point);
             }
             if let Err(e) = output.show().await {
-                eprintln!("compositor: showing a frame: {e:?}");
+                mikros_rt::log!(Error, "compositor: showing a frame: {e:?}");
             }
             *self.output.borrow_mut() = Some(output);
             self.server.borrow_mut().frames_done(milliseconds());
@@ -271,7 +280,7 @@ impl Compositor {
         let part = match parts::find("greeter") {
             Ok(part) => part,
             Err(e) => {
-                eprintln!("compositor: no greeter: {e:?}");
+                mikros_rt::log!(Error, "compositor: no greeter: {e:?}");
                 return;
             }
         };
@@ -282,9 +291,9 @@ impl Compositor {
         let (ours, theirs) =
             unsafe { (OwnedHandle::from_raw(ours), OwnedHandle::from_raw(theirs)) };
         match parts::start(&self.reactor, &part, theirs, Some(login)).await {
-            Ok(pid) => eprintln!("compositor: started the greeter as pid {pid}"),
+            Ok(pid) => mikros_rt::log!(Info, "compositor: started the greeter as pid {pid}"),
             Err(e) => {
-                eprintln!("compositor: starting the greeter: {e}");
+                mikros_rt::log!(Error, "compositor: starting the greeter: {e}");
                 return;
             }
         }
@@ -320,19 +329,23 @@ async fn render_device(directory: &DirectoryAsyncClient, reactor: &Reactor) -> O
 }
 
 pub fn main() {
+    let Some(directory) = duplicate(std::os::mikros::directory().as_raw_handle()) else {
+        std::process::exit(1);
+    };
+    // The messages go to the log service: the session manager gives no
+    // standard error.
+    let directory = ClientEnd::new(directory);
+    mikros_rt::log::connect(&directory);
     let Some(seat) = take(SEAT_ID) else {
-        eprintln!("compositor: the Seat channel is missing");
+        mikros_rt::log!(Error, "compositor: the Seat channel is missing");
         std::process::exit(1);
     };
     // In greeter mode, the Login channel goes to the greeter.
     let login = take(LOGIN_ID);
-    let Some(directory) = duplicate(std::os::mikros::directory().as_raw_handle()) else {
-        std::process::exit(1);
-    };
     let renderer = match Renderer::new() {
         Ok(renderer) => renderer,
         Err(e) => {
-            eprintln!("compositor: no Vulkan device: {e:?}");
+            mikros_rt::log!(Error, "compositor: no Vulkan device: {e:?}");
             std::process::exit(1);
         }
     };
@@ -341,7 +354,7 @@ pub fn main() {
     };
     let reactor = executor.reactor().clone();
     let spawner = executor.spawner().clone();
-    let directory = DirectoryAsyncClient::new(ClientEnd::new(directory), reactor.clone());
+    let directory = DirectoryAsyncClient::new(directory, reactor.clone());
     let mut server = Server::new();
     server.buffer_formats = imports::FORMATS.to_vec();
     let compositor = Rc::new(Compositor {
