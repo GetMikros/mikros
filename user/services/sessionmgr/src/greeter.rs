@@ -160,7 +160,7 @@ pub async fn run(
         );
         let seat = SeatAsyncClient::new(seat, reactor.clone());
         let (d, r) = (directory.clone(), reactor.clone());
-        spawner.spawn(async move { crate::seat::serve(&d, &r, seat).await });
+        spawner.spawn(async move { crate::seat::serve(&d, &r, seat, "compositor").await });
         let login =
             LoginAsyncServer::new(ServerEnd::new(login_server.into_handle()), reactor.clone());
         let (d, a, r) = (directory.clone(), accounts.clone(), reactor.clone());

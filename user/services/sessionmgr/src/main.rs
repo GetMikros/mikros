@@ -232,7 +232,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 greeter::run(d.clone(), l, Rc::new(accounts), r.clone(), s).await;
                 mikros_rt::log!(Error, "sessionmgr: the text console's login takes over");
             }
-            seat::serve(&d, &r, seat).await
+            seat::serve(&d, &r, seat, "console").await
         });
         let login = ServerEnd::new(login_server.into_handle());
         login::serve(login, accounts, launcher, requests, reactor, spawner).await;

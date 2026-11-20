@@ -1,7 +1,8 @@
 //! The seat: the display and the input devices that the session manager
-//! opens and gives to the text console through `Seat`, with the screen
-//! that it shows. No desktop is installed, so every screen is one of the
-//! console's, and a request to switch to another owner's is ignored.
+//! opens and gives to their owner through `Seat`, the text console or
+//! the compositor in greeter mode, with the screen that it shows. The
+//! console is not told of the desktop's screen yet, so a request to
+//! switch to another owner's screen is ignored.
 
 use crate::{SECOND, now};
 use alloc::collections::BTreeSet;
@@ -47,7 +48,12 @@ async fn instances(directory: &DirectoryAsyncClient, service: &str) -> alloc::ve
 /// Opens the first display, once one is published, and gives it to
 /// `seat`. GPU devices without `DISPLAY`, such as a render device, are
 /// passed over.
-async fn display(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &SeatAsyncClient) {
+async fn display(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    seat: &SeatAsyncClient,
+    owner: &str,
+) {
     loop {
         for instance in instances(directory, GPU).await {
             let Some(device) = connect::<Gpu>(directory, GPU, &instance).await else {
@@ -64,8 +70,8 @@ async fn display(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &Sea
             match device.open_display(server, None).await {
                 Ok(Ok(_)) => {
                     match seat.add_display(instance.clone(), display) {
-                        Ok(()) => mikros_rt::log!(Info, "sessionmgr: gave the console the display"),
-                        Err(_) => mikros_rt::log!(Error, "sessionmgr: the console took no display"),
+                        Ok(()) => mikros_rt::log!(Info, "sessionmgr: gave the {owner} the display"),
+                        Err(_) => mikros_rt::log!(Error, "sessionmgr: the {owner} took no display"),
                     }
                     return;
                 }
@@ -77,7 +83,7 @@ async fn display(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &Sea
 }
 
 /// Opens every input device as it is published and gives it to `seat`,
-/// accepted, for as long as the console runs. Each device is opened under
+/// accepted, for as long as the owner runs. Each device is opened under
 /// its name, which starts with a letter: the device manager also
 /// registers it under its service ID, a number, and a device has one
 /// reader at a time.
@@ -109,8 +115,8 @@ async fn inputs(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &Seat
     }
 }
 
-/// Reads the console's events until it closes the seat, ignoring a
-/// request to switch to a screen, since none is another owner's.
+/// Reads the owner's events until it closes the seat, ignoring a
+/// request to switch to a screen, which switching does not handle yet.
 async fn switches(seat: &SeatAsyncClient) {
     while let Ok(event) = seat.next_event().await {
         if let SeatEvent::OnSwitchRequested(e) = event {
@@ -119,10 +125,15 @@ async fn switches(seat: &SeatAsyncClient) {
     }
 }
 
-/// Gives the console the display, the screen to show and the input
+/// Gives `owner` the display, the screen to show and the input
 /// devices.
-pub async fn serve(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: SeatAsyncClient) {
-    display(directory, reactor, &seat).await;
+pub async fn serve(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    seat: SeatAsyncClient,
+    owner: &str,
+) {
+    display(directory, reactor, &seat, owner).await;
     let _ = seat.set_screen(FIRST_SCREEN);
     first(inputs(directory, reactor, &seat), switches(&seat)).await;
 }
