@@ -189,6 +189,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", llvm.display());
     let mesa = crate::mesa::build()?;
     println!("built    {}", mesa.display());
+    let vulkan = crate::vulkan::loader()?;
+    println!("built    {}", vulkan.display());
     let fonts = crate::fonts::fetch()?;
     println!("ok       {}", fonts.ttf.display());
     let mut first_boot_image = None;
@@ -240,6 +242,36 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     println!("built    {}", program.display());
                     only_tests.push((format!("system/bin/tests/{name}"), program));
                 }
+                // Vulkan through the loader and the CPU driver, with a
+                // compute shader that glslang compiles here into a header.
+                let shaders = c_dir("vulkan-c");
+                fs::create_dir_all(&shaders)?;
+                crate::port::run(
+                    Command::new(crate::glslang::build()?.join("glslangValidator"))
+                        .args(["-V", "--quiet", "--vn", "square_spv", "-o"])
+                        .arg(shaders.join("square.h"))
+                        .arg(crate::workspace_root().join("user/tests/vulkan-c/square.comp")),
+                )
+                .context("compiling the shader of vulkan-c")?;
+                let headers = crate::vulkan::headers()?.join("include");
+                let mut args = strict.to_vec();
+                args.extend([
+                    format!("-I{}", headers.display()),
+                    format!("-I{}", shaders.display()),
+                    vulkan
+                        .join("libraries")
+                        .join(crate::vulkan::LOADER)
+                        .display()
+                        .to_string(),
+                ]);
+                let program = c_build(
+                    "vulkan-c",
+                    &["user/tests/vulkan-c/vulkan.c"],
+                    Linking::Dynamic,
+                    &args,
+                )?;
+                println!("built    {}", program.display());
+                only_tests.push(("system/bin/tests/vulkan-c".to_owned(), program));
             }
             // The system fonts and the fontconfig configuration that names
             // them as the defaults.
@@ -271,8 +303,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &freetype,
                 &keymaps,
                 &wayland.library,
-                &mesa,
-                &llvm,
+                &vulkan_members(&vulkan, &mesa, &llvm),
             )?;
             let whole: Vec<(&str, &Path)> = early
                 .iter()
@@ -1918,8 +1949,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &freetype,
                 &keymaps,
                 &wayland.library,
-                &mesa,
-                &llvm,
+                &vulkan_members(&vulkan, &mesa, &llvm),
             )?;
             let first_boot: Vec<(&str, &Path)> = members
                 .iter()
@@ -2039,6 +2069,30 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The files of Vulkan that the system image holds: the loader `loader`,
+/// lavapipe, the CPU driver, from `mesa`, with its manifest where
+/// drivers' manifests go, and LLVM's library from `llvm`, which it needs.
+fn vulkan_members(loader: &Path, mesa: &Path, llvm: &Path) -> Vec<(String, PathBuf)> {
+    vec![
+        (
+            format!("system/libraries/{}", crate::vulkan::LOADER),
+            loader.join("libraries").join(crate::vulkan::LOADER),
+        ),
+        (
+            format!("system/libraries/{}", crate::mesa::DRIVER),
+            mesa.join("libraries").join(crate::mesa::DRIVER),
+        ),
+        (
+            format!("system/{}", crate::mesa::MANIFEST),
+            mesa.join(crate::mesa::MANIFEST),
+        ),
+        (
+            "system/libraries/libLLVM.dlib".into(),
+            llvm.join("lib/libLLVM.dlib"),
+        ),
+    ]
+}
+
 /// The members of the system image that logging in on the text console
 /// needs: the components that only the system image holds, among them
 /// the accounts, terminal and session services, the text console, the
@@ -2053,8 +2107,7 @@ fn login_members(
     freetype: &crate::ports::Built,
     keymaps: &crate::ports::Built,
     wayland: &Path,
-    mesa: &Path,
-    llvm: &Path,
+    vulkan: &[(String, PathBuf)],
 ) -> Result<Vec<(String, PathBuf)>> {
     let mut members = Vec::new();
     for component in crate::components::all()? {
@@ -2097,22 +2150,7 @@ fn login_members(
             lib.join("libunwind.dlib"),
         ),
     ]);
-    // Vulkan: lavapipe, the CPU driver, with its manifest where drivers'
-    // manifests go, and LLVM, which it needs.
-    members.extend([
-        (
-            format!("system/libraries/{}", crate::mesa::DRIVER),
-            mesa.join("libraries").join(crate::mesa::DRIVER),
-        ),
-        (
-            format!("system/{}", crate::mesa::MANIFEST),
-            mesa.join(crate::mesa::MANIFEST),
-        ),
-        (
-            "system/libraries/libLLVM.dlib".into(),
-            llvm.join("lib/libLLVM.dlib"),
-        ),
-    ]);
+    members.extend_from_slice(vulkan);
     let keymap_data = keymaps.install.join("share/xkeyboard-config-2");
     let mut keymap_files = Vec::new();
     crate::port_tests::collect(&keymap_data, &mut keymap_files)?;

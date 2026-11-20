@@ -52,6 +52,7 @@ mod test;
 mod tools;
 mod tzdata;
 mod volumes;
+mod vulkan;
 mod wayland;
 
 use clap::{Parser, Subcommand};

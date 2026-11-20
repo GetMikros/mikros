@@ -1,0 +1,51 @@
+diff -ruN a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -127,7 +127,7 @@
+     if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+         target_compile_definitions(platform_wsi INTERFACE VK_USE_PLATFORM_MACOS_MVK)
+     endif()
+-elseif(CMAKE_SYSTEM_NAME MATCHES "Linux|BSD|DragonFly|GNU|CYGWIN")
++elseif(CMAKE_SYSTEM_NAME MATCHES "Linux|BSD|DragonFly|GNU|CYGWIN|Mikros")
+     option(BUILD_WSI_XCB_SUPPORT "Build XCB WSI support" ON)
+     option(BUILD_WSI_XLIB_SUPPORT "Build Xlib WSI support" ON)
+     option(BUILD_WSI_XLIB_XRANDR_SUPPORT "Build X11 Xrandr WSI support" ON)
+diff -ruN a/loader/CMakeLists.txt b/loader/CMakeLists.txt
+--- a/loader/CMakeLists.txt
++++ b/loader/CMakeLists.txt
+@@ -441,7 +441,12 @@
+         VERSION "${VULKAN_LOADER_VERSION}"
+     )
+ 
+-    target_link_libraries(vulkan PRIVATE ${CMAKE_DL_LIBS} m Threads::Threads)
++    # Mikros has the math functions in its C library, and no libm.
++    if(CMAKE_SYSTEM_NAME STREQUAL "Mikros")
++        target_link_libraries(vulkan PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
++    else()
++        target_link_libraries(vulkan PRIVATE ${CMAKE_DL_LIBS} m Threads::Threads)
++    endif()
+ 
+     set_target_properties(vulkan PROPERTIES OUTPUT_NAME ${API_TYPE})
+ 
+diff -ruN a/loader/vk_loader_platform.h b/loader/vk_loader_platform.h
+--- a/loader/vk_loader_platform.h
++++ b/loader/vk_loader_platform.h
+@@ -44,7 +44,8 @@
+ 
+ // Set of platforms with a common set of functionality which is queried throughout the program
+ #if defined(__linux__) || defined(__APPLE__) || defined(__Fuchsia__) || defined(__QNX__) || defined(__FreeBSD__) || \
+-    defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__GNU__) || defined(__CYGWIN__)
++    defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__) || defined(__GNU__) || defined(__CYGWIN__) || \
++    defined(__mikros__)
+ #define COMMON_UNIX_PLATFORMS 1
+ #else
+ #define COMMON_UNIX_PLATFORMS 0
+@@ -361,7 +362,7 @@
+ 
+     return buffer;
+ }
+-#elif defined(__Fuchsia__) || defined(__OpenBSD__)
++#elif defined(__Fuchsia__) || defined(__OpenBSD__) || defined(__mikros__)
+ static inline char *loader_platform_executable_path(char *buffer, size_t size) { return NULL; }
+ #elif defined(__QNX__)
+ 

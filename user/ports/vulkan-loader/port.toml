@@ -1,0 +1,12 @@
+# The Khronos Vulkan loader, as libvulkan.dlib, the library that programs
+# reach Vulkan through. It finds the drivers' and layers' manifests in
+# /system/share/vulkan/ and its settings in /system/config/vulkan/, and
+# has the Wayland surface functions, without those of X11. The patches:
+# - 0001: Mikros is one of the Unix systems of the build and the
+#   loader's platform code, links no libm, whose functions the C library
+#   has, and has no path of the running program to give.
+
+[source]
+url = "https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz"
+sha256 = "941eff558fc74f248745fb7df367640cf89a8457f216dae498a74ae14b6ba6f7"
+dir = "Vulkan-Loader-vulkan-sdk-1.4.363.0"
