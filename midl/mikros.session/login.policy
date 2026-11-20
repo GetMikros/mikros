@@ -1,0 +1,7 @@
+# Access policy of the methods of login.midl (MIKSPEC-0023.R47).
+# Served by the session manager only on the channel of the compositor in
+# greeter mode, which passes it on to the greeter.
+
+Login.ListUsers: public
+Login.Login: public
+Login.Shutdown: public

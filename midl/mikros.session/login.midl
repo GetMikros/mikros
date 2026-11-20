@@ -1,0 +1,16 @@
+// MIKSPEC-0075.R13
+
+library mikros.session;
+using mikros.base;
+using mikros.service;
+
+type LoginUser = struct {
+    name string<32>;
+    full_name string<128>;
+};
+
+protocol Login {
+    @1 ListUsers(after u32) -> (users vector<LoginUser, 64>, last u32);
+    @2 Login(name string<32>, password string<1024>) -> () error base.Status;
+    @3 Shutdown(kind mikros.service.ShutdownKind) -> () error base.Status;
+};
