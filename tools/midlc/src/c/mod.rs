@@ -14,6 +14,7 @@ use std::fmt::Write;
 
 mod codec;
 mod decls;
+mod protocol;
 
 const RUNTIME: &str = include_str!("runtime.h.in");
 

@@ -118,6 +118,11 @@ impl Gen<'_> {
         for s in &methods {
             self.struct_decoder(&s.name, s.fields, out);
         }
+        for d in decls {
+            if let DeclKind::Protocol(methods) = &d.kind {
+                self.protocol(d, methods, out);
+            }
+        }
     }
 
     fn constant(&self, d: &Decl, ty: &Type, value: &Value, out: &mut String) {

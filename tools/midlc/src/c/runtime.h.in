@@ -317,6 +317,26 @@ static inline void mikros_midl_encoder_discard(mikros_midl_encoder_t *e)
     e->handle_count = 0;
 }
 
+static inline mikros_midl_status_t mikros_midl_kernel_status(mikros_status_t s)
+{
+    return s == MIKROS_MIDL_KERNEL_PEER_CLOSED ? MIKROS_MIDL_CLOSED : (mikros_midl_status_t)s;
+}
+
+/* Sends the message on `channel`; its handles go with it, or are closed
+ * when it fails. */
+static inline mikros_midl_status_t mikros_midl_send(mikros_handle_t channel, mikros_midl_encoder_t *e)
+{
+    if (e->status != MIKROS_MIDL_OK) {
+        mikros_midl_encoder_discard(e);
+        return e->status;
+    }
+    mikros_status_t s = mikros_channel_write(channel, e->bytes, e->len, e->handles, e->handle_count);
+    /* Failures about the handles themselves leave them with us. */
+    if (s == MIKROS_MIDL_KERNEL_INVALID_ARGS || s == MIKROS_MIDL_KERNEL_ACCESS_DENIED)
+        mikros_midl_encoder_discard(e);
+    return s == 0 ? MIKROS_MIDL_OK : mikros_midl_kernel_status(s);
+}
+
 /* Reads and checks one message. Once a step fails, the decoder keeps
  * its status and reads zeros. */
 typedef struct {
@@ -633,6 +653,80 @@ static inline mikros_midl_status_t mikros_midl_decoder_finish(mikros_midl_decode
             if (d->handles[i] != 0)
                 mikros_handle_close(d->handles[i]);
     return d->status;
+}
+
+/* Makes a call on `channel` with the message `e`, until `deadline`, and
+ * starts decoding its reply, whose bytes and handles go into the arena.
+ * The message's handles are consumed. */
+static inline mikros_midl_status_t mikros_midl_call(mikros_handle_t channel, mikros_midl_encoder_t *e,
+                                                    int64_t deadline, mikros_midl_arena_t *arena,
+                                                    mikros_midl_decoder_t *reply)
+{
+    /* An empty reply until one comes. */
+    mikros_midl_decoder_init(reply, NULL, 0, NULL, 0, arena);
+    if (e->status != MIKROS_MIDL_OK) {
+        mikros_midl_encoder_discard(e);
+        return e->status;
+    }
+    uint8_t *bytes = (uint8_t *)mikros_midl_alloc(arena, MIKROS_MIDL_MESSAGE_BYTES);
+    mikros_handle_t *handles =
+        (mikros_handle_t *)mikros_midl_alloc(arena, 4u * MIKROS_MIDL_MESSAGE_HANDLES);
+    if (bytes == NULL || handles == NULL) {
+        mikros_midl_encoder_discard(e);
+        return MIKROS_MIDL_NO_ROOM;
+    }
+    uint64_t args[8] = {
+        (uint64_t)(uintptr_t)e->bytes, e->len, (uint64_t)(uintptr_t)e->handles, e->handle_count,
+        (uint64_t)(uintptr_t)bytes, MIKROS_MIDL_MESSAGE_BYTES, (uint64_t)(uintptr_t)handles,
+        MIKROS_MIDL_MESSAGE_HANDLES,
+    };
+    uint64_t out[2] = {0, 0};
+    mikros_status_t s = mikros_channel_call(channel, 0, deadline, (const uint8_t *)args, (uint8_t *)out);
+    if (s != 0) {
+        /* Failures about the handles themselves leave them with us; on
+         * every other failure the kernel took them. */
+        if (s == MIKROS_MIDL_KERNEL_INVALID_ARGS || s == MIKROS_MIDL_KERNEL_ACCESS_DENIED)
+            mikros_midl_encoder_discard(e);
+        return mikros_midl_kernel_status(s);
+    }
+    mikros_midl_decoder_init(reply, bytes, (uint32_t)out[0], handles, (uint32_t)out[1], arena);
+    return MIKROS_MIDL_OK;
+}
+
+/* The next message on `channel`, waiting for one until `deadline`, with
+ * its bytes and handles in the arena. */
+static inline mikros_midl_status_t mikros_midl_read(mikros_handle_t channel, int64_t deadline,
+                                                    mikros_midl_arena_t *arena, uint8_t **bytes,
+                                                    uint32_t *len, mikros_handle_t **handles,
+                                                    uint32_t *count)
+{
+    *len = 0;
+    *count = 0;
+    for (;;) {
+        size_t used = arena->used;
+        *bytes = (uint8_t *)mikros_midl_alloc(arena, MIKROS_MIDL_MESSAGE_BYTES);
+        *handles = (mikros_handle_t *)mikros_midl_alloc(arena, 4u * MIKROS_MIDL_MESSAGE_HANDLES);
+        if (*bytes == NULL || *handles == NULL) {
+            arena->used = used;
+            return MIKROS_MIDL_NO_ROOM;
+        }
+        uint64_t n = 0, h = 0;
+        mikros_status_t s = mikros_channel_read(channel, *bytes, MIKROS_MIDL_MESSAGE_BYTES, *handles,
+                                                MIKROS_MIDL_MESSAGE_HANDLES, &n, &h);
+        if (s == 0) {
+            *len = (uint32_t)n;
+            *count = (uint32_t)h;
+            return MIKROS_MIDL_OK;
+        }
+        arena->used = used;
+        if (s != MIKROS_MIDL_KERNEL_SHOULD_WAIT)
+            return mikros_midl_kernel_status(s);
+        uint32_t observed = 0;
+        s = mikros_object_wait_one(channel, MIKROS_MIDL_SIGNAL_READABLE | MIKROS_MIDL_SIGNAL_PEER_CLOSED,
+                                   deadline, &observed);
+        if (s != 0)
+            return mikros_midl_kernel_status(s);
+    }
 }
 
 #ifdef __cplusplus
