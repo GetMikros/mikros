@@ -7,6 +7,7 @@
 //! protocol error, which is sent to the client and ends its connection.
 
 mod buffer;
+mod shell;
 mod surface;
 mod xdg;
 
@@ -16,7 +17,8 @@ pub use buffer::{Layout, Memory};
 pub use surface::{Rect, Role, Surface, SurfaceId};
 
 use crate::wayland::protocols::{
-    mikros_buffer_v1, wl_callback, wl_compositor, wl_display, wl_registry, xdg_wm_base,
+    mikros_buffer_v1, mikros_shell_v1, wl_callback, wl_compositor, wl_display, wl_output,
+    wl_registry, xdg_wm_base,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -48,6 +50,8 @@ pub enum Resource {
     Buffer(BufferId),
     Timeline(TimelineId),
     SurfaceSync(SurfaceId),
+    Output,
+    Shell,
 }
 
 /// An object of a client.
@@ -88,6 +92,9 @@ impl ProtocolError {
 #[derive(Default)]
 pub struct Client {
     objects: BTreeMap<ObjectId, Object>,
+    /// The roles of a connection of a shell component, which the
+    /// compositor created; None for any other client.
+    roles: Option<Vec<String>>,
     /// The events to send to the client.
     pub out: Outgoing,
     /// The protocol error that ended the connection, once one did.
@@ -106,6 +113,13 @@ impl Client {
             },
         );
         client
+    }
+
+    /// Whether the client is a shell component of `role`.
+    fn has_role(&self, role: &str) -> bool {
+        self.roles
+            .as_ref()
+            .is_some_and(|r| r.iter().any(|x| x == role))
     }
 
     pub fn object(&self, id: ObjectId) -> Option<&Object> {
@@ -168,6 +182,8 @@ pub struct Global {
     pub version: u32,
     /// What its objects stand for.
     pub resource: Resource,
+    /// Whether only shell components see it.
+    pub components_only: bool,
 }
 
 /// Every client and the state of the protocols they speak.
@@ -208,6 +224,8 @@ impl Server {
         );
         server.add_global(&xdg_wm_base::INTERFACE, 1, Resource::WmBase);
         server.add_global(&mikros_buffer_v1::INTERFACE, 1, Resource::BufferFactory);
+        server.add_global(&wl_output::INTERFACE, 3, Resource::Output);
+        server.add_global(&mikros_shell_v1::INTERFACE, 1, Resource::Shell);
         server
     }
 
@@ -224,6 +242,7 @@ impl Server {
             interface,
             version,
             resource,
+            components_only: resource == Resource::Shell,
         });
     }
 
@@ -232,6 +251,16 @@ impl Server {
         self.next_client += 1;
         self.clients.insert(self.next_client, Client::new());
         self.next_client
+    }
+
+    /// Adds the connection of a shell component of `roles`, which the
+    /// compositor created, and returns its ID.
+    pub fn connect_component(&mut self, roles: Vec<String>) -> ClientId {
+        let id = self.connect();
+        if let Some(c) = self.clients.get_mut(&id) {
+            c.roles = Some(roles);
+        }
+        id
     }
 
     /// Removes a client whose connection ended, with its surfaces.
@@ -362,6 +391,8 @@ impl Server {
             | Resource::Positioner
             | Resource::XdgSurface(_)
             | Resource::Toplevel(_) => self.xdg_request(request, resource, args)?,
+            Resource::Output => self.output_request(request, args)?,
+            Resource::Shell => self.shell_request(imports, request, args)?,
         }
         Ok(rest)
     }
@@ -384,7 +415,12 @@ impl Server {
             }
             wl_display::Request::GetRegistry { registry } => {
                 c.create(registry, &wl_registry::INTERFACE, 1, Resource::Registry)?;
-                for global in &self.globals {
+                let component = c.roles.is_some();
+                for global in self
+                    .globals
+                    .iter()
+                    .filter(|g| component || !g.components_only)
+                {
                     let name = global.interface.name;
                     wl_registry::send_global(
                         &mut c.out,
@@ -410,9 +446,14 @@ impl Server {
             id_version,
             id,
         } = decoded;
+        let component = self
+            .clients
+            .get(&request.client)
+            .is_some_and(|c| c.roles.is_some());
         let global = self
             .globals
             .iter()
+            .filter(|g| component || !g.components_only)
             .find(|g| g.name == name && g.interface.name == id_interface)
             .ok_or_else(|| {
                 ProtocolError::invalid_object(format!("invalid global {id_interface} ({name})"))
@@ -435,6 +476,9 @@ impl Server {
                 mikros_buffer_v1::send_format(&mut c.out, id.0, format, hi, lo);
             }
             mikros_buffer_v1::send_done(&mut c.out, id.0);
+        }
+        if resource == Resource::Output {
+            self.describe_output(request.client, id.0, id_version);
         }
         Ok(())
     }
@@ -472,6 +516,7 @@ pub(crate) mod tests {
         next: u64,
         pub dropped_buffers: Vec<BufferId>,
         pub dropped_timelines: Vec<TimelineId>,
+        pub wallpapers: Vec<BufferId>,
     }
 
     impl Imports for FakeImports {
@@ -491,6 +536,11 @@ pub(crate) mod tests {
 
         fn drop_timeline(&mut self, timeline: TimelineId) {
             self.dropped_timelines.push(timeline);
+        }
+
+        fn set_wallpaper(&mut self, buffer: BufferId) -> bool {
+            self.wallpapers.push(buffer);
+            true
         }
     }
 
@@ -604,7 +654,8 @@ pub(crate) mod tests {
             [
                 &Arg::String(Some("wl_compositor".into())),
                 &Arg::String(Some("xdg_wm_base".into())),
-                &Arg::String(Some("mikros_buffer_v1".into()))
+                &Arg::String(Some("mikros_buffer_v1".into())),
+                &Arg::String(Some("wl_output".into()))
             ]
         );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);

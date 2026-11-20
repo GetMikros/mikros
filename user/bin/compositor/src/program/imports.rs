@@ -16,10 +16,12 @@ const LINEAR: u64 = 0;
 /// The kernel's object type of a timeline.
 const OBJECT_TIMELINE: u32 = 14;
 
-/// The imported buffers and timelines, by the IDs the server knows them by.
+/// The imported buffers and timelines, by the IDs the server knows them by,
+/// and the copy of the output's wallpaper.
 #[derive(Default)]
 pub struct Store {
     pub buffers: BTreeMap<BufferId, ClientBuffer>,
+    pub wallpaper: Option<ClientBuffer>,
     timelines: BTreeMap<TimelineId, Fd>,
     next: u64,
 }
@@ -88,5 +90,23 @@ impl Imports for Importer<'_> {
 
     fn drop_timeline(&mut self, timeline: TimelineId) {
         self.store.timelines.remove(&timeline);
+    }
+
+    fn set_wallpaper(&mut self, buffer: BufferId) -> bool {
+        let Some(source) = self.store.buffers.get(&buffer) else {
+            return false;
+        };
+        match self.renderer.copy(source) {
+            Ok(copy) => {
+                if let Some(old) = self.store.wallpaper.replace(copy) {
+                    self.renderer.forget(old);
+                }
+                true
+            }
+            Err(e) => {
+                mikros_rt::log!(Error, "compositor: copying the wallpaper: {e:?}");
+                false
+            }
+        }
     }
 }

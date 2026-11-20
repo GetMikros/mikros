@@ -23,6 +23,7 @@ use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints
 use mikros_rt::interfaces::mikros::gpu::{
     Capabilities, Device as Gpu, DeviceAsyncClient as GpuClient, DisplayAsyncClient,
 };
+use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{SeatAsyncServer, SeatRequest};
 use output::Output;
@@ -76,6 +77,9 @@ impl Notify {
 pub struct Compositor {
     reactor: Reactor,
     spawner: Spawner,
+    /// The compositor's `Launcher` client, which starts the shell's parts
+    /// and waits for them.
+    launcher: Rc<LauncherAsyncClient>,
     directory: DirectoryAsyncClient,
     server: RefCell<Server>,
     renderer: Renderer,
@@ -165,6 +169,19 @@ impl Compositor {
     /// the protocol.
     pub async fn serve_client(self: Rc<Self>, channel: OwnedHandle) {
         let client = self.server.borrow_mut().connect();
+        self.serve(client, channel).await;
+    }
+
+    /// Serves the Wayland channel of a shell component of `roles`, which
+    /// the compositor created.
+    async fn serve_component(self: Rc<Self>, channel: OwnedHandle, roles: Vec<String>) {
+        let client = self.server.borrow_mut().connect_component(roles);
+        self.serve(client, channel).await;
+    }
+
+    /// Serves the Wayland channel of `client` until it closes or breaks
+    /// the protocol.
+    async fn serve(self: Rc<Self>, client: ClientId, channel: OwnedHandle) {
         let raw = channel.raw();
         self.channels.borrow_mut().insert(client, channel);
         loop {
@@ -195,12 +212,15 @@ impl Compositor {
             }
             self.flush(client);
             self.changed.notify();
-            let failed = self
-                .server
-                .borrow_mut()
-                .client(client)
-                .is_none_or(|c| c.error.is_some());
-            if failed {
+            let error = match self.server.borrow_mut().client(client) {
+                None => Some(String::from("the client is gone")),
+                Some(c) => c.error.as_ref().map(|e| format!("{e:?}")),
+            };
+            if let Some(error) = error {
+                mikros_rt::log!(
+                    Error,
+                    "compositor: client {client} broke the protocol: {error}"
+                );
                 break;
             }
         }
@@ -268,10 +288,19 @@ impl Compositor {
             }
             let drawn = {
                 let store = self.store.borrow();
-                let layers: Vec<Layer> = shown
-                    .iter()
-                    .filter_map(|(buffer, _)| store.buffers.get(buffer))
-                    .map(|buffer| Layer { buffer, x: 0, y: 0 })
+                // The wallpaper below every surface (MIKSPEC-0075.R22).
+                let wallpaper = store
+                    .wallpaper
+                    .as_ref()
+                    .map(|buffer| Layer { buffer, x: 0, y: 0 });
+                let layers: Vec<Layer> = wallpaper
+                    .into_iter()
+                    .chain(
+                        shown
+                            .iter()
+                            .filter_map(|(buffer, _)| store.buffers.get(buffer))
+                            .map(|buffer| Layer { buffer, x: 0, y: 0 }),
+                    )
                     .collect();
                 self.renderer.draw(output.back(), BACKGROUND, &layers)
             };
@@ -306,9 +335,9 @@ impl Compositor {
         }
     }
 
-    /// Starts every part of the packages of a user session, and serves
-    /// their Wayland connections (MIKSPEC-0075.R20). A package that cannot
-    /// be found leaves its roles empty.
+    /// Starts every part of the packages of a user session, one after
+    /// another, and serves their Wayland connections (MIKSPEC-0075.R20). A
+    /// package that cannot be found leaves its roles empty.
     async fn start_shell(self: Rc<Self>) {
         for (key, package) in parts::session_packages() {
             let package = match package {
@@ -327,7 +356,9 @@ impl Compositor {
             };
             for part in found {
                 let name = format!("the part {} of {package}", part.roles.join(" "));
-                self.spawner.spawn(self.clone().run_part(part, None, name));
+                if let Some(serving) = self.clone().start_part(part, None, name).await {
+                    self.spawner.spawn(serving);
+                }
             }
         }
     }
@@ -335,29 +366,42 @@ impl Compositor {
     /// Starts `part`, called `name` in the log, with `login` in greeter
     /// mode, logs how it exits, and serves its Wayland connection.
     async fn run_part(self: Rc<Self>, part: parts::Part, login: Option<OwnedHandle>, name: String) {
+        if let Some(serving) = self.start_part(part, login, name).await {
+            serving.await;
+        }
+    }
+
+    /// Starts `part` as `run_part` does, and returns the serving of its
+    /// Wayland connection once it has started.
+    async fn start_part(
+        self: Rc<Self>,
+        part: parts::Part,
+        login: Option<OwnedHandle>,
+        name: String,
+    ) -> Option<impl std::future::Future<Output = ()> + 'static> {
         let Ok((ours, theirs)) = mikros_rt::midl::channel_create() else {
-            return;
+            return None;
         };
         // SAFETY: the kernel just made both ends for us.
         let (ours, theirs) =
             unsafe { (OwnedHandle::from_raw(ours), OwnedHandle::from_raw(theirs)) };
-        let pid = match parts::start(&self.reactor, &part, theirs, login).await {
+        let pid = match parts::start(&self.launcher, &part, theirs, login).await {
             Ok(pid) => pid,
             Err(e) => {
                 mikros_rt::log!(Error, "compositor: starting {name}: {e}");
-                return;
+                return None;
             }
         };
         mikros_rt::log!(Info, "compositor: started {name} as pid {pid}");
-        let reactor = self.reactor.clone();
+        let launcher = self.launcher.clone();
         self.spawner.spawn(async move {
-            match parts::exited(&reactor, pid).await {
+            match parts::exited(&launcher, pid).await {
                 Ok(0) => mikros_rt::log!(Info, "compositor: {name} exited"),
                 Ok(code) => mikros_rt::log!(Error, "compositor: {name} exited with {code}"),
                 Err(e) => mikros_rt::log!(Error, "compositor: waiting for {name}: {e}"),
             }
         });
-        self.serve_client(ours).await;
+        Some(self.serve_component(ours, part.roles))
     }
 }
 
@@ -416,12 +460,20 @@ pub fn main() {
     };
     let reactor = executor.reactor().clone();
     let spawner = executor.spawner().clone();
+    let launcher = match parts::launcher(&reactor) {
+        Ok(launcher) => launcher,
+        Err(e) => {
+            mikros_rt::log!(Error, "compositor: {e}");
+            std::process::exit(1);
+        }
+    };
     let directory = DirectoryAsyncClient::new(directory, reactor.clone());
     let mut server = Server::new();
     server.buffer_formats = imports::FORMATS.to_vec();
     let compositor = Rc::new(Compositor {
         reactor: reactor.clone(),
         spawner: spawner.clone(),
+        launcher: Rc::new(launcher),
         directory,
         server: RefCell::new(server),
         renderer,

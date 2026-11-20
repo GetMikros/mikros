@@ -164,9 +164,10 @@ fn block(arguments: &[String], environment: &[String]) -> Option<OwnedHandle> {
     Some(memory)
 }
 
-/// A `Launcher` client of its own, on a duplicate of the C library's
-/// connection.
-fn launcher(reactor: &Reactor) -> Result<LauncherAsyncClient, String> {
+/// A `Launcher` client of the compositor's own, on a duplicate of the C
+/// library's connection, which all starts and waits share: replies on a
+/// channel reach the one client that reads it.
+pub fn launcher(reactor: &Reactor) -> Result<LauncherAsyncClient, String> {
     let raw = std::os::mikros::process::launcher().as_raw_handle();
     let mut copy = 0;
     // SAFETY: the out pointer is valid for the call.
@@ -182,12 +183,11 @@ fn launcher(reactor: &Reactor) -> Result<LauncherAsyncClient, String> {
 /// Starts `part` with `wayland`, the client end of its Wayland channel, and
 /// in greeter mode `login`, and returns its process ID.
 pub async fn start(
-    reactor: &Reactor,
+    launcher: &LauncherAsyncClient,
     part: &Part,
     wayland: OwnedHandle,
     login: Option<OwnedHandle>,
 ) -> Result<u32, String> {
-    let launcher = launcher(reactor)?;
     let path = part.executable.display().to_string();
     let mut arguments = vec![path.clone()];
     arguments.extend(part.arguments.iter().cloned());
@@ -224,8 +224,7 @@ pub async fn start(
 
 /// Waits until the part `pid` has exited, and returns its exit code, or
 /// why it cannot be waited for.
-pub async fn exited(reactor: &Reactor, pid: u32) -> Result<i64, String> {
-    let launcher = launcher(reactor)?;
+pub async fn exited(launcher: &LauncherAsyncClient, pid: u32) -> Result<i64, String> {
     loop {
         match launcher.wait(pid as i32, WaitOptions(0), FOREVER).await {
             Ok(Ok(w)) if w.status.kind == StatusKind::Exited => return Ok(w.status.exit_code),

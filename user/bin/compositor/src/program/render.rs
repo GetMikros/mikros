@@ -328,6 +328,76 @@ impl Renderer {
         }
     }
 
+    /// A copy of `source`'s pixels in memory of the compositor's own, for
+    /// a wallpaper that stays after the client released its buffer.
+    pub fn copy(&self, source: &ClientBuffer) -> Result<ClientBuffer, Error> {
+        let d = &self.device;
+        let size = u64::from(source.stride) * u64::from(source.height);
+        let usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+        let info = vk::BufferCreateInfo::default().size(size).usage(usage);
+        // SAFETY: the create info lives for the call.
+        let buffer = unsafe { d.create_buffer(&info, None)? };
+        // SAFETY: the buffer belongs to the device.
+        let needs = unsafe { d.get_buffer_memory_requirements(buffer) };
+        let flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let memory_type = match self.memory_type(needs.memory_type_bits, flags) {
+            Ok(index) => index,
+            Err(_) => self.memory_type(needs.memory_type_bits, vk::MemoryPropertyFlags::empty())?,
+        };
+        let info = vk::MemoryAllocateInfo::default()
+            .allocation_size(needs.size)
+            .memory_type_index(memory_type);
+        // SAFETY: the info lives for the call.
+        let memory = match unsafe { d.allocate_memory(&info, None) } {
+            Ok(memory) => memory,
+            Err(e) => {
+                // SAFETY: the buffer is unused.
+                unsafe { d.destroy_buffer(buffer, None) };
+                return Err(e.into());
+            }
+        };
+        let copy = ClientBuffer {
+            buffer,
+            memory,
+            width: source.width,
+            height: source.height,
+            stride: source.stride,
+            offset: 0,
+        };
+        let region = vk::BufferCopy::default()
+            .src_offset(u64::from(source.offset))
+            .size(size);
+        // SAFETY: both buffers and the command buffer belong to the device,
+        // the memory holds the copy, and no frame is being drawn.
+        let copied = unsafe {
+            d.bind_buffer_memory(buffer, memory, 0)
+                .and_then(|()| {
+                    d.reset_command_buffer(self.commands, vk::CommandBufferResetFlags::empty())
+                })
+                .and_then(|()| {
+                    d.begin_command_buffer(self.commands, &vk::CommandBufferBeginInfo::default())
+                })
+                .and_then(|()| {
+                    d.cmd_copy_buffer(self.commands, source.buffer, buffer, &[region]);
+                    d.end_command_buffer(self.commands)
+                })
+                .and_then(|()| {
+                    let commands = [self.commands];
+                    let submit = vk::SubmitInfo::default().command_buffers(&commands);
+                    d.queue_submit(self.queue, &[submit], self.fence)
+                })
+                .and_then(|()| d.wait_for_fences(&[self.fence], true, u64::MAX))
+                .and_then(|()| d.reset_fences(&[self.fence]))
+        };
+        match copied {
+            Ok(()) => Ok(copy),
+            Err(e) => {
+                self.forget(copy);
+                Err(e.into())
+            }
+        }
+    }
+
     /// Draws a frame into `target`: the background `colour`, and then the
     /// rows of each layer, clipped to the output. Returns once the frame
     /// is drawn.

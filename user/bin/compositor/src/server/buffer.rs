@@ -52,6 +52,9 @@ pub trait Imports {
     /// Forgets a buffer or a timeline that nothing uses any more.
     fn drop_buffer(&mut self, buffer: BufferId);
     fn drop_timeline(&mut self, timeline: TimelineId);
+    /// Copies the pixels of `buffer` as the output's wallpaper, or returns
+    /// false when they cannot be copied.
+    fn set_wallpaper(&mut self, buffer: BufferId) -> bool;
 }
 
 impl Server {
