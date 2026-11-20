@@ -5,8 +5,9 @@
 //! that Mesa builds into it compiled by glslang on the build host
 //! (`crate::glslang`).
 
-use anyhow::Result;
-use std::path::PathBuf;
+use anyhow::{Context, Result, bail};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// The driver's file name in `/system/libraries`, which is its soname.
 pub const DRIVER: &str = "libvulkan_lvp.dlib";
@@ -25,11 +26,28 @@ fn source(port: &crate::ports::Port) -> Result<PathBuf> {
     crate::port::patched_source(&archive, &dir, &port.source, &port.dir.join("patches"), &[])
 }
 
+/// The header of the Mikros extensions, which the Mesa port adds to
+/// Mesa's copy of the Vulkan headers and the vulkan-headers port to the
+/// headers that programs are built against.
+const EXTENSIONS: &str = "include/vulkan/vulkan_mikros.h";
+
+/// Fails unless Mesa, in `source`, defines the Mikros extensions as the
+/// headers of programs do.
+fn check_extensions(source: &Path) -> Result<()> {
+    let programs = crate::vulkan::headers()?.join(EXTENSIONS);
+    let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
+    if read(&source.join(EXTENSIONS))? != read(&programs)? {
+        bail!("the {EXTENSIONS} of the mesa and vulkan-headers ports differ");
+    }
+    Ok(())
+}
+
 /// Builds Mesa, and returns the directory its prefix, `/system`, was
 /// installed in.
 pub fn build() -> Result<PathBuf> {
     let port = crate::ports::load("mesa")?;
     let source = source(&port)?;
+    check_extensions(&source)?;
     let llvm = crate::llvm_port::build_library()?;
     let mut options = port.options.clone();
     options.push(format!("-Dcmake_prefix_path={}", llvm.display()));
