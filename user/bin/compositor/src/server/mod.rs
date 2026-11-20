@@ -6,7 +6,9 @@
 //! to the code of the resource; a request that breaks the protocol is a
 //! protocol error, which is sent to the client and ends its connection.
 
+mod area;
 mod buffer;
+mod material;
 mod shell;
 mod surface;
 mod xdg;
@@ -17,8 +19,8 @@ pub use buffer::{Layout, Memory};
 pub use surface::{Rect, Role, Surface, SurfaceId};
 
 use crate::wayland::protocols::{
-    mikros_buffer_v1, mikros_shell_v1, wl_callback, wl_compositor, wl_display, wl_output,
-    wl_registry, xdg_wm_base,
+    mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, wl_callback, wl_compositor, wl_display,
+    wl_output, wl_registry, xdg_wm_base,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -52,6 +54,8 @@ pub enum Resource {
     SurfaceSync(SurfaceId),
     Output,
     Shell,
+    Materials,
+    Material(SurfaceId),
 }
 
 /// An object of a client.
@@ -226,6 +230,7 @@ impl Server {
         server.add_global(&mikros_buffer_v1::INTERFACE, 1, Resource::BufferFactory);
         server.add_global(&wl_output::INTERFACE, 3, Resource::Output);
         server.add_global(&mikros_shell_v1::INTERFACE, 1, Resource::Shell);
+        server.add_global(&mikros_material_v1::INTERFACE, 1, Resource::Materials);
         server
     }
 
@@ -393,6 +398,9 @@ impl Server {
             | Resource::Toplevel(_) => self.xdg_request(request, resource, args)?,
             Resource::Output => self.output_request(request, args)?,
             Resource::Shell => self.shell_request(imports, request, args)?,
+            Resource::Materials | Resource::Material(_) => {
+                self.material_request(request, resource, args)?
+            }
         }
         Ok(rest)
     }
@@ -655,7 +663,8 @@ pub(crate) mod tests {
                 &Arg::String(Some("wl_compositor".into())),
                 &Arg::String(Some("xdg_wm_base".into())),
                 &Arg::String(Some("mikros_buffer_v1".into())),
-                &Arg::String(Some("wl_output".into()))
+                &Arg::String(Some("wl_output".into())),
+                &Arg::String(Some("mikros_material_v1".into()))
             ]
         );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);

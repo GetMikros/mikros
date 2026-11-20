@@ -46,6 +46,8 @@ pub struct SurfaceState {
     /// How far the buffer moves from the last one, which the next commit
     /// applies.
     pub offset: (i32, i32),
+    /// The areas of its materials (MIKSPEC-0076.R16).
+    pub materials: super::material::Materials,
 }
 
 impl Default for SurfaceState {
@@ -61,6 +63,7 @@ impl Default for SurfaceState {
             scale: 1,
             transform: wl_output_transform::NORMAL,
             offset: (0, 0),
+            materials: Default::default(),
         }
     }
 }
@@ -377,6 +380,7 @@ impl Server {
         current.scale = pending.scale;
         current.transform = pending.transform;
         current.offset = std::mem::take(&mut pending.offset);
+        current.materials = pending.materials.clone();
         let frames = std::mem::take(&mut surface.pending_frames);
         surface.frames.extend(frames);
         self.committed(request, id);
