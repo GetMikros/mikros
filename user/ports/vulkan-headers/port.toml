@@ -1,5 +1,7 @@
 # The Khronos Vulkan headers, which the Vulkan loader and the programs
-# that use Vulkan are built against, of the release of the loader.
+# that use Vulkan are built against, of the release of the loader. Its
+# patch adds the Mikros extensions, as the Mesa port adds them to Mesa's
+# copy of the same headers.
 
 [source]
 url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz"

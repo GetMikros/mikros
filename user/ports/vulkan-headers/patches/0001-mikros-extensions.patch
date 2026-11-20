@@ -1,0 +1,268 @@
+diff -ruN a/include/vulkan/vulkan.h b/include/vulkan/vulkan.h
+--- a/include/vulkan/vulkan.h
++++ b/include/vulkan/vulkan.h
+@@ -13,6 +13,11 @@
+ #include "vulkan_android.h"
+ #endif
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++#include <mikros/syscalls.h>
++#include "vulkan_mikros.h"
++#endif
++
+ #ifdef VK_USE_PLATFORM_FUCHSIA
+ #include <zircon/types.h>
+ #include "vulkan_fuchsia.h"
+diff -ruN a/include/vulkan/vulkan_core.h b/include/vulkan/vulkan_core.h
+--- a/include/vulkan/vulkan_core.h
++++ b/include/vulkan/vulkan_core.h
+@@ -1754,6 +1754,11 @@
+     VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO_KHR = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO,
+     VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE_INFO_KHR = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE_INFO,
+     VK_STRUCTURE_TYPE_RENDERING_END_INFO_EXT = VK_STRUCTURE_TYPE_RENDERING_END_INFO_KHR,
++    VK_STRUCTURE_TYPE_IMPORT_MEMORY_HANDLE_INFO_MIKROS = 1009000000,
++    VK_STRUCTURE_TYPE_MEMORY_HANDLE_PROPERTIES_MIKROS = 1009000001,
++    VK_STRUCTURE_TYPE_MEMORY_GET_HANDLE_INFO_MIKROS = 1009000002,
++    VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_HANDLE_INFO_MIKROS = 1009001000,
++    VK_STRUCTURE_TYPE_SEMAPHORE_GET_HANDLE_INFO_MIKROS = 1009001001,
+     VK_STRUCTURE_TYPE_MAX_ENUM = 0x7FFFFFFF
+ } VkStructureType;
+ 
+@@ -5601,6 +5606,8 @@
+     VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT_KHR = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT,
+     VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_HEAP_BIT_KHR = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_HEAP_BIT,
+     VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT_KHR = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
++    VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS = 0x10000000,
++    VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS = 0x20000000,
+     VK_EXTERNAL_MEMORY_HANDLE_TYPE_FLAG_BITS_MAX_ENUM = 0x7FFFFFFF
+ } VkExternalMemoryHandleTypeFlagBits;
+ typedef VkFlags VkExternalMemoryHandleTypeFlags;
+@@ -5665,6 +5672,7 @@
+     VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT_KHR = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT,
+     VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT_KHR = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT,
+     VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT_KHR = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
++    VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS = 0x10000000,
+     VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_FLAG_BITS_MAX_ENUM = 0x7FFFFFFF
+ } VkExternalSemaphoreHandleTypeFlagBits;
+ typedef VkFlags VkExternalSemaphoreHandleTypeFlags;
+diff -ruN a/include/vulkan/vulkan_mikros.h b/include/vulkan/vulkan_mikros.h
+--- /dev/null
++++ b/include/vulkan/vulkan_mikros.h
+@@ -0,0 +1,85 @@
++#ifndef VULKAN_MIKROS_H_
++#define VULKAN_MIKROS_H_ 1
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define VK_MIKROS_external_memory_handle 1
++#define VK_MIKROS_EXTERNAL_MEMORY_HANDLE_SPEC_VERSION 1
++#define VK_MIKROS_EXTERNAL_MEMORY_HANDLE_EXTENSION_NAME "VK_MIKROS_external_memory_handle"
++typedef struct VkImportMemoryHandleInfoMIKROS {
++    VkStructureType                       sType;
++    const void*                           pNext;
++    VkExternalMemoryHandleTypeFlagBits    handleType;
++    mikros_handle_t                       handle;
++} VkImportMemoryHandleInfoMIKROS;
++
++typedef struct VkMemoryHandlePropertiesMIKROS {
++    VkStructureType    sType;
++    void*              pNext;
++    uint32_t           memoryTypeBits;
++} VkMemoryHandlePropertiesMIKROS;
++
++typedef struct VkMemoryGetHandleInfoMIKROS {
++    VkStructureType                       sType;
++    const void*                           pNext;
++    VkDeviceMemory                        memory;
++    VkExternalMemoryHandleTypeFlagBits    handleType;
++} VkMemoryGetHandleInfoMIKROS;
++
++typedef VkResult (VKAPI_PTR *PFN_vkGetMemoryHandleMIKROS)(VkDevice device, const VkMemoryGetHandleInfoMIKROS* pGetHandleInfo, mikros_handle_t* pHandle);
++typedef VkResult (VKAPI_PTR *PFN_vkGetMemoryHandlePropertiesMIKROS)(VkDevice device, VkExternalMemoryHandleTypeFlagBits handleType, mikros_handle_t handle, VkMemoryHandlePropertiesMIKROS* pMemoryHandleProperties);
++
++#ifndef VK_NO_PROTOTYPES
++VKAPI_ATTR VkResult VKAPI_CALL vkGetMemoryHandleMIKROS(
++    VkDevice                                    device,
++    const VkMemoryGetHandleInfoMIKROS*          pGetHandleInfo,
++    mikros_handle_t*                            pHandle);
++
++VKAPI_ATTR VkResult VKAPI_CALL vkGetMemoryHandlePropertiesMIKROS(
++    VkDevice                                    device,
++    VkExternalMemoryHandleTypeFlagBits          handleType,
++    mikros_handle_t                             handle,
++    VkMemoryHandlePropertiesMIKROS*             pMemoryHandleProperties);
++#endif
++
++
++#define VK_MIKROS_external_semaphore_handle 1
++#define VK_MIKROS_EXTERNAL_SEMAPHORE_HANDLE_SPEC_VERSION 1
++#define VK_MIKROS_EXTERNAL_SEMAPHORE_HANDLE_EXTENSION_NAME "VK_MIKROS_external_semaphore_handle"
++typedef struct VkImportSemaphoreHandleInfoMIKROS {
++    VkStructureType                          sType;
++    const void*                              pNext;
++    VkSemaphore                              semaphore;
++    VkSemaphoreImportFlags                   flags;
++    VkExternalSemaphoreHandleTypeFlagBits    handleType;
++    mikros_handle_t                          handle;
++} VkImportSemaphoreHandleInfoMIKROS;
++
++typedef struct VkSemaphoreGetHandleInfoMIKROS {
++    VkStructureType                          sType;
++    const void*                              pNext;
++    VkSemaphore                              semaphore;
++    VkExternalSemaphoreHandleTypeFlagBits    handleType;
++} VkSemaphoreGetHandleInfoMIKROS;
++
++typedef VkResult (VKAPI_PTR *PFN_vkImportSemaphoreHandleMIKROS)(VkDevice device, const VkImportSemaphoreHandleInfoMIKROS* pImportSemaphoreHandleInfo);
++typedef VkResult (VKAPI_PTR *PFN_vkGetSemaphoreHandleMIKROS)(VkDevice device, const VkSemaphoreGetHandleInfoMIKROS* pGetHandleInfo, mikros_handle_t* pHandle);
++
++#ifndef VK_NO_PROTOTYPES
++VKAPI_ATTR VkResult VKAPI_CALL vkImportSemaphoreHandleMIKROS(
++    VkDevice                                    device,
++    const VkImportSemaphoreHandleInfoMIKROS*    pImportSemaphoreHandleInfo);
++
++VKAPI_ATTR VkResult VKAPI_CALL vkGetSemaphoreHandleMIKROS(
++    VkDevice                                    device,
++    const VkSemaphoreGetHandleInfoMIKROS*       pGetHandleInfo,
++    mikros_handle_t*                            pHandle);
++#endif
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff -ruN a/registry/vk.xml b/registry/vk.xml
+--- a/registry/vk.xml
++++ b/registry/vk.xml
+@@ -31,6 +31,7 @@
+         <platform name="macos" protect="VK_USE_PLATFORM_MACOS_MVK" comment="Apple MacOS" />
+         <platform name="metal" protect="VK_USE_PLATFORM_METAL_EXT" comment="Metal on CoreAnimation on Apple platforms" />
+         <platform name="fuchsia" protect="VK_USE_PLATFORM_FUCHSIA" comment="Fuchsia" />
++        <platform name="mikros" protect="VK_USE_PLATFORM_MIKROS" comment="Mikros" />
+         <platform name="ggp" protect="VK_USE_PLATFORM_GGP" comment="Google Games Platform" />
+         <platform name="sci" protect="VK_USE_PLATFORM_SCI" comment="NVIDIA SCI" />
+         <platform name="provisional" protect="VK_ENABLE_BETA_EXTENSIONS" comment="Enable declarations for beta/provisional extensions" />
+@@ -99,6 +100,7 @@
+         <type category="include" name="xcb/xcb.h" />
+         <type category="include" name="directfb.h" />
+         <type category="include" name="zircon/types.h" />
++        <type category="include" name="mikros/syscalls.h" />
+         <type category="include" name="ggp_c/vulkan_types.h" />
+         <type category="include" name="screen/screen.h" />
+         <type category="include" name="nvscisync.h" />
+@@ -141,6 +143,7 @@
+         <type requires="directfb.h" name="IDirectFB" />
+         <type requires="directfb.h" name="IDirectFBSurface" />
+         <type requires="zircon/types.h" name="zx_handle_t" />
++        <type requires="mikros/syscalls.h" name="mikros_handle_t" />
+         <type requires="ggp_c/vulkan_types.h" name="GgpStreamDescriptor" />
+         <type requires="ggp_c/vulkan_types.h" name="GgpFrameToken" />
+         <type requires="screen/screen.h" name="_screen_context" />
+@@ -3177,6 +3180,37 @@
+             <member><type>DWORD</type>                            <name>dwAccess</name></member>
+             <member><type>LPCWSTR</type>                          <name>name</name></member>
+         </type>
++        <type category="struct" name="VkImportMemoryHandleInfoMIKROS" structextends="VkMemoryAllocateInfo">
++            <member values="VK_STRUCTURE_TYPE_IMPORT_MEMORY_HANDLE_INFO_MIKROS"><type>VkStructureType</type> <name>sType</name></member>
++            <member optional="true">const <type>void</type>*                      <name>pNext</name></member>
++            <member optional="true"><type>VkExternalMemoryHandleTypeFlagBits</type> <name>handleType</name></member>
++            <member><type>mikros_handle_t</type>                  <name>handle</name></member>
++        </type>
++        <type category="struct" name="VkMemoryHandlePropertiesMIKROS" returnedonly="true">
++            <member values="VK_STRUCTURE_TYPE_MEMORY_HANDLE_PROPERTIES_MIKROS"><type>VkStructureType</type> <name>sType</name></member>
++            <member optional="true"><type>void</type>*                            <name>pNext</name></member>
++            <member><type>uint32_t</type>                         <name>memoryTypeBits</name></member>
++        </type>
++        <type category="struct" name="VkMemoryGetHandleInfoMIKROS">
++            <member values="VK_STRUCTURE_TYPE_MEMORY_GET_HANDLE_INFO_MIKROS"><type>VkStructureType</type> <name>sType</name></member>
++            <member optional="true">const <type>void</type>*                      <name>pNext</name></member>
++            <member><type>VkDeviceMemory</type>                   <name>memory</name></member>
++            <member><type>VkExternalMemoryHandleTypeFlagBits</type> <name>handleType</name></member>
++        </type>
++        <type category="struct" name="VkImportSemaphoreHandleInfoMIKROS">
++            <member values="VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_HANDLE_INFO_MIKROS"><type>VkStructureType</type> <name>sType</name></member>
++            <member optional="true">const <type>void</type>*                      <name>pNext</name></member>
++            <member externsync="true"><type>VkSemaphore</type>    <name>semaphore</name></member>
++            <member optional="true"><type>VkSemaphoreImportFlags</type> <name>flags</name></member>
++            <member><type>VkExternalSemaphoreHandleTypeFlagBits</type> <name>handleType</name></member>
++            <member><type>mikros_handle_t</type>                  <name>handle</name></member>
++        </type>
++        <type category="struct" name="VkSemaphoreGetHandleInfoMIKROS">
++            <member values="VK_STRUCTURE_TYPE_SEMAPHORE_GET_HANDLE_INFO_MIKROS"><type>VkStructureType</type> <name>sType</name></member>
++            <member optional="true">const <type>void</type>*                      <name>pNext</name></member>
++            <member><type>VkSemaphore</type>                      <name>semaphore</name></member>
++            <member><type>VkExternalSemaphoreHandleTypeFlagBits</type> <name>handleType</name></member>
++        </type>
+         <type category="struct" name="VkImportMemoryZirconHandleInfoFUCHSIA" structextends="VkMemoryAllocateInfo">
+             <member values="VK_STRUCTURE_TYPE_IMPORT_MEMORY_ZIRCON_HANDLE_INFO_FUCHSIA"><type>VkStructureType</type> <name>sType</name></member>
+             <member optional="true">const <type>void</type>*                      <name>pNext</name></member>
+@@ -16392,6 +16426,30 @@
+             <param><type>VkMemoryFdPropertiesKHR</type>* <name>pMemoryFdProperties</name></param>
+         </command>
+         <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_TOO_MANY_OBJECTS,VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
++            <proto><type>VkResult</type> <name>vkGetMemoryHandleMIKROS</name></proto>
++            <param><type>VkDevice</type> <name>device</name></param>
++            <param>const <type>VkMemoryGetHandleInfoMIKROS</type>* <name>pGetHandleInfo</name></param>
++            <param><type>mikros_handle_t</type>* <name>pHandle</name></param>
++        </command>
++        <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_INVALID_EXTERNAL_HANDLE,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
++            <proto><type>VkResult</type> <name>vkGetMemoryHandlePropertiesMIKROS</name></proto>
++            <param><type>VkDevice</type> <name>device</name></param>
++            <param><type>VkExternalMemoryHandleTypeFlagBits</type> <name>handleType</name></param>
++            <param><type>mikros_handle_t</type> <name>handle</name></param>
++            <param><type>VkMemoryHandlePropertiesMIKROS</type>* <name>pMemoryHandleProperties</name></param>
++        </command>
++        <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_TOO_MANY_OBJECTS,VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
++            <proto><type>VkResult</type> <name>vkGetSemaphoreHandleMIKROS</name></proto>
++            <param><type>VkDevice</type> <name>device</name></param>
++            <param>const <type>VkSemaphoreGetHandleInfoMIKROS</type>* <name>pGetHandleInfo</name></param>
++            <param><type>mikros_handle_t</type>* <name>pHandle</name></param>
++        </command>
++        <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_INVALID_EXTERNAL_HANDLE,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
++            <proto><type>VkResult</type> <name>vkImportSemaphoreHandleMIKROS</name></proto>
++            <param><type>VkDevice</type> <name>device</name></param>
++            <param>const <type>VkImportSemaphoreHandleInfoMIKROS</type>* <name>pImportSemaphoreHandleInfo</name></param>
++        </command>
++        <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_TOO_MANY_OBJECTS,VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
+             <proto><type>VkResult</type> <name>vkGetMemoryZirconHandleFUCHSIA</name></proto>
+             <param><type>VkDevice</type> <name>device</name></param>
+             <param>const <type>VkMemoryGetZirconHandleInfoFUCHSIA</type>* <name>pGetZirconHandleInfo</name></param>
+@@ -27713,6 +27771,35 @@
+                 <command name="vkGetSemaphoreZirconHandleFUCHSIA" />
+             </require>
+         </extension>
++        <extension name="VK_MIKROS_external_memory_handle" number="9001" type="device" depends="(VK_KHR_external_memory_capabilities+VK_KHR_external_memory),VK_VERSION_1_1" author="MIKROS" contact="Mikros" platform="mikros" supported="vulkan" nofeatures="true">
++            <require>
++                <enum value="1" name="VK_MIKROS_EXTERNAL_MEMORY_HANDLE_SPEC_VERSION" />
++                <enum value="&quot;VK_MIKROS_external_memory_handle&quot;" name="VK_MIKROS_EXTERNAL_MEMORY_HANDLE_EXTENSION_NAME" />
++                <enum offset="0" extends="VkStructureType" name="VK_STRUCTURE_TYPE_IMPORT_MEMORY_HANDLE_INFO_MIKROS" />
++                <enum offset="1" extends="VkStructureType" name="VK_STRUCTURE_TYPE_MEMORY_HANDLE_PROPERTIES_MIKROS" />
++                <enum offset="2" extends="VkStructureType" name="VK_STRUCTURE_TYPE_MEMORY_GET_HANDLE_INFO_MIKROS" />
++                <enum bitpos="28" extends="VkExternalMemoryHandleTypeFlagBits" name="VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS" />
++                <enum bitpos="29" extends="VkExternalMemoryHandleTypeFlagBits" name="VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS" />
++                <type name="VkImportMemoryHandleInfoMIKROS" />
++                <type name="VkMemoryHandlePropertiesMIKROS" />
++                <type name="VkMemoryGetHandleInfoMIKROS" />
++                <command name="vkGetMemoryHandleMIKROS" />
++                <command name="vkGetMemoryHandlePropertiesMIKROS" />
++            </require>
++        </extension>
++        <extension name="VK_MIKROS_external_semaphore_handle" number="9002" type="device" depends="VK_KHR_external_semaphore_capabilities+VK_KHR_external_semaphore" author="MIKROS" contact="Mikros" platform="mikros" supported="vulkan" nofeatures="true">
++            <require>
++                <enum value="1" name="VK_MIKROS_EXTERNAL_SEMAPHORE_HANDLE_SPEC_VERSION" />
++                <enum value="&quot;VK_MIKROS_external_semaphore_handle&quot;" name="VK_MIKROS_EXTERNAL_SEMAPHORE_HANDLE_EXTENSION_NAME" />
++                <enum offset="0" extends="VkStructureType" name="VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_HANDLE_INFO_MIKROS" />
++                <enum offset="1" extends="VkStructureType" name="VK_STRUCTURE_TYPE_SEMAPHORE_GET_HANDLE_INFO_MIKROS" />
++                <enum bitpos="28" extends="VkExternalSemaphoreHandleTypeFlagBits" name="VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS" />
++                <type name="VkImportSemaphoreHandleInfoMIKROS" />
++                <type name="VkSemaphoreGetHandleInfoMIKROS" />
++                <command name="vkImportSemaphoreHandleMIKROS" />
++                <command name="vkGetSemaphoreHandleMIKROS" />
++            </require>
++        </extension>
+         <extension name="VK_FUCHSIA_buffer_collection" number="367" type="device" depends="VK_FUCHSIA_external_memory+(VK_KHR_sampler_ycbcr_conversion,VK_VERSION_1_1)" author="FUCHSIA" contact="John Rosasco @rosasco" supported="vulkan" platform="fuchsia" nofeatures="true">
+             <require>
+                 <enum value="2" name="VK_FUCHSIA_BUFFER_COLLECTION_SPEC_VERSION" />
