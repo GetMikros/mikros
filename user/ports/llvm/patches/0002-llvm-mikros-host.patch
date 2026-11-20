@@ -1,0 +1,52 @@
+diff -ruN a/llvm/cmake/config-ix.cmake b/llvm/cmake/config-ix.cmake
+--- a/llvm/cmake/config-ix.cmake
++++ b/llvm/cmake/config-ix.cmake
+@@ -57,7 +57,8 @@
+   check_include_file(sys/ioctl.h HAVE_SYS_IOCTL_H)
+ endif()
+ 
+-if( UNIX AND NOT (APPLE OR BEOS OR HAIKU) )
++# Mikros has the math functions in its C library, and no libm.
++if( UNIX AND NOT (APPLE OR BEOS OR HAIKU OR CMAKE_SYSTEM_NAME STREQUAL "Mikros") )
+   # Used by check_symbol_exists:
+   list(APPEND CMAKE_REQUIRED_LIBRARIES "m")
+ endif()
+diff -ruN a/llvm/include/llvm/ADT/bit.h b/llvm/include/llvm/ADT/bit.h
+--- a/llvm/include/llvm/ADT/bit.h
++++ b/llvm/include/llvm/ADT/bit.h
+@@ -30,7 +30,8 @@
+ 
+ #if defined(__linux__) || defined(__GNU__) || defined(__HAIKU__) ||            \
+     defined(__Fuchsia__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__) ||  \
+-    defined(__OpenBSD__) || defined(__DragonFly__) || defined(__managarm__)
++    defined(__OpenBSD__) || defined(__DragonFly__) || defined(__managarm__) || \
++    defined(__mikros__)
+ #include <endian.h>
+ #elif defined(_AIX)
+ #include <sys/machine.h>
+diff -ruN a/llvm/lib/Support/CMakeLists.txt b/llvm/lib/Support/CMakeLists.txt
+--- a/llvm/lib/Support/CMakeLists.txt
++++ b/llvm/lib/Support/CMakeLists.txt
+@@ -62,7 +62,7 @@
+   endif()
+   set(system_libs ${system_libs} ${LLVM_ATOMIC_LIB})
+   set(system_libs ${system_libs} ${LLVM_PTHREAD_LIB})
+-  if( UNIX AND NOT (BEOS OR HAIKU) )
++  if( UNIX AND NOT (BEOS OR HAIKU OR CMAKE_SYSTEM_NAME STREQUAL "Mikros") )
+     set(system_libs ${system_libs} m)
+   endif()
+   if( UNIX AND "${CMAKE_SYSTEM_NAME}" MATCHES "SunOS" )
+diff -ruN a/llvm/lib/Support/Unix/Path.inc b/llvm/lib/Support/Unix/Path.inc
+--- a/llvm/lib/Support/Unix/Path.inc
++++ b/llvm/lib/Support/Unix/Path.inc
+@@ -525,6 +525,10 @@
+ #elif defined(__HAIKU__)
+   // Haiku doesn't expose this information.
+   return false;
++#elif defined(__mikros__)
++  // Mikros's statvfs does not tell remote file systems apart; "remote" is
++  // the conservative answer.
++  return false;
+ #elif defined(__sun)
+   // statvfs::f_basetype contains a null-terminated FSType name of the mounted
+   // target

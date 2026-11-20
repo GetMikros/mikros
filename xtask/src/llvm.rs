@@ -54,6 +54,12 @@ fn dir() -> PathBuf {
     crate::workspace_root().join("target/llvm")
 }
 
+/// The directory of the build's programs, the table generators among
+/// them, which builds of LLVM for Mikros run.
+pub fn native_tools() -> PathBuf {
+    dir().join("build/bin")
+}
+
 /// The directory of the installed programs.
 pub fn bin() -> PathBuf {
     dir().join("install/bin")

@@ -185,6 +185,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", freetype.install.display());
     let wayland = crate::wayland::build()?;
     println!("built    {}", wayland.library.display());
+    let llvm = crate::llvm_port::build_library()?;
+    println!("built    {}", llvm.display());
     let fonts = crate::fonts::fetch()?;
     println!("ok       {}", fonts.ttf.display());
     let mut first_boot_image = None;

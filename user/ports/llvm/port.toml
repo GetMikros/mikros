@@ -1,4 +1,5 @@
-# LLVM for Mikros: the C++ runtimes libunwind, libc++abi and libc++.
+# LLVM for Mikros: the C++ runtimes libunwind, libc++abi and libc++, and
+# LLVM's libraries as libLLVM.dlib, for the X86 target only.
 # Its release is the toolchain's, pinned in xtask/src/llvm.rs, and xtask
 # refuses to build when the two differ; the source archive is the one
 # the toolchain fetched. Only the parts of the source that the port
@@ -6,6 +7,9 @@
 # patches:
 # - 0001: libc++ takes the locale functions of the Linux support header
 #   on Mikros, whose C library has them.
+# - 0002: LLVM on Mikros links no libm, whose functions the C library
+#   has, takes the byte order from <endian.h>, and counts every file
+#   system as remote, since statvfs does not tell them apart.
 
 [source]
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/llvm-project-23.1.4.src.tar.xz"

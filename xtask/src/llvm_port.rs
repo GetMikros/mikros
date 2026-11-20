@@ -1,7 +1,7 @@
 //! LLVM for Mikros, the port in `user/ports/llvm`: the C++ runtimes
-//! libunwind, libc++abi and libc++, built from the release of the
-//! toolchain (`crate::llvm`), whose archive it shares, with the port's
-//! own patches.
+//! libunwind, libc++abi and libc++, and LLVM's libraries as
+//! `libLLVM.dlib`, built from the release of the toolchain
+//! (`crate::llvm`), whose archive it shares, with the port's own patches.
 
 use crate::ports::Port;
 use anyhow::{Context, Result, bail};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The directories of the release that the port builds from.
-const PARTS: [&str; 7] = [
+const PARTS: [&str; 8] = [
     "cmake",
     "libc",
     "libcxx",
@@ -18,6 +18,7 @@ const PARTS: [&str; 7] = [
     "libunwind",
     "llvm",
     "runtimes",
+    "third-party",
 ];
 
 /// Their tests, which the port does not build.
@@ -122,7 +123,7 @@ const CXX_RUNTIME_OPTIONS: [&str; 35] = [
 pub fn build_cxx_runtimes(toolchain: &Path, sysroot: &Path) -> Result<()> {
     let source = source()?;
     let cmake = crate::cmake::build()?;
-    let build = crate::workspace_root().join("target/ported/llvm/runtimes");
+    let build = crate::workspace_root().join("target/ported/llvm-runtimes");
     let mut args: Vec<String> = CXX_RUNTIME_OPTIONS.iter().map(|s| s.to_string()).collect();
     args.push(format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()));
     args.push(format!("-DCMAKE_INSTALL_PREFIX={}", sysroot.display()));
@@ -166,6 +167,70 @@ pub fn build_cxx_runtimes(toolchain: &Path, sysroot: &Path) -> Result<()> {
             .args(["--quiet", "install"]),
     )
     .context("building the C++ runtimes")
+}
+
+/// The CMake options of LLVM's libraries for Mikros: the X86 target
+/// only, all of them in one shared library, `libLLVM.dlib`, without
+/// programs, tests or optional libraries.
+const LIBRARY_OPTIONS: [&str; 24] = [
+    "-DLLVM_TARGETS_TO_BUILD=X86",
+    "-DLLVM_HOST_TRIPLE=x86_64-unknown-mikros",
+    "-DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-mikros",
+    "-DLLVM_BUILD_LLVM_DYLIB=ON",
+    "-DLLVM_LINK_LLVM_DYLIB=ON",
+    "-DLLVM_BUILD_TOOLS=OFF",
+    "-DLLVM_BUILD_UTILS=OFF",
+    "-DLLVM_TOOL_LTO_BUILD=OFF",
+    "-DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF",
+    "-DLLVM_INCLUDE_TESTS=OFF",
+    "-DLLVM_INCLUDE_EXAMPLES=OFF",
+    "-DLLVM_INCLUDE_BENCHMARKS=OFF",
+    "-DLLVM_INCLUDE_DOCS=OFF",
+    "-DLLVM_ENABLE_BINDINGS=OFF",
+    "-DLLVM_ENABLE_ASSERTIONS=OFF",
+    "-DLLVM_ENABLE_PIC=ON",
+    "-DLLVM_ENABLE_THREADS=ON",
+    "-DLLVM_ENABLE_ZLIB=OFF",
+    "-DLLVM_ENABLE_ZSTD=OFF",
+    "-DLLVM_ENABLE_LIBXML2=OFF",
+    "-DLLVM_ENABLE_LIBEDIT=OFF",
+    "-DLLVM_ENABLE_LIBPFM=OFF",
+    "-DLLVM_ENABLE_CURL=OFF",
+    "-DLLVM_ENABLE_HTTPLIB=OFF",
+];
+
+/// Builds LLVM's libraries for Mikros from the port's source, running the
+/// toolchain's table generators, and returns the directory its prefix,
+/// `/system`, was installed in: `lib/libLLVM.dlib`, with its headers and
+/// CMake package. LLVM installs its libraries in `lib/` whatever
+/// `CMAKE_INSTALL_LIBDIR` says.
+pub fn build_library() -> Result<PathBuf> {
+    crate::llvm::build()?;
+    let source = source()?;
+    let mut options: Vec<String> = LIBRARY_OPTIONS.iter().map(|o| o.to_string()).collect();
+    options.push(format!(
+        "-DLLVM_NATIVE_TOOL_DIR={}",
+        crate::llvm::native_tools().display()
+    ));
+    let install = crate::build_systems::cmake("llvm", &source.join("llvm"), &options)?;
+    crate::build_systems::check_installed(
+        &install,
+        &[
+            "lib/libLLVM.dlib",
+            "include/llvm/IR/Module.h",
+            "lib/cmake/llvm/LLVMConfig.cmake",
+        ],
+        &[],
+    )?;
+    let library = install.join("lib/libLLVM.dlib");
+    let soname = crate::build_systems::soname(&library)?;
+    if soname.as_deref() != Some("libLLVM.dlib") {
+        bail!(
+            "{} has the soname {soname:?}, not libLLVM.dlib",
+            library.display()
+        );
+    }
+    Ok(install)
 }
 
 #[cfg(test)]

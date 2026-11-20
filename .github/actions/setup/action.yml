@@ -33,6 +33,9 @@ outputs:
   llvm-deps:
     description: The hash of the restored LLVM build's Ninja dependency log, or nothing without one.
     value: ${{ steps.llvm-restored.outputs.deps }}
+  llvm-port-deps:
+    description: The hash of the restored build of LLVM for Mikros's Ninja dependency log, or nothing without one.
+    value: ${{ steps.llvm-port-restored.outputs.deps }}
 
 runs:
   using: composite
@@ -83,6 +86,28 @@ runs:
       id: llvm-restored
       shell: sh
       run: echo "deps=${{ hashFiles('target/llvm/build/.ninja_deps') }}" >> "$GITHUB_OUTPUT"
+    # LLVM's libraries for Mikros, from user/ports/llvm, take long to build
+    # too, so their build is kept the same way, with the sysroot it was
+    # built against and the build of the C++ runtimes, whose headers it
+    # holds: a sysroot made afresh would give every header a new time, and
+    # Ninja would compile all of it again. xtask updates the restored
+    # sysroot, rewriting only the files that changed.
+    - name: Restore the build of LLVM for Mikros
+      id: llvm-port
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          target/ported/llvm
+          target/ported/llvm-runtimes
+          target/sysroot
+        key: llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'user/ports/llvm/**') }}-newest
+        restore-keys: |
+          llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'user/ports/llvm/**') }}-
+          llvm-port-
+    - name: Note the restored build of LLVM for Mikros
+      id: llvm-port-restored
+      shell: sh
+      run: echo "deps=${{ hashFiles('target/ported/llvm/build/.ninja_deps') }}" >> "$GITHUB_OUTPUT"
     # The firmware, the Meson, CMake, musl and port downloads with their
     # patched sources, and the builds of CMake and musl. xtask extracts a
     # source again when its patches change, and Ninja and make rebuild

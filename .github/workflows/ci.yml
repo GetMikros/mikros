@@ -113,3 +113,18 @@ jobs:
         with:
           path: target/llvm
           key: llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}-${{ hashFiles('target/llvm/build/.ninja_deps') }}
+      # The build of LLVM for Mikros likewise, once libLLVM.dlib is
+      # installed, with the sysroot it was built against and the build of
+      # the C++ runtimes.
+      - name: Save the build of LLVM for Mikros
+        if: >-
+          always() &&
+          hashFiles('target/ported/llvm/install/system/lib/libLLVM.dlib') != '' &&
+          hashFiles('target/ported/llvm/build/.ninja_deps') != steps.setup.outputs.llvm-port-deps
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/ported/llvm
+            target/ported/llvm-runtimes
+            target/sysroot
+          key: llvm-port-${{ hashFiles('xtask/src/llvm_port.rs', 'user/ports/llvm/**') }}-${{ hashFiles('target/ported/llvm/build/.ninja_deps') }}
