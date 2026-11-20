@@ -1,0 +1,8 @@
+# wayland-protocols, the Wayland protocol files beyond the core protocol,
+# from which the compositor generates the code of the protocols it
+# serves.
+
+[source]
+url = "https://gitlab.freedesktop.org/-/project/2891/uploads/b09ec29f7a671bffbfa8896065864a04/wayland-protocols-1.50.tar.xz"
+sha256 = "4460c20cfcf68b994a5ee206ed15fc19ad312f16c96075186e83b0e3f4aa48a5"
+dir = "wayland-protocols-1.50"

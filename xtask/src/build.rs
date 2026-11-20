@@ -120,6 +120,8 @@ pub fn build_tests(kind: Kind) -> Result<Built> {
 /// Builds every component of the build kind `kind`, with `boot` as the
 /// boot image.
 pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
+    // The compositor's build script reads them.
+    crate::wayland::protocols()?;
     let bootmenu = cargo_build("bootmenu", "bootmenu", "x86_64-unknown-uefi", kind)?;
     println!("built    {}", bootmenu.display());
     let bootloader = cargo_build("mikrosboot", "mikrosboot", "x86_64-unknown-uefi", kind)?;

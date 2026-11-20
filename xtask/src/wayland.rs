@@ -6,6 +6,10 @@
 //! The scanner that generates its protocol code runs on the build host
 //! and is built there first from the same patched source, since the
 //! build for Mikros needs a scanner of its own version.
+//!
+//! The protocol files that the compositor serves, the core protocol's of
+//! this port and others of `user/ports/wayland-protocols`, are staged in
+//! `target/wayland-protocols` for its build script.
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -37,6 +41,39 @@ fn source(port: &crate::ports::Port) -> Result<PathBuf> {
     let what = format!("{} source", port.name);
     crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
     crate::port::patched_source(&archive, &dir, &port.source, &port.dir.join("patches"), &[])
+}
+
+/// The files of the wayland-protocols port that the compositor serves,
+/// relative to its source.
+const PROTOCOLS: [&str; 1] = ["stable/xdg-shell/xdg-shell.xml"];
+
+/// Puts the protocol files that the compositor serves in
+/// `target/wayland-protocols`, where its build script reads them, leaving
+/// no others there, and returns that directory. A file is written only
+/// when its contents changed.
+pub fn protocols() -> Result<PathBuf> {
+    let core = source(&crate::ports::load("wayland")?)?.join("protocol/wayland.xml");
+    let others = source(&crate::ports::load("wayland-protocols")?)?;
+    let files: Vec<PathBuf> = std::iter::once(core)
+        .chain(PROTOCOLS.iter().map(|p| others.join(p)))
+        .collect();
+    let dir = crate::workspace_root().join("target/wayland-protocols");
+    fs::create_dir_all(&dir)?;
+    let names: Vec<_> = files.iter().filter_map(|f| f.file_name()).collect();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if !names.contains(&entry.file_name().as_os_str()) {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    for file in &files {
+        let text = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+        let staged = dir.join(file.file_name().context("a protocol file without a name")?);
+        if fs::read(&staged).ok().as_deref() != Some(text.as_slice()) {
+            fs::write(&staged, &text)?;
+        }
+    }
+    Ok(dir)
 }
 
 /// Builds `wayland-scanner` for the build host from `source`, and returns

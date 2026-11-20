@@ -464,8 +464,10 @@ pub fn run(args: &Args) -> Result<()> {
         .get_or_insert_with(|| TEST_MEMORY.to_owned());
     let args = &args;
     if !args.no_host {
-        // The btrfs crate's tests link the host's library of the shim.
+        // The btrfs crate's tests link the host's library of the shim,
+        // and the compositor's build script reads the protocol files.
         crate::btrfs::build(crate::btrfs::Flavor::Host)?;
+        crate::wayland::protocols()?;
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         // The root workspace, and the user workspace's packages with
         // tests that run on the host, its default members.

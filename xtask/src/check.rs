@@ -338,7 +338,9 @@ pub fn run(args: &Args) -> Result<()> {
     }
 
     // The user workspace's packages with tests that run on the host, its
-    // default members, are checked on the host with their tests.
+    // default members, are checked on the host with their tests. The
+    // compositor's build script reads the protocol files.
+    crate::wayland::protocols()?;
     let mut clippy = user_cargo();
     clippy
         .args(["clippy", "--all-targets", "--", "-D", "warnings"])
