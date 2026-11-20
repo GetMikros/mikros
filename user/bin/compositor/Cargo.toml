@@ -13,6 +13,13 @@ ash = { version = "0.38", default-features = false, features = ["linked", "std"]
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 mikros-yaml = { path = "../../lib/yaml" }
 
+# The compositor of the desktop, which the session manager starts.
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+manifest = "system.compositor.yaml"
+share = ["desktop/shell.yaml"]
+
 # The parts that only run on Mikros are left out of the host's tests.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

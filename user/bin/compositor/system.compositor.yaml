@@ -1,0 +1,10 @@
+# The program manifest of the compositor, installed as
+# system/programs/system.compositor.yaml (MIKSPEC-0066.R11).
+app_id: system.compositor
+binary: /system/bin/compositor
+spawned_by:
+  - system.sessionmgr
+permissions:
+  - system.identity.set
+  - system.prompts.use
+  - system.gpu_priority.use

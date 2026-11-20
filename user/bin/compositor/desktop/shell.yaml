@@ -1,0 +1,7 @@
+# The default shell, installed as system/share/desktop/shell.yaml
+# (MIKSPEC-0075.R19, MIKSPEC-0077.R9, MIKSPEC-0077.R11):
+# /system/config/desktop/shell.yaml replaces it as a whole.
+shell: system.mikros.files
+file-picker: system.mikros.files.picker
+greeter: system.mikros.greeter
+prompts: system.mikros.prompts

@@ -13,4 +13,5 @@ mikros-yaml = { path = "../../lib/yaml" }
 kind = "service"
 image = "system"
 runtime = "rt"
+config = ["session.yaml"]
 manifest = "sessionmgr.yaml"

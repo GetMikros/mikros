@@ -1,0 +1,4 @@
+# The session settings, installed as system/config/session.yaml
+# (MIKSPEC-0057.R10). Until the desktop's greeter exists, a desktop does
+# not count as installed, and the text console logs users in.
+desktop: false
