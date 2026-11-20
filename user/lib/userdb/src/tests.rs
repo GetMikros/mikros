@@ -122,6 +122,16 @@ fn unknown_ids_are_not_found() {
     assert_eq!(db.set_kind(1001, Kind::Admin), Err(Refusal::NotFound));
     assert_eq!(db.set_full_name(1001, ""), Err(Refusal::NotFound));
     assert_eq!(db.set_hash(1001, hash(1)), Err(Refusal::NotFound));
+    let console = LoginMode::Console;
+    assert_eq!(db.set_login_mode(1001, console), Err(Refusal::NotFound));
+}
+
+#[test]
+fn new_users_log_in_to_the_desktop() {
+    let mut db = with(&[("ann", Kind::Admin)]);
+    assert_eq!(db.get(1000).unwrap().login, LoginMode::Desktop);
+    db.set_login_mode(1000, LoginMode::Console).unwrap();
+    assert_eq!(db.get(1000).unwrap().login, LoginMode::Console);
 }
 
 #[test]
@@ -145,6 +155,7 @@ fn files_hold_the_users_and_the_next_id() {
     ]);
     db.delete(1001).unwrap();
     db.set_full_name(1002, "Cy Ünïcode").unwrap();
+    db.set_login_mode(1002, LoginMode::Console).unwrap();
     let bytes = encode(&db);
     assert_eq!(decode(&bytes), Ok(db.clone()));
     assert_eq!(decode(&encode(&Users::new())), Ok(Users::new()));
@@ -167,14 +178,37 @@ fn corrupt_files_are_refused() {
     let mut next = bytes.clone();
     next[8..12].copy_from_slice(&1001u32.to_le_bytes());
     assert_eq!(decode(&next), Err(Corrupt));
-    // An unknown kind.
+    // An unknown kind, and an unknown login mode.
     let mut kind = bytes.clone();
     kind[20] = 3;
     assert_eq!(decode(&kind), Err(Corrupt));
+    let mut login = bytes.clone();
+    login[21] = 3;
+    assert_eq!(decode(&login), Err(Corrupt));
     // A name that is not a user's name.
     let mut name = bytes.clone();
-    name[23] = b'A';
+    name[24] = b'A';
     assert_eq!(decode(&name), Err(Corrupt));
+}
+
+#[test]
+fn files_of_the_first_format_are_read() {
+    let db = with(&[("ann", Kind::Admin), ("bob", Kind::Standard)]);
+    // The same file without the login modes.
+    let bytes = encode(&db);
+    let mut first = Vec::from(&b"MIKUSER1"[..]);
+    first.extend_from_slice(&bytes[8..16]);
+    let mut at = 16;
+    while at < bytes.len() {
+        first.extend_from_slice(&bytes[at..at + 5]);
+        at += 6;
+        for _ in 0..3 {
+            let len = u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize;
+            first.extend_from_slice(&bytes[at..at + 2 + len]);
+            at += 2 + len;
+        }
+    }
+    assert_eq!(decode(&first), Ok(db));
 }
 
 #[test]

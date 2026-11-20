@@ -1,5 +1,6 @@
 //! The user records of the accounts service: their IDs, names, full
-//! names, kinds and password hashes, the checks made when they change,
+//! names, kinds, login modes and password hashes, the checks made when
+//! they change,
 //! the file that holds them, and the delays of failed attempts.
 
 #![no_std]
@@ -33,6 +34,13 @@ pub enum Kind {
     Admin,
 }
 
+/// A user's login mode (MIKSPEC-0056.R17).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginMode {
+    Console,
+    Desktop,
+}
+
 /// A user's record. `hash` is the user's password hash, in the PHC
 /// string format.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +49,7 @@ pub struct Record {
     pub name: String,
     pub full_name: String,
     pub kind: Kind,
+    pub login: LoginMode,
     pub hash: String,
 }
 
@@ -109,7 +118,8 @@ impl Users {
         self.users.values().find(|r| r.name == name)
     }
 
-    /// Adds a user with the next ID and returns that ID.
+    /// Adds a user with the next ID, whose login mode is `Desktop`, and
+    /// returns that ID.
     pub fn create(
         &mut self,
         name: &str,
@@ -133,6 +143,7 @@ impl Users {
             name: String::from(name),
             full_name: String::from(full_name),
             kind,
+            login: LoginMode::Desktop,
             hash,
         };
         self.users.insert(id, record);
@@ -164,6 +175,12 @@ impl Users {
         }
         let record = self.users.get_mut(&id).ok_or(Refusal::NotFound)?;
         record.full_name = String::from(full_name);
+        Ok(())
+    }
+
+    pub fn set_login_mode(&mut self, id: u32, login: LoginMode) -> Result<(), Refusal> {
+        let record = self.users.get_mut(&id).ok_or(Refusal::NotFound)?;
+        record.login = login;
         Ok(())
     }
 

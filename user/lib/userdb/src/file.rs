@@ -1,13 +1,18 @@
 //! The file that holds the users: a magic number and the next ID, then
 //! each record in increasing order of ID. Numbers are little-endian, and
-//! each string is its length in bytes followed by its UTF-8 bytes.
+//! each string is its length in bytes followed by its UTF-8 bytes. A
+//! record is its ID, kind, login mode, name, full name and hash. Files of
+//! the first format, whose records have no login mode, are still read,
+//! their users with the login mode `Desktop`.
 
-use crate::{FIRST_ID, FULL_NAME_MAX, Kind, LAST_ID, Record, Users, valid_name};
+use crate::{FIRST_ID, FULL_NAME_MAX, Kind, LAST_ID, LoginMode, Record, Users, valid_name};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-const MAGIC: &[u8; 8] = b"MIKUSER1";
+const MAGIC: &[u8; 8] = b"MIKUSER2";
+/// The magic number of the first format.
+const MAGIC_1: &[u8; 8] = b"MIKUSER1";
 /// The longest password hash the file holds.
 const HASH_MAX: usize = 1024;
 
@@ -27,6 +32,10 @@ pub fn encode(users: &Users) -> Vec<u8> {
             Kind::Standard => 1,
             Kind::Admin => 2,
         });
+        out.push(match r.login {
+            LoginMode::Console => 1,
+            LoginMode::Desktop => 2,
+        });
         for s in [&r.name, &r.full_name, &r.hash] {
             out.extend_from_slice(&(s.len() as u16).to_le_bytes());
             out.extend_from_slice(s.as_bytes());
@@ -38,9 +47,11 @@ pub fn encode(users: &Users) -> Vec<u8> {
 /// The users that `bytes`, written by `encode`, holds.
 pub fn decode(bytes: &[u8]) -> Result<Users, Corrupt> {
     let mut r = Reader(bytes);
-    if r.take(MAGIC.len())? != MAGIC {
-        return Err(Corrupt);
-    }
+    let modes = match r.take(MAGIC.len())? {
+        magic if magic == MAGIC => true,
+        magic if magic == MAGIC_1 => false,
+        _ => return Err(Corrupt),
+    };
     let next = r.u32()?;
     if !(FIRST_ID..=LAST_ID + 1).contains(&next) {
         return Err(Corrupt);
@@ -59,6 +70,14 @@ pub fn decode(bytes: &[u8]) -> Result<Users, Corrupt> {
             [2] => Kind::Admin,
             _ => return Err(Corrupt),
         };
+        let login = match modes {
+            false => LoginMode::Desktop,
+            true => match r.take(1)? {
+                [1] => LoginMode::Console,
+                [2] => LoginMode::Desktop,
+                _ => return Err(Corrupt),
+            },
+        };
         let name = r.string()?;
         let full_name = r.string()?;
         let hash = r.string()?;
@@ -71,6 +90,7 @@ pub fn decode(bytes: &[u8]) -> Result<Users, Corrupt> {
             name,
             full_name,
             kind,
+            login,
             hash,
         };
         users.insert(id, record);
