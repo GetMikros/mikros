@@ -290,13 +290,22 @@ impl Compositor {
         // SAFETY: the kernel just made both ends for us.
         let (ours, theirs) =
             unsafe { (OwnedHandle::from_raw(ours), OwnedHandle::from_raw(theirs)) };
-        match parts::start(&self.reactor, &part, theirs, Some(login)).await {
-            Ok(pid) => mikros_rt::log!(Info, "compositor: started the greeter as pid {pid}"),
+        let pid = match parts::start(&self.reactor, &part, theirs, Some(login)).await {
+            Ok(pid) => pid,
             Err(e) => {
                 mikros_rt::log!(Error, "compositor: starting the greeter: {e}");
                 return;
             }
-        }
+        };
+        mikros_rt::log!(Info, "compositor: started the greeter as pid {pid}");
+        let reactor = self.reactor.clone();
+        self.spawner.spawn(async move {
+            match parts::exited(&reactor, pid).await {
+                Ok(0) => mikros_rt::log!(Info, "compositor: the greeter exited"),
+                Ok(code) => mikros_rt::log!(Error, "compositor: the greeter exited with {code}"),
+                Err(e) => mikros_rt::log!(Error, "compositor: waiting for the greeter: {e}"),
+            }
+        });
         self.serve_client(ours).await;
     }
 }

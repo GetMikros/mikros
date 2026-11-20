@@ -8,7 +8,7 @@
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::process::{
-    HandleRole, Launcher, LauncherAsyncClient, SpawnRequest, StartupHandle,
+    HandleRole, Launcher, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
 };
 use std::path::PathBuf;
 
@@ -25,6 +25,8 @@ const LOGIN_ID: u32 = 3;
 const CALLER_USER: u32 = u32::MAX;
 /// The rights that a duplicate keeps: all of the original's.
 const SAME_RIGHTS: u32 = 1 << 31;
+/// The deadline of a wait without one.
+const FOREVER: i64 = i64::MAX;
 
 /// A part of the shell: what to start, for which roles.
 #[derive(Debug, PartialEq, Eq)]
@@ -139,15 +141,9 @@ fn block(arguments: &[String], environment: &[String]) -> Option<OwnedHandle> {
     Some(memory)
 }
 
-/// Starts `part` with `wayland`, the client end of its Wayland channel, and
-/// in greeter mode `login`, and returns its process ID.
-pub async fn start(
-    reactor: &Reactor,
-    part: &Part,
-    wayland: OwnedHandle,
-    login: Option<OwnedHandle>,
-) -> Result<u32, String> {
-    // The C library keeps the connection, of which this is a duplicate.
+/// A `Launcher` client of its own, on a duplicate of the C library's
+/// connection.
+fn launcher(reactor: &Reactor) -> Result<LauncherAsyncClient, String> {
     let raw = std::os::mikros::process::launcher().as_raw_handle();
     let mut copy = 0;
     // SAFETY: the out pointer is valid for the call.
@@ -157,7 +153,18 @@ pub async fn start(
     }
     // SAFETY: the kernel just made the duplicate for us.
     let launcher: ClientEnd<Launcher> = ClientEnd::new(unsafe { OwnedHandle::from_raw(copy) });
-    let launcher = LauncherAsyncClient::new(launcher, reactor.clone());
+    Ok(LauncherAsyncClient::new(launcher, reactor.clone()))
+}
+
+/// Starts `part` with `wayland`, the client end of its Wayland channel, and
+/// in greeter mode `login`, and returns its process ID.
+pub async fn start(
+    reactor: &Reactor,
+    part: &Part,
+    wayland: OwnedHandle,
+    login: Option<OwnedHandle>,
+) -> Result<u32, String> {
+    let launcher = launcher(reactor)?;
     let path = part.executable.display().to_string();
     let mut arguments = vec![path.clone()];
     arguments.extend(part.arguments.iter().cloned());
@@ -189,5 +196,18 @@ pub async fn start(
     match launcher.spawn(request).await {
         Ok(Ok(spawned)) => Ok(spawned.pid),
         other => Err(format!("Spawn: {other:?}")),
+    }
+}
+
+/// Waits until the part `pid` has exited, and returns its exit code, or
+/// why it cannot be waited for.
+pub async fn exited(reactor: &Reactor, pid: u32) -> Result<i64, String> {
+    let launcher = launcher(reactor)?;
+    loop {
+        match launcher.wait(pid as i32, WaitOptions(0), FOREVER).await {
+            Ok(Ok(w)) if w.status.kind == StatusKind::Exited => return Ok(w.status.exit_code),
+            Ok(Ok(_)) => continue,
+            other => return Err(format!("Wait: {other:?}")),
+        }
     }
 }
