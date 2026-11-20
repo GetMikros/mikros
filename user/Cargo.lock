@@ -379,6 +379,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+ "mikros-rt",
+]
+
+[[package]]
 name = "devicemgr"
 version = "0.0.0"
 dependencies = [

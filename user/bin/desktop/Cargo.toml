@@ -1,0 +1,24 @@
+[package]
+name = "desktop"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-cli = { path = "../../lib/cli" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-command = { path = "../../lib/command" }
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+
+# A command: the session manager checks that it runs in a text console's
+# session, so it needs no program manifest.
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+completions = "desktop.msh"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

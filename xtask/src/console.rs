@@ -317,7 +317,7 @@ const SETUP_KEYS: [&str; 5] = [
 ];
 
 /// Sends the monitor command `sendkey` once for each of `keys`.
-fn type_keys(socket: &Path, keys: &str) -> Result<()> {
+pub fn type_keys(socket: &Path, keys: &str) -> Result<()> {
     for key in keys.split(' ') {
         scenario::monitor(socket, &format!("sendkey {key}"))?;
         std::thread::sleep(Duration::from_millis(50));
