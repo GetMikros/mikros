@@ -6,13 +6,18 @@
 //! to the code of the resource; a request that breaks the protocol is a
 //! protocol error, which is sent to the client and ends its connection.
 
+mod buffer;
 mod surface;
 mod xdg;
 
+pub use buffer::{BufferId, Imports, Point, TimelineId};
 pub use surface::{Rect, Role, Surface, SurfaceId};
 
-use crate::wayland::protocols::{wl_callback, wl_compositor, wl_display, wl_registry, xdg_wm_base};
+use crate::wayland::protocols::{
+    mikros_buffer_v1, wl_callback, wl_compositor, wl_display, wl_registry, xdg_wm_base,
+};
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
+use std::collections::BTreeSet;
 use std::collections::{BTreeMap, VecDeque};
 
 /// The first ID of the objects that the compositor would create, beyond
@@ -37,6 +42,10 @@ pub enum Resource {
     Positioner,
     XdgSurface(SurfaceId),
     Toplevel(SurfaceId),
+    BufferFactory,
+    Buffer(BufferId),
+    Timeline(TimelineId),
+    SurfaceSync(SurfaceId),
 }
 
 /// An object of a client.
@@ -174,6 +183,16 @@ pub struct Server {
     serial: u32,
     /// The size of the screen, which fullscreen toplevels get.
     pub screen: Option<(i32, i32)>,
+    /// The name of the render device that clients allocate buffers on,
+    /// and the formats and modifiers that the compositor imports.
+    pub buffer_device: String,
+    pub buffer_formats: Vec<(u32, u64)>,
+    /// The buffers and timelines that `Imports` imported and has not yet
+    /// been told to forget.
+    imported_buffers: BTreeSet<BufferId>,
+    imported_timelines: BTreeSet<TimelineId>,
+    /// The release points of buffers that surfaces no longer show.
+    releases: Vec<Point>,
 }
 
 impl Server {
@@ -186,6 +205,7 @@ impl Server {
             Resource::Compositor,
         );
         server.add_global(&xdg_wm_base::INTERFACE, 1, Resource::WmBase);
+        server.add_global(&mikros_buffer_v1::INTERFACE, 1, Resource::BufferFactory);
         server
     }
 
@@ -213,10 +233,17 @@ impl Server {
     }
 
     /// Removes a client whose connection ended, with its surfaces.
-    pub fn disconnect(&mut self, client: ClientId) {
+    pub fn disconnect(&mut self, imports: &mut dyn Imports, client: ClientId) {
         self.clients.remove(&client);
-        self.surfaces.retain(|_, s| s.client != client);
+        let releases = &mut self.releases;
+        self.surfaces.retain(|_, s| {
+            if s.client == client {
+                releases.extend(s.current.release);
+            }
+            s.client != client
+        });
         self.regions.retain(|(c, _), _| *c != client);
+        self.collect(imports);
     }
 
     pub fn client(&mut self, client: ClientId) -> Option<&mut Client> {
@@ -235,14 +262,20 @@ impl Server {
     /// Handles the requests in `bytes`, a channel message of `client`, with
     /// the handles of their file descriptors. A protocol error is sent to
     /// the client and recorded in its `error`, and ends its requests.
-    pub fn dispatch(&mut self, client: ClientId, bytes: &[u8], handles: Vec<Fd>) {
+    pub fn dispatch(
+        &mut self,
+        imports: &mut dyn Imports,
+        client: ClientId,
+        bytes: &[u8],
+        handles: Vec<Fd>,
+    ) {
         let mut fds = VecDeque::from(handles);
         let mut rest = bytes;
         while !rest.is_empty() {
             if self.clients.get(&client).is_none_or(|c| c.error.is_some()) {
                 return;
             }
-            match self.message(client, rest, &mut fds) {
+            match self.message(imports, client, rest, &mut fds) {
                 Ok(after) => rest = after,
                 Err(error) => {
                     if let Some(c) = self.clients.get_mut(&client) {
@@ -266,6 +299,7 @@ impl Server {
     /// after it.
     fn message<'a>(
         &mut self,
+        imports: &mut dyn Imports,
         client: ClientId,
         bytes: &'a [u8],
         fds: &mut VecDeque<Fd>,
@@ -316,8 +350,12 @@ impl Server {
             )?,
             Resource::Callback => {}
             Resource::Compositor | Resource::Surface(_) | Resource::Region => {
-                self.surface_request(request, resource, args)?
+                self.surface_request(imports, request, resource, args)?
             }
+            Resource::BufferFactory
+            | Resource::Buffer(_)
+            | Resource::Timeline(_)
+            | Resource::SurfaceSync(_) => self.buffer_request(imports, request, resource, args)?,
             Resource::WmBase
             | Resource::Positioner
             | Resource::XdgSurface(_)
@@ -387,7 +425,16 @@ impl Server {
             .clients
             .get_mut(&request.client)
             .expect("a dispatched client");
-        c.create(id, interface, id_version, resource)
+        c.create(id, interface, id_version, resource)?;
+        if resource == Resource::BufferFactory {
+            mikros_buffer_v1::send_device(&mut c.out, id.0, &self.buffer_device);
+            for &(format, modifier) in &self.buffer_formats {
+                let (hi, lo) = ((modifier >> 32) as u32, modifier as u32);
+                mikros_buffer_v1::send_format(&mut c.out, id.0, format, hi, lo);
+            }
+            mikros_buffer_v1::send_done(&mut c.out, id.0);
+        }
+        Ok(())
     }
 }
 
@@ -404,6 +451,7 @@ struct Request {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::buffer::{Layout, Memory};
     use super::*;
     use crate::wayland::protocols::wl_callback;
     use crate::wayland::wire::{Arg, Message};
@@ -412,12 +460,43 @@ pub(crate) mod tests {
     /// the server sent it.
     pub struct TestClient {
         pub id: ClientId,
+        pub imports: std::cell::RefCell<FakeImports>,
+    }
+
+    /// Imports that refuse the handle 0, number what they import, and
+    /// record what they are told to forget.
+    #[derive(Debug, Default)]
+    pub struct FakeImports {
+        next: u64,
+        pub dropped_buffers: Vec<BufferId>,
+        pub dropped_timelines: Vec<TimelineId>,
+    }
+
+    impl Imports for FakeImports {
+        fn buffer(&mut self, _: Memory, handle: Fd, _: Layout) -> Option<BufferId> {
+            self.next += 1;
+            (handle.0 != 0).then_some(self.next)
+        }
+
+        fn timeline(&mut self, handle: Fd) -> Option<TimelineId> {
+            self.next += 1;
+            (handle.0 != 0).then_some(self.next)
+        }
+
+        fn drop_buffer(&mut self, buffer: BufferId) {
+            self.dropped_buffers.push(buffer);
+        }
+
+        fn drop_timeline(&mut self, timeline: TimelineId) {
+            self.dropped_timelines.push(timeline);
+        }
     }
 
     impl TestClient {
         pub fn new(server: &mut Server) -> TestClient {
             TestClient {
                 id: server.connect(),
+                imports: Default::default(),
             }
         }
 
@@ -426,7 +505,7 @@ pub(crate) mod tests {
             let mut out = Outgoing::default();
             out.send(object, opcode, args);
             let (bytes, fds) = out.take().unwrap();
-            server.dispatch(self.id, &bytes, fds);
+            server.dispatch(&mut *self.imports.borrow_mut(), self.id, &bytes, fds);
         }
 
         /// The events sent since the last call, as their object, opcode
@@ -522,7 +601,8 @@ pub(crate) mod tests {
             names,
             [
                 &Arg::String(Some("wl_compositor".into())),
-                &Arg::String(Some("xdg_wm_base".into()))
+                &Arg::String(Some("xdg_wm_base".into())),
+                &Arg::String(Some("mikros_buffer_v1".into()))
             ]
         );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);

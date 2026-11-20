@@ -3,8 +3,8 @@
 //! opaque and input areas, and the frame callbacks that the compositor
 //! answers once it has drawn a frame.
 
-use super::{ProtocolError, Request, Resource, Server};
-use crate::wayland::protocols::{wl_callback, wl_compositor, wl_region, wl_surface};
+use super::{BufferId, Imports, Point, ProtocolError, Request, Resource, Server};
+use crate::wayland::protocols::{wl_buffer, wl_callback, wl_compositor, wl_region, wl_surface};
 use crate::wayland::wire::{Arg, DecodeError, ObjectId};
 
 pub type SurfaceId = u64;
@@ -27,8 +27,13 @@ pub enum Role {
 /// The state of a surface that its requests set and a commit applies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SurfaceState {
-    /// The buffer object, or None for no buffer.
-    pub buffer: Option<ObjectId>,
+    /// The buffer, or None for no buffer.
+    pub buffer: Option<BufferId>,
+    /// The points on kernel timelines of the buffer, which its client
+    /// reaches once the buffer holds what it drew, and which the
+    /// compositor reaches once it no longer reads the buffer.
+    pub acquire: Option<Point>,
+    pub release: Option<Point>,
     /// The damage in surface coordinates and in buffer coordinates.
     pub damage: Vec<Rect>,
     pub buffer_damage: Vec<Rect>,
@@ -47,6 +52,8 @@ impl Default for SurfaceState {
     fn default() -> SurfaceState {
         SurfaceState {
             buffer: None,
+            acquire: None,
+            release: None,
             damage: Vec::new(),
             buffer_damage: Vec::new(),
             opaque: Vec::new(),
@@ -68,7 +75,9 @@ pub struct Surface {
     pub role: Role,
     pub pending: SurfaceState,
     /// Whether a buffer was attached, or none, since the last commit.
-    attached: bool,
+    pub(super) attached: bool,
+    /// The surface's mikros_surface_sync_v1 object, while it has one.
+    pub sync: Option<ObjectId>,
     pub current: SurfaceState,
     /// The frame callbacks of the pending state, and those of the
     /// committed state, which the next frame answers.
@@ -81,6 +90,7 @@ pub struct Surface {
 impl Server {
     pub(super) fn surface_request(
         &mut self,
+        imports: &mut dyn Imports,
         request: Request,
         resource: Resource,
         args: Vec<Arg>,
@@ -93,6 +103,7 @@ impl Server {
                 wl_compositor::Request::decode(request.opcode, args).map_err(decoded)?,
             ),
             Resource::Surface(id) => self.surface(
+                imports,
                 request,
                 id,
                 wl_surface::Request::decode(request.opcode, args).map_err(decoded)?,
@@ -135,6 +146,7 @@ impl Server {
                         role: Role::None,
                         pending: SurfaceState::default(),
                         attached: false,
+                        sync: None,
                         current: SurfaceState::default(),
                         pending_frames: Vec::new(),
                         frames: Vec::new(),
@@ -218,6 +230,7 @@ impl Server {
 
     fn surface(
         &mut self,
+        imports: &mut dyn Imports,
         request: Request,
         id: SurfaceId,
         decoded: wl_surface::Request,
@@ -225,8 +238,11 @@ impl Server {
         let error = |code, message: &str| ProtocolError::new(request.object, code, message);
         match decoded {
             wl_surface::Request::Destroy => {
-                self.surfaces.remove(&id);
+                if let Some(surface) = self.surfaces.remove(&id) {
+                    self.releases.extend(surface.current.release);
+                }
                 self.client_mut(request).destroy(request.object);
+                self.collect(imports);
                 return Ok(());
             }
             wl_surface::Request::Attach { buffer, x, y } => {
@@ -236,12 +252,16 @@ impl Server {
                         "attach with an offset",
                     ));
                 }
-                if let Some(buffer) = buffer {
-                    // No interface makes buffers yet.
-                    return Err(ProtocolError::invalid_object(format!(
-                        "object {buffer} is not a buffer"
-                    )));
-                }
+                let buffer = match buffer {
+                    None => None,
+                    Some(object) => {
+                        let c = self.client_mut(request);
+                        match c.resource(request.object, object, &wl_buffer::INTERFACE)? {
+                            Resource::Buffer(buffer) => Some(buffer),
+                            _ => unreachable!("buffers are wl_buffer objects"),
+                        }
+                    }
+                };
                 let surface = self.surface_mut(id)?;
                 surface.pending.buffer = buffer;
                 surface.pending.offset = (x, y);
@@ -313,7 +333,7 @@ impl Server {
             wl_surface::Request::Offset { x, y } => {
                 self.surface_mut(id)?.pending.offset = (x, y);
             }
-            wl_surface::Request::Commit => self.commit(request, id)?,
+            wl_surface::Request::Commit => self.commit(imports, request, id)?,
         }
         Ok(())
     }
@@ -328,15 +348,28 @@ impl Server {
 
     /// Applies the pending state of the surface `id`, after its role
     /// checked it.
-    fn commit(&mut self, request: Request, id: SurfaceId) -> Result<(), ProtocolError> {
+    fn commit(
+        &mut self,
+        imports: &mut dyn Imports,
+        request: Request,
+        id: SurfaceId,
+    ) -> Result<(), ProtocolError> {
         self.check_commit(request, id)?;
+        self.check_points(id)?;
         let surface = self.surfaces.get_mut(&id).expect("a checked surface");
         let pending = &mut surface.pending;
         let current = &mut surface.current;
+        // A buffer's points are those of the commit that attached it: the
+        // compositor no longer reads what the last commit attached.
         if surface.attached {
+            self.releases.extend(current.release.take());
             current.buffer = pending.buffer;
+            current.acquire = pending.acquire.take();
+            current.release = pending.release.take();
             surface.attached = false;
         }
+        pending.acquire = None;
+        pending.release = None;
         current.damage = std::mem::take(&mut pending.damage);
         current.buffer_damage = std::mem::take(&mut pending.buffer_damage);
         current.opaque = pending.opaque.clone();
@@ -347,6 +380,7 @@ impl Server {
         let frames = std::mem::take(&mut surface.pending_frames);
         surface.frames.extend(frames);
         self.committed(request, id);
+        self.collect(imports);
         Ok(())
     }
 
@@ -475,7 +509,7 @@ pub(super) mod tests {
             client.error(&mut server),
             Some(wl_display::error::INVALID_OBJECT)
         );
-        server.disconnect(client.id);
+        server.disconnect(&mut *client.imports.borrow_mut(), client.id);
         assert_eq!(server.surfaces().count(), 2);
     }
 }
