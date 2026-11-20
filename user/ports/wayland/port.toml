@@ -16,6 +16,9 @@
 #   directory's wayland protocol, and the socket functions are removed.
 # - 0004: listeners are called directly, on the x86-64 System V ABI,
 #   instead of through libffi.
+# - 0005: the cursor library and the library of EGL window functions are
+#   built again, as the ported projects that load cursor themes or create
+#   EGL windows need them; neither needs EGL itself.
 
 [source]
 url = "https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.24.0/downloads/wayland-1.24.0.tar.xz"

@@ -1,7 +1,8 @@
 //! The Wayland client library, `libwayland.dlib`, from the port in
 //! `user/ports/wayland`: the library of `wayland-scanner` and the static
-//! client library built for Mikros, linked into one shared library whose
-//! `DT_SONAME` is its file name in `/system/libraries`.
+//! client, cursor and EGL window libraries built for Mikros, linked into
+//! one shared library whose `DT_SONAME` is its file name in
+//! `/system/libraries`.
 //!
 //! The scanner that generates its protocol code runs on the build host
 //! and is built there first from the same patched source, since the
@@ -25,6 +26,9 @@ pub const LIBRARY: &str = "libwayland.dlib";
 /// directory, which also holds the objects of the static libraries it
 /// uses, and which the shared library holds.
 const ARCHIVE: &str = "src/libwayland-client.slib";
+/// The static cursor and EGL window libraries, in the same build
+/// directory.
+const OTHER_ARCHIVES: [&str; 2] = ["cursor/libwayland-cursor.slib", "egl/libwayland-egl.slib"];
 
 /// What the build gives.
 pub struct Built {
@@ -57,8 +61,9 @@ fn write_if_changed(path: &Path, contents: &[u8]) -> Result<()> {
     fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
 }
 
-/// Installs the client library of `built` and its headers in the
-/// sysroot, with a pkg-config file that links `libwayland.dlib`.
+/// Installs the client, cursor and EGL window libraries of `built` and
+/// their headers in the sysroot, with pkg-config files that link
+/// `libwayland.dlib`.
 fn install_client(built: &Built) -> Result<()> {
     let sysroot = crate::sysroot::dir();
     let include = built.install.join("include");
@@ -73,16 +78,20 @@ fn install_client(built: &Built) -> Result<()> {
         &sysroot.join("lib").join(LIBRARY),
         &fs::read(&built.library)?,
     )?;
-    let pc = built.install.join("libraries/pkgconfig/wayland-client.pc");
-    let pc = fs::read_to_string(&pc).with_context(|| format!("reading {}", pc.display()))?;
-    let pc = pc
-        .replace("prefix=/system", "prefix=")
-        .replace("${prefix}/libraries", "${prefix}/lib")
-        .replace("-lwayland-client", "-lwayland");
-    write_if_changed(
-        &sysroot.join("lib/pkgconfig/wayland-client.pc"),
-        pc.as_bytes(),
-    )
+    for name in ["wayland-client", "wayland-cursor", "wayland-egl"] {
+        let flag = format!("-l{name}");
+        let pc = built.install.join(format!("libraries/pkgconfig/{name}.pc"));
+        let pc = fs::read_to_string(&pc).with_context(|| format!("reading {}", pc.display()))?;
+        let pc = pc
+            .replace("prefix=/system", "prefix=")
+            .replace("${prefix}/libraries", "${prefix}/lib")
+            .replace(&flag, "-lwayland");
+        write_if_changed(
+            &sysroot.join(format!("lib/pkgconfig/{name}.pc")),
+            pc.as_bytes(),
+        )?;
+    }
+    Ok(())
 }
 
 /// Installs the protocol files of the wayland-protocols port in the
@@ -232,6 +241,7 @@ fn link(build: &Path, library: &Path) -> Result<()> {
             .arg(format!("-Wl,-soname,{LIBRARY}"))
             .arg("-Wl,--whole-archive")
             .arg(build.join(ARCHIVE))
+            .args(OTHER_ARCHIVES.iter().map(|a| build.join(a)))
             .arg("-Wl,--no-whole-archive")
             .arg("-o")
             .arg(library),

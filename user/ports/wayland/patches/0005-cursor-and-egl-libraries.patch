@@ -1,0 +1,17 @@
+diff --git a/meson.build b/meson.build
+index b7c37eb..42b6a23 100644
+--- a/meson.build
++++ b/meson.build
+@@ -105,6 +105,12 @@ src_inc = include_directories('src')
+ 
+ subdir('src')
+ 
++if get_option('libraries')
++	# The cursor library and the library of EGL window functions, which
++	# are small libraries of the client library alone.
++	subdir('cursor')
++	subdir('egl')
++endif
+ if get_option('tests')
+ 	subdir('tests')
+ endif
