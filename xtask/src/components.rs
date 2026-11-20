@@ -25,6 +25,10 @@
 //! - `completions`: the file name, in its package, of the declarations of
 //!   a program's arguments for msh, installed as
 //!   `system/share/msh/completions/<name>.msh`.
+//! - `config`: the file names, in its package, of settings of the system
+//!   that it installs as `system/config/<file>`.
+//! - `share`: the paths, in its package, of data files that it installs
+//!   as `system/share/<path>`.
 
 use crate::build::Kind;
 use anyhow::{Context, Result, bail};
@@ -75,6 +79,8 @@ pub struct Component {
     kinds: Option<Vec<String>>,
     path: Option<String>,
     completions: Option<String>,
+    config: Vec<String>,
+    share: Vec<String>,
 }
 
 impl Component {
@@ -122,6 +128,12 @@ impl Component {
                 format!("system/share/msh/completions/{name}.msh"),
                 self.dir.join(file),
             ));
+        }
+        for file in &self.config {
+            members.push((format!("system/config/{file}"), self.dir.join(file)));
+        }
+        for path in &self.share {
+            members.push((format!("system/share/{path}"), self.dir.join(path)));
         }
         Ok(members)
     }
@@ -251,6 +263,8 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
                 "kinds",
                 "path",
                 "completions",
+                "config",
+                "share",
             ];
             if !keys.contains(&key.as_str()) {
                 bail!("{name}: unknown key `{key}` in [package.metadata.mikros]");
@@ -287,6 +301,18 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             ),
             Some(_) => bail!("{name}: `kinds` is not a list"),
         };
+        let list = |key: &str| -> Result<Vec<String>> {
+            match table.get(key) {
+                None => Ok(Vec::new()),
+                Some(Value::Array(files)) => files
+                    .iter()
+                    .map(|f| f.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+                    .with_context(|| format!("{name}: `{key}` holds a non-string")),
+                Some(_) => bail!("{name}: `{key}` is not a list"),
+            }
+        };
+        let (config, share) = (list("config")?, list("share")?);
         let manifest_path = package["manifest_path"]
             .as_str()
             .context("a package without a manifest path")?;
@@ -303,6 +329,8 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             kinds,
             path: text("path")?,
             completions: text("completions")?,
+            config,
+            share,
         });
     }
     Ok(components)
@@ -329,9 +357,11 @@ mod tests {
             package("msh", serde_json::json!({"kind": "program", "image": "system"})),
             { "name": "mikros-yaml", "manifest_path": "/r/user/lib/yaml/Cargo.toml", "metadata": null },
             package("devices", serde_json::json!({"kind": "program", "image": "system", "completions": "devices.msh"})),
+            package("sessionmgr", serde_json::json!({"kind": "service", "image": "system", "runtime": "rt", "manifest": "s.yaml", "config": ["session.yaml"]})),
+            package("compositor", serde_json::json!({"kind": "program", "image": "system", "share": ["desktop/shell.yaml"]})),
         ]});
         let components = parse(&metadata).unwrap();
-        assert_eq!(components.len(), 5);
+        assert_eq!(components.len(), 7);
         let members = |i: usize| -> Vec<String> {
             components[i]
                 .members(Kind::Debug, Path::new("/bin"))
@@ -362,6 +392,18 @@ mod tests {
                 "system/bin/devices",
                 "system/share/msh/completions/devices.msh"
             ]
+        );
+        assert_eq!(
+            members(5),
+            [
+                "system/services/system.sessionmgr/sessionmgr",
+                "system/services/system.sessionmgr/service.yaml",
+                "system/config/session.yaml"
+            ]
+        );
+        assert_eq!(
+            members(6),
+            ["system/bin/compositor", "system/share/desktop/shell.yaml"]
         );
         assert_eq!(components[3].runtime, Runtime::Std);
         assert_eq!(components[0].runtime, Runtime::Rt);
