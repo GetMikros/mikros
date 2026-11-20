@@ -1357,6 +1357,12 @@ impl Namespaces {
             match crate::users::subvolume(shared, &on_root).await {
                 // A root file system without subvolumes gets a folder.
                 Ok(()) | Err(Status::NotSupported) => {}
+                // Another start of the app made it meanwhile.
+                Err(_)
+                    if self
+                        .entry(shared, ready, &folder, Rights::READ)
+                        .await
+                        .is_ok() => {}
                 Err(e) => return Err(e),
             }
         }
