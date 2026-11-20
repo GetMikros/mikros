@@ -4,7 +4,9 @@
 //! It holds the musl headers in `include/`, with the generated
 //! `<mikros/syscalls.h>`, `<mikros/abi.h>`, `<mikros/process.h>`,
 //! `<mikros/services.h>` and
-//! `<mikros/startup.h>` in `include/mikros/`;
+//! `<mikros/startup.h>` in `include/mikros/`, and the C bindings that
+//! midlc generates for the libraries in `midl/` in
+//! `include/mikros/midl/`, such as `<mikros/midl/mikros.gpu.h>`;
 //! `libc.slib`, `libc.dlib`, the dynamic linker `ld-mikros.dlib`, which
 //! is the same file, `crt1.o`, `crti.o`, `crtn.o`, and LLVM's C++
 //! runtimes, libunwind, libc++abi and libc++, as `.dlib` and `.slib` in
@@ -40,9 +42,10 @@ use std::sync::OnceLock;
 pub const TRIPLE: &str = "x86_64-unknown-mikros";
 
 /// The directories of the sysroot, relative to it.
-const DIRS: [&str; 5] = [
+const DIRS: [&str; 6] = [
     "include",
     "include/mikros",
+    "include/mikros/midl",
     "lib",
     "lib/pkgconfig",
     "share/cmake/Platform",
@@ -101,6 +104,7 @@ fn make() -> Result<PathBuf> {
     }
     let header = sysroot.join("include/mikros/syscalls.h");
     write(&header, syscalls_header()?.as_bytes())?;
+    midl_headers(&sysroot.join("include/mikros/midl"))?;
     for header in ["abi.h", "process.h", "services.h", "startup.h"] {
         let from = crate::workspace_root()
             .join("user/runtime/libc/include/mikros")
@@ -288,6 +292,41 @@ fn keep_if_unchanged(path: &Path) -> Result<()> {
         fs::rename(&new, path)
             .with_context(|| format!("moving {} to {}", new.display(), path.display()))
     }
+}
+
+/// Writes the C bindings of every library in `midl/` (MIKSPEC-0062.R6)
+/// into `dir`, and removes the headers of libraries that are gone.
+fn midl_headers(dir: &Path) -> Result<()> {
+    let root = crate::workspace_root().join("midl");
+    let mut sources = Vec::new();
+    for library in fs::read_dir(&root).context("reading midl/")? {
+        for file in fs::read_dir(library?.path())? {
+            let path = file?.path();
+            if path.extension().is_some_and(|e| e == "midl") {
+                let text = fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                sources.push((path.display().to_string(), text));
+            }
+        }
+    }
+    sources.sort();
+    let sources: Vec<(&str, &str)> = sources
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let model = midlc::compile(&sources, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let headers = midlc::c::generate(&model);
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if !headers.iter().any(|(n, _)| *n == name) {
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+    for (name, text) in headers {
+        write(&dir.join(name), text.as_bytes())?;
+    }
+    Ok(())
 }
 
 /// `<mikros/syscalls.h>`, generated from the system call table.
