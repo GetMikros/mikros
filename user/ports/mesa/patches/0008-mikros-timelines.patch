@@ -1,0 +1,344 @@
+diff -ruN a/src/vulkan/runtime/vk_sync.h b/src/vulkan/runtime/vk_sync.h
+--- a/src/vulkan/runtime/vk_sync.h
++++ b/src/vulkan/runtime/vk_sync.h
+@@ -309,6 +309,19 @@
+                                        const void *security_attributes,
+                                        uint32_t access,
+                                        const wchar_t *name);
++
++   /** Imports the payload from a kernel handle of Mikros, which it takes.
++    *
++    * The handle names a kernel timeline.
++    */
++   VkResult (*import_mikros_handle)(struct vk_device *device,
++                                    struct vk_sync *sync,
++                                    uint32_t handle);
++
++   /** Exports the payload as a new kernel handle of Mikros */
++   VkResult (*export_mikros_handle)(struct vk_device *device,
++                                    struct vk_sync *sync,
++                                    uint32_t *handle);
+ };
+ 
+ enum vk_sync_flags {
+diff -ruN a/src/vulkan/runtime/vk_semaphore.c b/src/vulkan/runtime/vk_semaphore.c
+--- a/src/vulkan/runtime/vk_semaphore.c
++++ b/src/vulkan/runtime/vk_semaphore.c
+@@ -47,6 +47,11 @@
+    if (type->import_opaque_fd)
+       handle_types |= VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   if (type->import_mikros_handle && semaphore_type == VK_SEMAPHORE_TYPE_TIMELINE)
++      handle_types |= VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS;
++#endif
++
+    if (type->export_sync_file && semaphore_type == VK_SEMAPHORE_TYPE_BINARY)
+       handle_types |= VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+ 
+@@ -68,6 +73,11 @@
+    if (type->export_opaque_fd)
+       handle_types |= VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   if (type->export_mikros_handle && semaphore_type == VK_SEMAPHORE_TYPE_TIMELINE)
++      handle_types |= VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS;
++#endif
++
+    if (type->export_sync_file && semaphore_type == VK_SEMAPHORE_TYPE_BINARY)
+       handle_types |= VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+ 
+@@ -721,3 +731,52 @@
+ }
+ 
+ #endif /* !defined(_WIN32) */
++
++#ifdef VK_USE_PLATFORM_MIKROS
++VKAPI_ATTR VkResult VKAPI_CALL
++vk_common_ImportSemaphoreHandleMIKROS(VkDevice _device,
++                                      const VkImportSemaphoreHandleInfoMIKROS *pImportSemaphoreHandleInfo)
++{
++   VK_FROM_HANDLE(vk_device, device, _device);
++   VK_FROM_HANDLE(vk_semaphore, semaphore, pImportSemaphoreHandleInfo->semaphore);
++
++   assert(pImportSemaphoreHandleInfo->sType ==
++          VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_HANDLE_INFO_MIKROS);
++
++   if (pImportSemaphoreHandleInfo->handleType !=
++          VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS ||
++       (pImportSemaphoreHandleInfo->flags & VK_SEMAPHORE_IMPORT_TEMPORARY_BIT))
++      return vk_error(semaphore, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++
++   struct vk_sync *sync = &semaphore->permanent;
++   if (sync->type->import_mikros_handle == NULL)
++      return vk_error(semaphore, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++
++   VkResult result = sync->type->import_mikros_handle(device, sync,
++                                                      pImportSemaphoreHandleInfo->handle);
++   if (result == VK_SUCCESS)
++      sync->flags |= VK_SYNC_IS_SHAREABLE | VK_SYNC_IS_SHARED;
++   return result;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL
++vk_common_GetSemaphoreHandleMIKROS(VkDevice _device,
++                                   const VkSemaphoreGetHandleInfoMIKROS *pGetHandleInfo,
++                                   mikros_handle_t *pHandle)
++{
++   VK_FROM_HANDLE(vk_device, device, _device);
++   VK_FROM_HANDLE(vk_semaphore, semaphore, pGetHandleInfo->semaphore);
++
++   assert(pGetHandleInfo->sType == VK_STRUCTURE_TYPE_SEMAPHORE_GET_HANDLE_INFO_MIKROS);
++
++   struct vk_sync *sync = vk_semaphore_get_active_sync(semaphore);
++   if (pGetHandleInfo->handleType != VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS ||
++       sync->type->export_mikros_handle == NULL)
++      return vk_error(semaphore, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++
++   VkResult result = sync->type->export_mikros_handle(device, sync, pHandle);
++   if (result == VK_SUCCESS)
++      sync->flags |= VK_SYNC_IS_SHARED;
++   return result;
++}
++#endif
+diff -ruN a/src/gallium/frontends/lavapipe/lvp_mikros_sync.c b/src/gallium/frontends/lavapipe/lvp_mikros_sync.c
+--- /dev/null
++++ b/src/gallium/frontends/lavapipe/lvp_mikros_sync.c
+@@ -0,0 +1,135 @@
++#include "lvp_private.h"
++
++#include <mikros/startup.h>
++#include <mikros/syscalls.h>
++
++#define SAME_RIGHTS (1u << 31)
++#define HANDLE_DESCRIPTOR 10u
++#define OBJECT_TIMELINE 14u
++#define STATUS_TIMED_OUT (-21)
++
++struct lvp_mikros_timeline {
++   struct vk_sync base;
++   mikros_handle_t timeline;
++};
++
++static struct lvp_mikros_timeline *
++to_timeline(struct vk_sync *sync)
++{
++   return container_of(sync, struct lvp_mikros_timeline, base);
++}
++
++static VkResult
++lvp_mikros_timeline_init(struct vk_device *device, struct vk_sync *sync, uint64_t initial_value)
++{
++   struct lvp_mikros_timeline *t = to_timeline(sync);
++   if (mikros_timeline_create(initial_value, 0, &t->timeline) != 0)
++      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
++   return VK_SUCCESS;
++}
++
++static void
++lvp_mikros_timeline_finish(struct vk_device *device, struct vk_sync *sync)
++{
++   mikros_handle_close(to_timeline(sync)->timeline);
++}
++
++static VkResult
++lvp_mikros_timeline_signal(struct vk_device *device, struct vk_sync *sync, uint64_t value)
++{
++   if (mikros_timeline_signal(to_timeline(sync)->timeline, value) != 0)
++      return vk_device_set_lost(device, "signalling a kernel timeline failed");
++   return VK_SUCCESS;
++}
++
++static VkResult
++lvp_mikros_timeline_get_value(struct vk_device *device, struct vk_sync *sync, uint64_t *value)
++{
++   if (mikros_timeline_get(to_timeline(sync)->timeline, value) != 0)
++      return vk_device_set_lost(device, "reading a kernel timeline failed");
++   return VK_SUCCESS;
++}
++
++/* A kernel timeline knows nothing of signal operations still to come, so
++ * a wait for one to be pending waits for its value. */
++static VkResult
++lvp_mikros_timeline_wait(struct vk_device *device, struct vk_sync *sync, uint64_t wait_value,
++                         enum vk_sync_wait_flags wait_flags, uint64_t abs_timeout_ns)
++{
++   int64_t deadline = abs_timeout_ns > INT64_MAX ? INT64_MAX : (int64_t)abs_timeout_ns;
++   mikros_status_t s = mikros_timeline_wait(to_timeline(sync)->timeline, wait_value, deadline);
++   if (s == STATUS_TIMED_OUT)
++      return VK_TIMEOUT;
++   if (s != 0)
++      return vk_device_set_lost(device, "waiting for a kernel timeline failed");
++   return VK_SUCCESS;
++}
++
++static VkResult
++lvp_mikros_timeline_import(struct vk_device *device, struct vk_sync *sync, uint32_t handle)
++{
++   uint8_t info[24];
++   uint64_t len = 0;
++   if (mikros_object_get_info(handle, 1, info, sizeof info, &len) != 0 || len < sizeof info ||
++       ((uint32_t)info[16] | (uint32_t)info[17] << 8 | (uint32_t)info[18] << 16 |
++        (uint32_t)info[19] << 24) != OBJECT_TIMELINE)
++      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++   struct lvp_mikros_timeline *t = to_timeline(sync);
++   mikros_handle_close(t->timeline);
++   t->timeline = handle;
++   return VK_SUCCESS;
++}
++
++static VkResult
++lvp_mikros_timeline_export(struct vk_device *device, struct vk_sync *sync, uint32_t *handle)
++{
++   if (mikros_handle_duplicate(to_timeline(sync)->timeline, SAME_RIGHTS, handle) != 0)
++      return vk_error(device, VK_ERROR_TOO_MANY_OBJECTS);
++   return VK_SUCCESS;
++}
++
++static VkResult
++lvp_mikros_timeline_import_fd(struct vk_device *device, struct vk_sync *sync, int fd)
++{
++   mikros_handle_t handle;
++   if (mikros_handle_from_fd(fd, &handle) != 0)
++      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++   VkResult result = lvp_mikros_timeline_import(device, sync, handle);
++   if (result != VK_SUCCESS)
++      mikros_handle_close(handle);
++   return result;
++}
++
++static VkResult
++lvp_mikros_timeline_export_fd(struct vk_device *device, struct vk_sync *sync, int *fd)
++{
++   mikros_handle_t handle;
++   VkResult result = lvp_mikros_timeline_export(device, sync, &handle);
++   if (result != VK_SUCCESS)
++      return result;
++   *fd = mikros_fd_from_handle(handle, HANDLE_DESCRIPTOR);
++   if (*fd < 0) {
++      mikros_handle_close(handle);
++      return vk_error(device, VK_ERROR_TOO_MANY_OBJECTS);
++   }
++   return VK_SUCCESS;
++}
++
++const struct vk_sync_type lvp_mikros_timeline_type = {
++   .size = sizeof(struct lvp_mikros_timeline),
++   .features = VK_SYNC_FEATURE_TIMELINE |
++               VK_SYNC_FEATURE_GPU_WAIT |
++               VK_SYNC_FEATURE_CPU_WAIT |
++               VK_SYNC_FEATURE_CPU_SIGNAL |
++               VK_SYNC_FEATURE_WAIT_PENDING |
++               VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL,
++   .init = lvp_mikros_timeline_init,
++   .finish = lvp_mikros_timeline_finish,
++   .signal = lvp_mikros_timeline_signal,
++   .get_value = lvp_mikros_timeline_get_value,
++   .wait = lvp_mikros_timeline_wait,
++   .import_opaque_fd = lvp_mikros_timeline_import_fd,
++   .export_opaque_fd = lvp_mikros_timeline_export_fd,
++   .import_mikros_handle = lvp_mikros_timeline_import,
++   .export_mikros_handle = lvp_mikros_timeline_export,
++};
+diff -ruN a/src/gallium/frontends/lavapipe/lvp_private.h b/src/gallium/frontends/lavapipe/lvp_private.h
+--- a/src/gallium/frontends/lavapipe/lvp_private.h
++++ b/src/gallium/frontends/lavapipe/lvp_private.h
+@@ -278,6 +278,9 @@
+ };
+ 
+ extern const struct vk_sync_type lvp_pipe_sync_type;
++#ifdef VK_USE_PLATFORM_MIKROS
++extern const struct vk_sync_type lvp_mikros_timeline_type;
++#endif
+ 
+ void lvp_pipe_sync_signal_with_fence(struct lvp_device *device,
+                                      struct lvp_pipe_sync *sync,
+diff -ruN a/src/gallium/frontends/lavapipe/lvp_device.c b/src/gallium/frontends/lavapipe/lvp_device.c
+--- a/src/gallium/frontends/lavapipe/lvp_device.c
++++ b/src/gallium/frontends/lavapipe/lvp_device.c
+@@ -63,6 +63,7 @@
+ #ifdef VK_USE_PLATFORM_MIKROS
+ #include <mikros/startup.h>
+ #include "lp_mikros.h"
++#include "vk_common_entrypoints.h"
+ #endif
+ 
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+@@ -172,9 +173,12 @@
+    .MIKROS_external_memory_handle         = true,
+ #endif
+    .KHR_external_semaphore                = true,
+-#ifdef HAVE_LIBDRM
++#if defined(HAVE_LIBDRM) || defined(VK_USE_PLATFORM_MIKROS)
+    .KHR_external_semaphore_fd             = true,
+ #endif
++#ifdef VK_USE_PLATFORM_MIKROS
++   .MIKROS_external_semaphore_handle      = true,
++#endif
+    .KHR_shader_float_controls             = true,
+    .KHR_shader_float_controls2            = true,
+    .KHR_get_memory_requirements2          = true,
+@@ -1548,9 +1552,15 @@
+    for (unsigned i = 0; i < ARRAY_SIZE(device->drv_options); i++)
+       device->drv_options[i] = device->pscreen->nir_options[MIN2(i, MESA_SHADER_COMPUTE)];
+ 
+-   device->sync_timeline_type = vk_sync_timeline_get_type(&lvp_pipe_sync_type);
+    device->sync_types[0] = &lvp_pipe_sync_type;
++#ifdef VK_USE_PLATFORM_MIKROS
++   /* Timeline semaphores are kernel timelines, which other processes
++    * can share. */
++   device->sync_types[1] = &lvp_mikros_timeline_type;
++#else
++   device->sync_timeline_type = vk_sync_timeline_get_type(&lvp_pipe_sync_type);
+    device->sync_types[1] = &device->sync_timeline_type.sync;
++#endif
+    device->sync_types[2] = NULL;
+    device->vk.supported_sync_types = device->sync_types;
+ 
+@@ -1944,6 +1954,19 @@
+       queue->ctx->flush(queue->ctx, &queue->last_fence, 0);
+ 
+    for (uint32_t i = 0; i < submit->signal_count; i++) {
++#ifdef VK_USE_PLATFORM_MIKROS
++      /* A kernel timeline is signalled once the work has finished. */
++      if (submit->signals[i].sync->type == &lvp_mikros_timeline_type) {
++         if (queue->last_fence)
++            device->pscreen->fence_finish(device->pscreen, NULL, queue->last_fence,
++                                          OS_TIMEOUT_INFINITE);
++         result = vk_sync_signal(&device->vk, submit->signals[i].sync,
++                                 submit->signals[i].signal_value);
++         if (result != VK_SUCCESS)
++            return result;
++         continue;
++      }
++#endif
+       struct lvp_pipe_sync *sync =
+          vk_sync_as_lvp_pipe_sync(submit->signals[i].sync);
+       lvp_pipe_sync_signal_with_fence(device, sync, queue->last_fence);
+@@ -3031,6 +3054,12 @@
+    const VkPhysicalDeviceExternalSemaphoreInfo *pExternalSemaphoreInfo,
+    VkExternalSemaphoreProperties               *pExternalSemaphoreProperties)
+ {
++#ifdef VK_USE_PLATFORM_MIKROS
++   /* What the device's sync types import and export. */
++   vk_common_GetPhysicalDeviceExternalSemaphoreProperties(physicalDevice, pExternalSemaphoreInfo,
++                                                          pExternalSemaphoreProperties);
++   return;
++#endif
+    const VkSemaphoreTypeCreateInfo *type_info =
+       vk_find_struct_const(pExternalSemaphoreInfo->pNext, SEMAPHORE_TYPE_CREATE_INFO);
+    const VkSemaphoreType type = !type_info ? VK_SEMAPHORE_TYPE_BINARY : type_info->semaphoreType;
+diff -ruN a/src/gallium/frontends/lavapipe/meson.build b/src/gallium/frontends/lavapipe/meson.build
+--- a/src/gallium/frontends/lavapipe/meson.build
++++ b/src/gallium/frontends/lavapipe/meson.build
+@@ -55,6 +55,10 @@
+   liblvp_files += 'lvp_android.c'
+ endif
+ 
++if host_machine.system() == 'mikros'
++  liblvp_files += 'lvp_mikros_sync.c'
++endif
++
+ lvp_deps = []
+ lvp_flags = []
+ 
