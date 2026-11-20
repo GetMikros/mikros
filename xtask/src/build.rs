@@ -99,6 +99,12 @@ pub struct Built {
 
 /// The member of the session settings, which turn the desktop off.
 const SESSION_SETTINGS: &str = "config/session.yaml";
+/// The shell settings of the desktop run's system, by their member and
+/// their file in the repository.
+const PROBE_SHELL: (&str, &str) = (
+    "config/desktop/shell.yaml",
+    "user/tests/greeter-probe/shell.yaml",
+);
 
 /// The boot images that can be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,6 +287,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 )?;
                 println!("built    {}", program.display());
                 only_tests.push(("system/bin/tests/vulkan-c".to_owned(), program));
+                only_tests.extend(greeter_probe(&wayland, &vulkan, &headers)?);
             }
             // The system fonts and the fontconfig configuration that names
             // them as the defaults.
@@ -328,11 +335,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", system_image.display());
             if tests {
                 // The desktop run's system: the same without the session
-                // settings, so that a desktop counts as installed.
+                // settings, so that a desktop counts as installed, and with
+                // shell settings that name the greeter probe.
+                let shell = crate::workspace_root().join(PROBE_SHELL.1);
                 let desktop: Vec<(&str, &Path)> = whole
                     .iter()
                     .copied()
                     .filter(|&(at, _)| at != SESSION_SETTINGS)
+                    .chain([(PROBE_SHELL.0, shell.as_path())])
                     .collect();
                 let desktop = boot_image(kind, "desktop.img", &desktop)?;
                 println!("built    {}", desktop.display());
@@ -2530,6 +2540,62 @@ fn c_build(name: &str, sources: &[&str], linking: Linking, args: &[String]) -> R
         bail!("building {name} failed");
     }
     Ok(program)
+}
+
+/// The members of the system app of the desktop run's greeter, the C
+/// program of `user/tests/greeter-probe`, with the client code of
+/// xdg-shell that the build host's `wayland-scanner` of `wayland`
+/// generates for it, linked with libwayland and the Vulkan loader in
+/// `vulkan`, whose headers are in `headers`.
+fn greeter_probe(
+    wayland: &crate::wayland::Built,
+    vulkan: &Path,
+    headers: &Path,
+) -> Result<Vec<(String, PathBuf)>> {
+    let name = "greeter-probe";
+    let dir = c_dir(name);
+    fs::create_dir_all(&dir)?;
+    let xml = crate::wayland::protocols()?.join("xdg-shell.xml");
+    let code = dir.join("xdg-shell-protocol.c");
+    for (mode, out) in [
+        ("client-header", dir.join("xdg-shell-client-protocol.h")),
+        ("private-code", code.clone()),
+    ] {
+        crate::port::run(
+            Command::new(wayland.scanner_program())
+                .arg(mode)
+                .arg(&xml)
+                .arg(out),
+        )
+        .context("generating the xdg-shell code of greeter-probe")?;
+    }
+    let args = [
+        "-Wall".to_string(),
+        "-Wextra".into(),
+        "-Werror".into(),
+        format!("-I{}", headers.display()),
+        format!("-I{}", dir.display()),
+        wayland.library.display().to_string(),
+        vulkan
+            .join("libraries")
+            .join(crate::vulkan::LOADER)
+            .display()
+            .to_string(),
+    ];
+    let code = code.display().to_string();
+    let sources = ["user/tests/greeter-probe/greeter.c", code.as_str()];
+    let program = c_build(name, &sources, Linking::Dynamic, &args)?;
+    println!("built    {}", program.display());
+    let app = crate::system_apps::SystemApp {
+        id: "system.mikros.greeter_probe",
+        version: "1.0.0",
+        name: "Greeter probe",
+        description: "The greeter of the desktop run",
+        executable: name,
+        shell_parts: "  - roles: [greeter]\n    executable: greeter-probe\n",
+        files: vec![(name.to_owned(), program, true)],
+    };
+    crate::system_apps::members(&app, &dir.join("app"))
 }
 
 /// The directory that `c_build` builds `name` in.

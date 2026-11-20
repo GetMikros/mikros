@@ -857,6 +857,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-mika"
+version = "0.0.0"
+dependencies = [
+ "mikros-yaml",
+ "ruzstd",
+ "sha2",
+]
+
+[[package]]
 name = "mikros-tz"
 version = "0.0.0"
 
@@ -866,6 +875,10 @@ version = "0.0.0"
 dependencies = [
  "argon2",
 ]
+
+[[package]]
+name = "mikros-yaml"
+version = "0.0.0"
 
 [[package]]
 name = "mikrosboot"
@@ -1721,6 +1734,7 @@ dependencies = [
  "lzma-rs",
  "midlc",
  "mikros-exfat",
+ "mikros-mika",
  "mikros-userdb",
  "mikrosboot",
  "object",

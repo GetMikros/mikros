@@ -38,6 +38,15 @@ pub struct Built {
     pub scanner: PathBuf,
 }
 
+impl Built {
+    /// The build host's `wayland-scanner`, in the prefix of its pkg-config
+    /// file's directory.
+    pub fn scanner_program(&self) -> PathBuf {
+        let prefix = self.scanner.ancestors().nth(2).unwrap_or(&self.scanner);
+        prefix.join("bin/wayland-scanner")
+    }
+}
+
 /// Writes `contents` to `path`, creating its directory, unless it holds
 /// them already, so that what is built from it is not built again.
 fn write_if_changed(path: &Path, contents: &[u8]) -> Result<()> {

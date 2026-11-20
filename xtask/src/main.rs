@@ -47,6 +47,7 @@ mod secure_boot;
 mod setup;
 mod symbolize;
 mod sysroot;
+mod system_apps;
 mod system_tests;
 mod takeover;
 mod test;
