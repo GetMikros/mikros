@@ -34,7 +34,7 @@ use std::task::{Poll, Waker};
 
 /// The `USER` startup handles: the `Login` channel of greeter mode, and
 /// the `Seat` channel.
-const USER: u32 = 2;
+const USER: u32 = 16;
 const LOGIN_ID: u32 = 3;
 const SEAT_ID: u32 = 7;
 const SAME_RIGHTS: u32 = 1 << 31;
