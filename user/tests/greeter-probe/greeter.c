@@ -6,10 +6,19 @@
  * the desktop run looks for on the screen. With the arguments
  * `--login <name> <password>`, it then logs that user in through
  * Login. Then it serves the connection until the compositor closes it.
+ *
+ * With the argument `--control`, as the part of the system app
+ * system.mikros.shell_probe in a user session, it shows nothing and only
+ * connects to the service manager's Control, which needs a user
+ * permission whose question the compositor cancels: it exits with 0 when
+ * the connection is refused and with 70 when it is not.
+ *
  * It exits with the number of the step that failed, if one does. */
 
 #include <mikros/midl/mikros.session.h>
+#include <mikros/services.h>
 #include <mikros/startup.h>
+#include <mikros/syscalls.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -298,8 +307,22 @@ static int log_in(const char *name, const char *password)
 	return called == MIKROS_MIDL_OK ? 0 : 61;
 }
 
+/* Connects to the service manager's Control, which must be refused: 0
+ * when it was, 70 when it was not, and 71 without a channel. */
+static int control(void)
+{
+	mikros_handle_t ours, theirs;
+	if (mikros_channel_create(0, &ours, &theirs) != 0)
+		return 71;
+	mikros_status_t connected = mikros_service_connect("mikros.service.Control", NULL, theirs);
+	mikros_handle_close(ours);
+	return connected == 0 ? 70 : 0;
+}
+
 int main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--control") == 0)
+		return control();
 	struct state s = {0};
 	mikros_handle_t channel = mikros_take_startup_handle(ROLE_USER, WAYLAND_ID);
 	int fd = channel == 0 ? -1 : mikros_fd_from_handle(channel, KIND_CHANNEL);

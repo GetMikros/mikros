@@ -2571,8 +2571,9 @@ fn c_build(name: &str, sources: &[&str], linking: Linking, args: &[String]) -> R
     Ok(program)
 }
 
-/// The members of the system app of the desktop run's greeter, the C
-/// program of `user/tests/greeter-probe`, with the client code of
+/// The members of the system apps of the desktop run's greeter and of
+/// its user session's shell, both the C program of
+/// `user/tests/greeter-probe`, with the client code of
 /// xdg-shell that the build host's `wayland-scanner` of `wayland`
 /// generates for it, linked with libwayland and the Vulkan loader in
 /// `vulkan`, whose headers are in `headers`.
@@ -2615,7 +2616,7 @@ fn greeter_probe(
     let sources = ["user/tests/greeter-probe/greeter.c", code.as_str()];
     let program = c_build(name, &sources, Linking::Dynamic, &args)?;
     println!("built    {}", program.display());
-    let app = crate::system_apps::SystemApp {
+    let greeter = crate::system_apps::SystemApp {
         id: "system.mikros.greeter_probe",
         version: "1.0.0",
         name: "Greeter probe",
@@ -2623,9 +2624,23 @@ fn greeter_probe(
         executable: name,
         shell_parts: "  - roles: [greeter]\n    executable: greeter-probe\n    \
                       arguments: [\"--login\", dee, dee-password]\n",
+        files: vec![(name.to_owned(), program.clone(), true)],
+    };
+    // The shell of the desktop run's user session, whose part connects to
+    // the service manager's Control and so asks a question there.
+    let shell = crate::system_apps::SystemApp {
+        id: "system.mikros.shell_probe",
+        version: "1.0.0",
+        name: "Shell probe",
+        description: "The shell of the desktop run",
+        executable: name,
+        shell_parts: "  - roles: [desktop]\n    executable: greeter-probe\n    \
+                      arguments: [\"--control\"]\n",
         files: vec![(name.to_owned(), program, true)],
     };
-    crate::system_apps::members(&app, &dir.join("app"))
+    let mut members = crate::system_apps::members(&greeter, &dir.join("app"))?;
+    members.extend(crate::system_apps::members(&shell, &dir.join("app"))?);
+    Ok(members)
 }
 
 /// The directory that `c_build` builds `name` in.

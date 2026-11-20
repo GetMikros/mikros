@@ -11,9 +11,12 @@
 //! Ctrl, Alt and F2, which the compositor turns into a switch back to the
 //! console, until the colour has left the screen again. In dee's session
 //! it then runs `desktop`, which starts dee's desktop: the run waits until
-//! the compositor's background covers the screen, presses Ctrl, Alt and
-//! F2 until it has left it, and ends the session with `exit`, which ends
-//! the desktop too. It keeps the last screen dump in `desktop.ppm`.
+//! the compositor's background covers the screen, and until the desktop's
+//! shell, the shell probe, connected to the service manager's `Control`,
+//! whose question the compositor cancels, and was refused. It then
+//! presses Ctrl, Alt and F2 until the background has left the screen, and
+//! ends the session with `exit`, which ends the desktop too. It keeps the
+//! last screen dump in `desktop.ppm`.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -32,6 +35,11 @@ const GREETER: &str = "compositor: started the greeter as pid";
 const LOGGED_IN: &str = "sessionmgr: dee logged in on console 1";
 const DESKTOP_STARTED: &str = "sessionmgr: started the desktop of dee";
 const DESKTOP_ENDED: &str = "sessionmgr: the desktop of dee ended";
+/// What the compositor logs once it cancelled the shell probe's
+/// question, and once the shell probe exited, which it does with 0 when
+/// it was refused.
+const CANCELLED: &str = "compositor: cancelled the question";
+const SHELL_EXITED: &str = "compositor: the part desktop of system.mikros.shell_probe exited";
 /// The probe's colour and the compositor's background, [0.11, 0.12,
 /// 0.14] in unsigned normalized bytes, in the bytes of the display, and
 /// how far a pixel may be from them.
@@ -135,6 +143,15 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         scenario::wait_for_line(&log, DESKTOP_STARTED, &mut qemu, deadline)?;
         let what = "dee's desktop showed";
         screen.until(&mut qemu, BACKGROUND, &covered, what)?;
+        scenario::wait_for_line(&log, CANCELLED, &mut qemu, deadline)?;
+        let serial = scenario::wait_for_line(&log, SHELL_EXITED, &mut qemu, deadline)?;
+        let exited = serial
+            .lines()
+            .find(|l| l.contains(SHELL_EXITED))
+            .unwrap_or("");
+        if !exited.trim_end().ends_with(SHELL_EXITED) {
+            bail!("the shell probe was not refused: {}", exited.trim_end());
+        }
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
         let what = "the console showed from dee's desktop";
         screen.until(&mut qemu, BACKGROUND, &gone, what)?;
