@@ -7,8 +7,11 @@
 //! and is built there first from the same patched source, since the
 //! build for Mikros needs a scanner of its own version.
 //!
-//! The protocol files that the compositor serves, the core protocol's of
-//! this port and others of `user/ports/wayland-protocols`, are staged in
+//! The library, its headers and a pkg-config file that links it are
+//! installed in the sysroot, as are the protocol files of
+//! `user/ports/wayland-protocols` with theirs, for the ported projects
+//! that use them. The protocol files that the compositor serves, the core
+//! protocol's of this port and some of wayland-protocols, are staged in
 //! `target/wayland-protocols` for its build script.
 
 use anyhow::{Context, Result};
@@ -30,6 +33,81 @@ pub struct Built {
     /// The directory its prefix, `/system`, was installed in, with the
     /// headers.
     pub install: PathBuf,
+    /// The directory of the pkg-config file of the build host's
+    /// `wayland-scanner`.
+    pub scanner: PathBuf,
+}
+
+/// Writes `contents` to `path`, creating its directory, unless it holds
+/// them already, so that what is built from it is not built again.
+fn write_if_changed(path: &Path, contents: &[u8]) -> Result<()> {
+    if fs::read(path).ok().as_deref() == Some(contents) {
+        return Ok(());
+    }
+    fs::create_dir_all(path.parent().context("a path without a directory")?)?;
+    fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Installs the client library of `built` and its headers in the
+/// sysroot, with a pkg-config file that links `libwayland.dlib`.
+fn install_client(built: &Built) -> Result<()> {
+    let sysroot = crate::sysroot::dir();
+    let include = built.install.join("include");
+    let entries =
+        fs::read_dir(&include).with_context(|| format!("reading {}", include.display()))?;
+    for entry in entries {
+        let path = entry?.path();
+        let name = path.file_name().context("a header without a name")?;
+        write_if_changed(&sysroot.join("include").join(name), &fs::read(&path)?)?;
+    }
+    write_if_changed(
+        &sysroot.join("lib").join(LIBRARY),
+        &fs::read(&built.library)?,
+    )?;
+    let pc = built.install.join("libraries/pkgconfig/wayland-client.pc");
+    let pc = fs::read_to_string(&pc).with_context(|| format!("reading {}", pc.display()))?;
+    let pc = pc
+        .replace("prefix=/system", "prefix=")
+        .replace("${prefix}/libraries", "${prefix}/lib")
+        .replace("-lwayland-client", "-lwayland");
+    write_if_changed(
+        &sysroot.join("lib/pkgconfig/wayland-client.pc"),
+        pc.as_bytes(),
+    )
+}
+
+/// Installs the protocol files of the wayland-protocols port in the
+/// sysroot's `share/wayland-protocols`, laid out as in its source, with
+/// its pkg-config file.
+pub fn install_protocols() -> Result<()> {
+    let port = crate::ports::load("wayland-protocols")?;
+    let source = source(&port)?;
+    let share = crate::sysroot::dir().join("share");
+    let mut dirs: Vec<PathBuf> = ["stable", "staging", "unstable", "experimental"]
+        .iter()
+        .map(|d| source.join(d))
+        .collect();
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "xml") {
+                let relative = path.strip_prefix(&source)?;
+                let to = share.join("wayland-protocols").join(relative);
+                write_if_changed(&to, &fs::read(&path)?)?;
+            }
+        }
+    }
+    let version = port
+        .source
+        .strip_prefix("wayland-protocols-")
+        .context("the source directory names no version")?;
+    let pc = format!(
+        "pkgdatadir=${{pc_sysrootdir}}/share/wayland-protocols\n\n\
+         Name: Wayland Protocols\nDescription: Wayland protocol files\nVersion: {version}\n"
+    );
+    write_if_changed(&share.join("pkgconfig/wayland-protocols.pc"), pc.as_bytes())
 }
 
 /// The patched source of the port.
@@ -122,7 +200,13 @@ pub fn build() -> Result<Built> {
     let build = crate::build_systems::build_dir(&port.name);
     let library = build.join(LIBRARY);
     link(&build, &library)?;
-    Ok(Built { library, install })
+    let built = Built {
+        library,
+        install,
+        scanner,
+    };
+    install_client(&built)?;
+    Ok(built)
 }
 
 /// Links the static client library of the build in `build` into the

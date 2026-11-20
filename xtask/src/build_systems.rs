@@ -82,6 +82,9 @@ pub fn meson(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
         .arg("setup")
         .arg(format!("--cross-file={}", cross.display()))
         .arg("--buildtype=release")
+        // A dependency that is missing fails the build instead of being
+        // downloaded.
+        .arg("--wrap-mode=nodownload")
         .arg(format!("--prefix={PREFIX}"))
         .arg(format!("--libdir={LIBDIR}"))
         .arg(format!("--sysconfdir={SYSCONFDIR}"))

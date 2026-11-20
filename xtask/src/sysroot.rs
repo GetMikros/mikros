@@ -18,7 +18,8 @@
 //! `clang --config=<sysroot>/x86_64-unknown-mikros.cfg`.
 //!
 //! For ported projects, it holds the Meson cross file
-//! `x86_64-unknown-mikros.meson` and the CMake toolchain file
+//! `x86_64-unknown-mikros.meson`, whose pkg-config looks in the
+//! sysroot alone, and the CMake toolchain file
 //! `x86_64-unknown-mikros.cmake`, with the CMake platform module
 //! `share/cmake/Platform/Mikros.cmake`. They select these compilers and
 //! this sysroot, and work with the Meson and CMake that `crate::meson`
@@ -389,9 +390,11 @@ cpp = {}
 ar = {}
 ranlib = {}
 cmake = '@DIRNAME@/{cmake}'
+pkg-config = 'pkg-config'
 
 [properties]
 sys_root = '@DIRNAME@'
+pkg_config_libdir = ['@DIRNAME@/lib/pkgconfig', '@DIRNAME@/share/pkgconfig']
 
 [host_machine]
 system = 'mikros'
