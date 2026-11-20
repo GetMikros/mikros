@@ -11,6 +11,8 @@ mod surface;
 mod xdg;
 
 pub use buffer::{BufferId, Imports, Point, TimelineId};
+#[cfg(target_os = "mikros")]
+pub use buffer::{Layout, Memory};
 pub use surface::{Rect, Role, Surface, SurfaceId};
 
 use crate::wayland::protocols::{

@@ -272,6 +272,7 @@ name = "compositor"
 version = "0.0.0"
 dependencies = [
  "ash",
+ "mikros-rt",
  "roxmltree",
 ]
 
