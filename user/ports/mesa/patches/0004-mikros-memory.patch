@@ -1,0 +1,310 @@
+diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmpipe/lp_mikros.c
+--- /dev/null
++++ b/src/gallium/drivers/llvmpipe/lp_mikros.c
+@@ -0,0 +1,147 @@
++/*
++ * llvmpipe's memory on Mikros: the render instance of the basic graphics
++ * adapter, which reports RENDER and the vendor and device IDs 0, is found
++ * among the GPU devices of the process's directory, and every allocation
++ * is one of its buffers, whose memory object the process maps.
++ */
++
++#include "lp_mikros.h"
++
++#include <mikros/midl/mikros.gpu.h>
++#include <mikros/midl/mikros.service.h>
++#include <mikros/startup.h>
++#include <stdlib.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++/* The kind of a memory descriptor of the C library. */
++#define MEMORY_DESCRIPTOR 4u
++
++static const mikros_midl_string_t GPU = {"device.gpu", 10};
++
++/* An arena for one call, freed with arena_free. */
++static bool
++arena_new(mikros_midl_arena_t *arena)
++{
++   size_t size = MIKROS_MIDL_CALL_ROOM + 16384;
++   void *memory = malloc(size);
++   if (memory == NULL)
++      return false;
++   mikros_midl_arena_init(arena, memory, size);
++   return true;
++}
++
++static void
++arena_free(mikros_midl_arena_t *arena)
++{
++   free(arena->base);
++}
++
++/* The render connection of the device `instance` when it is the basic
++ * graphics adapter's render instance, or 0. */
++static uint32_t
++open_instance(mikros_handle_t directory, mikros_midl_string_t instance)
++{
++   mikros_handle_t device, server;
++   if (mikros_channel_create(0, &device, &server) != 0)
++      return 0;
++   mikros_midl_arena_t arena;
++   if (!arena_new(&arena)) {
++      mikros_handle_close(device);
++      mikros_handle_close(server);
++      return 0;
++   }
++   uint32_t render = 0;
++   mikros_base_Status error;
++   mikros_gpu_Device_GetInfo_Response info;
++   if (mikros_service_Directory_Connect(directory, GPU, instance, server, &error, INT64_MAX,
++                                        &arena) != MIKROS_MIDL_OK)
++      goto out;
++   mikros_midl_arena_reset(&arena);
++   if (mikros_gpu_Device_GetInfo(device, &info, INT64_MAX, &arena) != MIKROS_MIDL_OK)
++      goto out;
++   if (!(info.info.capabilities & mikros_gpu_Capabilities_RENDER) || info.info.vendor_id != 0 ||
++       info.info.device_id != 0)
++      goto out;
++   mikros_handle_t client;
++   if (mikros_channel_create(0, &client, &server) != 0)
++      goto out;
++   mikros_midl_arena_reset(&arena);
++   if (mikros_gpu_Device_OpenRender(device, server, &error, INT64_MAX, &arena) == MIKROS_MIDL_OK)
++      render = client;
++   else
++      mikros_handle_close(client);
++out:
++   arena_free(&arena);
++   mikros_handle_close(device);
++   return render;
++}
++
++uint32_t
++lp_mikros_render_open(void)
++{
++   mikros_handle_t directory = mikros_directory();
++   mikros_midl_arena_t arena;
++   if (directory == 0 || !arena_new(&arena))
++      return 0;
++   uint32_t render = 0;
++   mikros_base_Status error;
++   mikros_service_Directory_List_Response listed;
++   if (mikros_service_Directory_List(directory, GPU, &listed, &error, INT64_MAX, &arena) ==
++       MIKROS_MIDL_OK) {
++      const mikros_midl_string_t *instances = (const mikros_midl_string_t *)listed.instances.data;
++      for (uint64_t i = 0; i < listed.instances.count && render == 0; i++)
++         render = open_instance(directory, instances[i]);
++   }
++   arena_free(&arena);
++   return render;
++}
++
++void
++lp_mikros_render_close(uint32_t render)
++{
++   if (render != 0)
++      mikros_handle_close(render);
++}
++
++void *
++lp_mikros_buffer_create(uint32_t render, uint64_t size, uint32_t *buffer)
++{
++   mikros_midl_arena_t arena;
++   if (!arena_new(&arena))
++      return NULL;
++   mikros_base_Status error;
++   mikros_gpu_Render_CreateBuffer_Response created;
++   mikros_midl_status_t s =
++      mikros_gpu_Render_CreateBuffer(render, size, mikros_gpu_BufferFlags_CPU_VISIBLE, &created,
++                                     &error, INT64_MAX, &arena);
++   arena_free(&arena);
++   if (s != MIKROS_MIDL_OK)
++      return NULL;
++   void *map = MAP_FAILED;
++   int fd = created.memory != 0 ? mikros_fd_from_handle(created.memory, MEMORY_DESCRIPTOR) : -1;
++   if (fd >= 0) {
++      map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++      close(fd);
++   } else if (created.memory != 0) {
++      mikros_handle_close(created.memory);
++   }
++   if (map == MAP_FAILED) {
++      lp_mikros_buffer_destroy(render, created.buffer, NULL, 0);
++      return NULL;
++   }
++   *buffer = created.buffer;
++   return map;
++}
++
++void
++lp_mikros_buffer_destroy(uint32_t render, uint32_t buffer, void *map, uint64_t size)
++{
++   if (map != NULL)
++      munmap(map, size);
++   mikros_midl_arena_t arena;
++   if (!arena_new(&arena))
++      return;
++   mikros_gpu_Render_DestroyBuffer(render, buffer, &arena);
++   arena_free(&arena);
++}
+diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.h b/src/gallium/drivers/llvmpipe/lp_mikros.h
+--- /dev/null
++++ b/src/gallium/drivers/llvmpipe/lp_mikros.h
+@@ -0,0 +1,24 @@
++/*
++ * llvmpipe's memory on Mikros: buffers of the render instance of the
++ * basic graphics adapter, a memory object each, mapped in the process.
++ */
++
++#ifndef LP_MIKROS_H
++#define LP_MIKROS_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/* A connection to the render instance, or 0 when there is none. */
++uint32_t lp_mikros_render_open(void);
++
++void lp_mikros_render_close(uint32_t render);
++
++/* A new buffer of `size` bytes of `render`, mapped writable, whose ID it
++ * stores in `buffer`, or NULL. */
++void *lp_mikros_buffer_create(uint32_t render, uint64_t size, uint32_t *buffer);
++
++/* Unmaps the buffer `buffer` at `map`, of `size` bytes, and destroys it. */
++void lp_mikros_buffer_destroy(uint32_t render, uint32_t buffer, void *map, uint64_t size);
++
++#endif
+diff -ruN a/src/gallium/drivers/llvmpipe/lp_screen.c b/src/gallium/drivers/llvmpipe/lp_screen.c
+--- a/src/gallium/drivers/llvmpipe/lp_screen.c
++++ b/src/gallium/drivers/llvmpipe/lp_screen.c
+@@ -59,6 +59,9 @@
+ #include "lp_flush.h"
+ 
+ #include "frontend/sw_winsys.h"
++#if DETECT_OS_MIKROS
++#include "lp_mikros.h"
++#endif
+ 
+ #include "nir.h"
+ 
+@@ -832,6 +835,9 @@
+    close(screen->fd_mem_alloc);
+    mtx_destroy(&screen->mem_mutex);
+ #endif
++#if DETECT_OS_MIKROS
++   lp_mikros_render_close(screen->render);
++#endif
+    mtx_destroy(&screen->rast_mutex);
+    mtx_destroy(&screen->cs_mutex);
+    FREE(screen);
+@@ -1113,6 +1119,15 @@
+       llvmpipe_destroy_screen(&screen->base);
+       return NULL;
+    }
++#endif
++
++#if DETECT_OS_MIKROS
++   screen->render = lp_mikros_render_open();
++   if (screen->render == 0) {
++      mesa_loge("Failed to open the render instance of the basic graphics adapter\n");
++      llvmpipe_destroy_screen(&screen->base);
++      return NULL;
++   }
+ #endif
+ 
+    snprintf(screen->renderer_string, sizeof(screen->renderer_string),
+diff -ruN a/src/gallium/drivers/llvmpipe/lp_screen.h b/src/gallium/drivers/llvmpipe/lp_screen.h
+--- a/src/gallium/drivers/llvmpipe/lp_screen.h
++++ b/src/gallium/drivers/llvmpipe/lp_screen.h
+@@ -99,6 +99,12 @@
+    struct util_vma_heap mem_heap;
+ #endif
+ 
++#if DETECT_OS_MIKROS
++   /* The connection to the render instance of the basic graphics adapter,
++    * whose buffers hold the memory. */
++   uint32_t render;
++#endif
++
+    struct llvmpipe_memory_allocation *dummy_dmabuf;
+    int dummy_sync_fd;
+ };
+diff -ruN a/src/gallium/drivers/llvmpipe/lp_texture.c b/src/gallium/drivers/llvmpipe/lp_texture.c
+--- a/src/gallium/drivers/llvmpipe/lp_texture.c
++++ b/src/gallium/drivers/llvmpipe/lp_texture.c
+@@ -60,6 +60,9 @@
+ 
+ #include "frontend/sw_winsys.h"
+ #include "git_sha1.h"
++#if DETECT_OS_MIKROS
++#include "lp_mikros.h"
++#endif
+ 
+ #ifndef _WIN32
+ #include "drm-uapi/drm_fourcc.h"
+@@ -1367,6 +1370,16 @@
+    }
+ 
+    mtx_unlock(&screen->mem_mutex);
++#elif DETECT_OS_MIKROS
++   struct llvmpipe_screen *screen = llvmpipe_screen(_screen);
++
++   mem->fd = -1;
++   mem->type = LLVMPIPE_MEMORY_FD_TYPE_INVALID;
++   mem->cpu_addr = lp_mikros_buffer_create(screen->render, mem->size, &mem->buffer);
++   if (mem->cpu_addr == NULL) {
++      FREE(mem);
++      return NULL;
++   }
+ #else
+    mem->cpu_addr = os_malloc_aligned(mem->size, alignment);
+    mem->fd = -1;
+@@ -1396,6 +1409,9 @@
+ 
+    if (mem->cpu_addr != MAP_FAILED)
+       munmap(mem->cpu_addr, mem->size);
++#elif DETECT_OS_MIKROS
++   lp_mikros_buffer_destroy(llvmpipe_screen(pscreen)->render, mem->buffer, mem->cpu_addr,
++                            mem->size);
+ #else
+    os_free_aligned(mem->cpu_addr);
+ #endif
+diff -ruN a/src/gallium/drivers/llvmpipe/lp_texture.h b/src/gallium/drivers/llvmpipe/lp_texture.h
+--- a/src/gallium/drivers/llvmpipe/lp_texture.h
++++ b/src/gallium/drivers/llvmpipe/lp_texture.h
+@@ -35,6 +35,7 @@
+ #include "util/bitset.h"
+ #if MESA_DEBUG
+ #include "util/list.h"
++#include "util/detect_os.h"
+ #endif
+ 
+ 
+@@ -138,6 +139,10 @@
+    uint64_t size;
+    enum llvmpipe_memory_fd_type type;
+    int mem_fd;
++#if DETECT_OS_MIKROS
++   /* The buffer of the render instance that holds it. */
++   uint32_t buffer;
++#endif
+ };
+ 
+ struct llvmpipe_memory_object
+diff -ruN a/src/gallium/drivers/llvmpipe/meson.build b/src/gallium/drivers/llvmpipe/meson.build
+--- a/src/gallium/drivers/llvmpipe/meson.build
++++ b/src/gallium/drivers/llvmpipe/meson.build
+@@ -95,6 +95,10 @@
+   'lp_texture_handle.h',
+ )
+ 
++if host_machine.system() == 'mikros'
++  files_llvmpipe += files('lp_mikros.c', 'lp_mikros.h')
++endif
++
+ libllvmpipe = static_library(
+   'llvmpipe',
+   [files_llvmpipe, sha1_h],

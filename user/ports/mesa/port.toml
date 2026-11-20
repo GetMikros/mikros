@@ -16,6 +16,11 @@
 #   to run it, and never both, with the executable addresses given to
 #   MCJIT once an object is loaded; the delegating manager passes that
 #   notification on.
+# - 0004: llvmpipe's memory on Mikros is buffers of the render instance
+#   of the basic graphics adapter, the GPU device with RENDER and the
+#   vendor and device IDs 0, which the screen opens through the
+#   directory: each allocation is a buffer whose memory object it maps,
+#   and freeing it destroys the buffer.
 
 [source]
 url = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"
