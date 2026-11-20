@@ -113,6 +113,15 @@ const ESP_INSTANCE: &str = "esp";
 const RETRY: i64 = 20_000_000;
 /// The largest manifest read from the root file system.
 const SYSTEM_FILE_MAX: usize = 1 << 16;
+/// The greeter account (MIKSPEC-0056.R18), which has no record, and
+/// where its folders below `/users/greeter` are.
+const GREETER_USER: u32 = 1;
+const GREETER_NAME: &str = "greeter";
+const GREETER_FOLDERS: &str = "/system/state/greeter";
+/// Where the system version's apps are, and how their IDs start
+/// (MIKSPEC-0101.R77).
+const SYSTEM_APPS: &str = "/system/apps";
+const SYSTEM_APP_PREFIX: &str = "system.mikros.";
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 const RX: Rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
 const RWX: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0);
@@ -323,11 +332,36 @@ fn join(real: &str, rest: &str) -> String {
     }
 }
 
+/// The name of `user` from its record, or the greeter account's, which
+/// has none.
+async fn user_name(shared: &Shared, user: u32) -> Result<String, Status> {
+    match user {
+        GREETER_USER => Ok(String::from(GREETER_NAME)),
+        _ => crate::users::name(shared, user).await,
+    }
+}
+
+/// `path`, or, for the greeter account, a path below `/users/greeter`
+/// as the same path below `/system/state/greeter`.
+fn greeter_path(user: u32, path: String) -> String {
+    let home = format!("/users/{GREETER_NAME}");
+    match path.strip_prefix(home.as_str()) {
+        Some(rest) if user == GREETER_USER && (rest.is_empty() || rest.starts_with('/')) => {
+            format!("{GREETER_FOLDERS}{rest}")
+        }
+        _ => path,
+    }
+}
+
 /// The ID of the installed app whose package holds the normalized
 /// absolute `path`: one below `/apps/<id>/` or below
-/// `/users/<user>/apps/<id>/package/` (MIKSPEC-0101.R36).
+/// `/users/<user>/apps/<id>/package/` (MIKSPEC-0101.R36), or a system
+/// app's base copy below `/system/apps/<id>/` (MIKSPEC-0101.R77).
 pub fn package_of(path: &str) -> Option<&str> {
-    let (id, below) = match path.strip_prefix("/apps/") {
+    let system = path
+        .strip_prefix(SYSTEM_APPS)
+        .and_then(|rest| rest.strip_prefix('/'));
+    let (id, below) = match path.strip_prefix("/apps/").or(system) {
         Some(rest) => rest.split_once('/')?,
         None => {
             let rest = path.strip_prefix("/users/")?;
@@ -340,6 +374,9 @@ pub fn package_of(path: &str) -> Option<&str> {
             (id, below)
         }
     };
+    if system.is_some() && !id.starts_with(SYSTEM_APP_PREFIX) {
+        return None;
+    }
     (!below.is_empty() && mikros_mika::id::is_valid(id)).then_some(id)
 }
 
@@ -480,6 +517,32 @@ impl Namespaces {
             }
         }
         false
+    }
+
+    /// The selected copy of the system app `app_id`, when the system
+    /// version has a base copy of it: the global package of the ID when
+    /// its version is higher, and the base copy otherwise
+    /// (MIKSPEC-0101.R77).
+    async fn system_app(&self, shared: &Shared, ready: &Ready, app_id: &str) -> Option<String> {
+        if !app_id.starts_with(SYSTEM_APP_PREFIX) || !mikros_mika::id::is_valid(app_id) {
+            return None;
+        }
+        let (root, reactor) = (ready.roots.root(), &shared.reactor);
+        let version = |at: String| async move {
+            let path = format!("{}/manifest.yaml", at.trim_start_matches('/'));
+            let bytes = files::read(root, reactor, &path, SYSTEM_FILE_MAX)
+                .await
+                .ok()?;
+            let manifest = mikros_mika::manifest::Manifest::parse(&bytes).ok()?;
+            (manifest.id == app_id).then_some(manifest.version)
+        };
+        let base = format!("{SYSTEM_APPS}/{app_id}");
+        let base_version = version(base.clone()).await?;
+        let update = format!("{APPS}/{app_id}");
+        match (base_version, version(update.clone()).await.flatten()) {
+            (Some(base), Some(update_version)) if update_version > base => Some(update),
+            _ => Some(base),
+        }
     }
 
     /// The union view of `/system/drivers`: the version's `drivers/` over
@@ -966,7 +1029,8 @@ impl Namespaces {
                 &mut origins,
                 none(tmp(&tmpfs, &format!("cli/{user}"), "/tmp", budget, reactor).await?),
             );
-        } else if !app_id.starts_with("system.")
+        } else if (!app_id.starts_with("system.")
+            || self.system_app(shared, &ready, app_id).await.is_some())
             && !(user == 0 && self.installed_driver(shared, app_id).await.is_some())
         {
             // A native app, which runs for a user, or, for user 0, only
@@ -992,7 +1056,7 @@ impl Namespaces {
                 None => {
                     let name = match user {
                         0 => String::new(),
-                        _ => crate::users::name(shared, user).await?,
+                        _ => user_name(shared, user).await?,
                     };
                     self.app(
                         shared,
@@ -1009,8 +1073,9 @@ impl Namespaces {
             };
             app = Some(started);
             // The folders that the app's permissions grant
-            // (MIKSPEC-0050.R38).
-            if user != 0 {
+            // (MIKSPEC-0050.R38), which the greeter account, without a
+            // home folder or stored grants, has none of (MIKSPEC-0056.R18).
+            if user != 0 && user != GREETER_USER {
                 let checksum = portable.map_or("", |p| p.checksum.as_str());
                 let grant = (app_id, user, admin, checksum);
                 self.grant_entries(shared, &ready, grant, &mut entries, &mut origins)
@@ -1219,11 +1284,21 @@ impl Namespaces {
             return Err(Status::InvalidArgs);
         }
         let reactor = &shared.reactor;
-        // Installed for every user, or for this one.
+        // The selected copy of a system app, or installed for every user,
+        // or for this one.
         let global = format!("{APPS}/{app_id}");
-        let local = format!("/users/{name}/apps/{app_id}/package");
-        let (installed, mode) = match self.entry(shared, ready, &global, Rights::READ).await {
-            Ok(_) => (global.clone(), "global"),
+        let local = greeter_path(user, format!("/users/{name}/apps/{app_id}/package"));
+        let system = self.system_app(shared, ready, app_id).await;
+        let base = system.as_deref().is_some_and(|at| at != global);
+        let selected = match system {
+            Some(at) => Ok(at),
+            None => self
+                .entry(shared, ready, &global, Rights::READ)
+                .await
+                .map(|_| global.clone()),
+        };
+        let (installed, mode) = match selected {
+            Ok(installed) => (installed, "global"),
             // A service of user 0 is only one of a global package.
             Err(Status::NotFound) if user == 0 => return Err(Status::AccessDenied),
             Err(Status::NotFound) => (local.clone(), "local"),
@@ -1264,7 +1339,7 @@ impl Namespaces {
         // (MIKSPEC-0101.R55).
         let folder = match user {
             0 => format!("{STATE}/apps/{app_id}"),
-            _ => format!("/users/{name}/apps/{app_id}"),
+            _ => greeter_path(user, format!("/users/{name}/apps/{app_id}")),
         };
         let missing = user != 0
             && matches!(
@@ -1273,7 +1348,12 @@ impl Namespaces {
             );
         if missing && matches!(ready.roots, Roots::Root(_)) {
             self.apps_folder(shared, ready, name, user).await?;
-            match crate::users::subvolume(shared, folder.trim_start_matches('/')).await {
+            // The root file system holds /system/state as `state`.
+            let on_root = match folder.strip_prefix(STATE) {
+                Some(rest) => format!("state{rest}"),
+                None => String::from(folder.trim_start_matches('/')),
+            };
+            match crate::users::subvolume(shared, &on_root).await {
                 // A root file system without subvolumes gets a folder.
                 Ok(()) | Err(Status::NotSupported) => {}
                 Err(e) => return Err(e),
@@ -1334,8 +1414,9 @@ impl Namespaces {
             }),
         );
         // The package itself, writable for a local install and with
-        // admin.apps.write.
-        let writes = mode == "local" || self.holds(shared, app_id, user, admin, APPS_WRITE).await;
+        // admin.apps.write, and never for a base copy.
+        let writes =
+            !base && (mode == "local" || self.holds(shared, app_id, user, admin, APPS_WRITE).await);
         let rights = if writes { RWX } else { RX };
         let (package, origin) = self.entry(shared, ready, &installed, rights).await?;
         add(
@@ -1492,7 +1573,7 @@ impl Namespaces {
         name: &str,
         user: u32,
     ) -> Result<String, Status> {
-        let path = format!("/users/{name}/apps");
+        let path = greeter_path(user, format!("/users/{name}/apps"));
         if let Err(Status::NotFound) = self.entry(shared, ready, &path, Rights::READ).await {
             self.entry(shared, ready, &path, RWX).await?;
             self.own(shared, ready, &path, user).await;
