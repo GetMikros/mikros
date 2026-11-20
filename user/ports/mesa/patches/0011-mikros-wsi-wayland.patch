@@ -1,0 +1,347 @@
+diff -ruN a/meson.options b/meson.options
+--- a/meson.options
++++ b/meson.options
+@@ -923,3 +923,10 @@
+   value : true,
+   description : 'Build panfrost disassemblers. Explicitly setting this option to false will cause the panfrost stack to build without disassemblers. This should be left enabled for distro builds.'
+ )
++
++option(
++  'mikros-buffer-xml',
++  type : 'string',
++  value : '',
++  description : 'The path of mikros-buffer-v1.xml, for the Wayland platform on Mikros.'
++)
+diff -ruN a/src/vulkan/wsi/meson.build b/src/vulkan/wsi/meson.build
+--- a/src/vulkan/wsi/meson.build
++++ b/src/vulkan/wsi/meson.build
+@@ -25,6 +25,11 @@
+   links_vulkan_wsi += libloader_wayland_helper
+   files_vulkan_wsi += wp_files['linux-drm-syncobj-v1']
+   files_vulkan_wsi += wp_files['color-management-v1']
++  # Mikros's buffer protocol, whose file is in the compositor's tree.
++  if host_machine.system() == 'mikros'
++    files_vulkan_wsi += mod_wl.scan_xml(get_option('mikros-buffer-xml'),
++                                        include_core_only : false)
++  endif
+ endif
+ 
+ # Images exported as export tokens, with kernel timelines.
+diff -ruN a/src/vulkan/wsi/wsi_common_wayland.c b/src/vulkan/wsi/wsi_common_wayland.c
+--- a/src/vulkan/wsi/wsi_common_wayland.c
++++ b/src/vulkan/wsi/wsi_common_wayland.c
+@@ -49,6 +49,13 @@
+ #include "linux-drm-syncobj-v1-client-protocol.h"
+ #include "tearing-control-v1-client-protocol.h"
+ #include "color-management-v1-client-protocol.h"
++#ifdef VK_USE_PLATFORM_MIKROS
++#include <mikros/startup.h>
++#include "mikros-buffer-v1-client-protocol.h"
++
++/* The kind of the C library's descriptors of any kernel handle. */
++#define MIKROS_HANDLE_DESCRIPTOR 10u
++#endif
+ 
+ #include <util/cnd_monotonic.h>
+ #include <util/compiler.h>
+@@ -112,6 +119,9 @@
+    struct zwp_linux_dmabuf_feedback_v1 *wl_dmabuf_feedback;
+    struct wp_tearing_control_manager_v1 *tearing_control_manager;
+    struct wp_linux_drm_syncobj_manager_v1 *wl_syncobj;
++#ifdef VK_USE_PLATFORM_MIKROS
++   struct mikros_buffer_v1 *mikros_buffer;
++#endif
+ 
+    struct wp_color_manager_v1 *color_manager;
+ 
+@@ -167,12 +177,16 @@
+    unsigned shm_size;
+ 
+    struct wp_linux_drm_syncobj_timeline_v1 *wl_syncobj_timeline[WSI_ES_COUNT];
++#ifdef VK_USE_PLATFORM_MIKROS
++   struct mikros_timeline_v1 *mikros_timeline[WSI_ES_COUNT];
++#endif
+ };
+ 
+ enum wsi_wl_buffer_type {
+    WSI_WL_BUFFER_NATIVE,
+    WSI_WL_BUFFER_GPU_SHM,
+    WSI_WL_BUFFER_SHM_MEMCPY,
++   WSI_WL_BUFFER_MIKROS,
+ };
+ 
+ struct wsi_wl_surface {
+@@ -197,6 +211,9 @@
+    struct wp_fifo_v1 *fifo;
+    struct wp_commit_timer_v1 *commit_timer;
+    struct wp_linux_drm_syncobj_surface_v1 *wl_syncobj_surface;
++#ifdef VK_USE_PLATFORM_MIKROS
++   struct mikros_surface_sync_v1 *mikros_sync;
++#endif
+ 
+    struct wl_callback *frame;
+ 
+@@ -260,6 +277,10 @@
+ static bool
+ wsi_wl_use_explicit_sync(struct wsi_wl_display *display, struct wsi_device *device)
+ {
++#ifdef VK_USE_PLATFORM_MIKROS
++   /* Buffers of mikros_buffer_v1 always have their points. */
++   return display->mikros_buffer != NULL;
++#endif
+    return wsi_device_supports_explicit_sync(device) &&
+           display->wl_syncobj != NULL;
+ }
+@@ -1497,12 +1518,62 @@
+ #define MESA_WL_FIXES_VERSION 1
+ #endif
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++static void
++mikros_buffer_handle_device(void *data, struct mikros_buffer_v1 *buffer, const char *name)
++{
++}
++
++static void
++mikros_buffer_handle_format(void *data, struct mikros_buffer_v1 *buffer, uint32_t format,
++                            uint32_t modifier_hi, uint32_t modifier_lo)
++{
++   struct wsi_wl_display *display = data;
++   uint64_t modifier = ((uint64_t)modifier_hi << 32) | modifier_lo;
++
++   wsi_wl_display_add_drm_format_modifier(display, &display->formats, format, modifier);
++}
++
++static void
++mikros_buffer_handle_done(void *data, struct mikros_buffer_v1 *buffer)
++{
++}
++
++static const struct mikros_buffer_v1_listener mikros_buffer_listener = {
++   .device = mikros_buffer_handle_device,
++   .format = mikros_buffer_handle_format,
++   .done = mikros_buffer_handle_done,
++};
++
++/* `handle` as a new descriptor of the C library that holds a duplicate of
++ * it, for a request's file descriptor argument, or -1. */
++static int
++mikros_handle_fd(uint32_t handle)
++{
++   uint32_t copy = wsi_mikros_duplicate(handle);
++   if (copy == 0)
++      return -1;
++   int fd = mikros_fd_from_handle(copy, MIKROS_HANDLE_DESCRIPTOR);
++   if (fd < 0)
++      mikros_handle_close(copy);
++   return fd;
++}
++#endif
++
+ static void
+ registry_handle_global(void *data, struct wl_registry *registry,
+                        uint32_t name, const char *interface, uint32_t version)
+ {
+    struct wsi_wl_display *display = data;
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   /* Every buffer of a Vulkan device goes through mikros_buffer_v1. */
++   if (strcmp(interface, mikros_buffer_v1_interface.name) == 0) {
++      display->mikros_buffer =
++         wl_registry_bind(registry, name, &mikros_buffer_v1_interface, 1);
++      mikros_buffer_v1_add_listener(display->mikros_buffer, &mikros_buffer_listener, display);
++   }
++#else
+    if (display->sw) {
+       if (strcmp(interface, wl_shm_interface.name) == 0) {
+          display->wl_shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
+@@ -1525,6 +1596,7 @@
+ #endif
+       }
+    }
++#endif
+ 
+    if (strcmp(interface, wp_presentation_interface.name) == 0) {
+       if (version > 1)
+@@ -1661,7 +1733,11 @@
+ 
+    /* Round-trip to get wl_shm and zwp_linux_dmabuf_v1 globals */
+    wl_display_roundtrip_queue(display->wl_display, display->queue);
++#ifdef VK_USE_PLATFORM_MIKROS
++   if (!display->mikros_buffer) {
++#else
+    if (!display->wl_dmabuf && !display->wl_shm) {
++#endif
+       result = VK_ERROR_SURFACE_LOST_KHR;
+       goto fail_registry;
+    }
+@@ -3028,6 +3104,9 @@
+                                                    images,
+                                                    info->timeout,
+                                                    image_index);
++#elif defined(VK_USE_PLATFORM_MIKROS)
++   result = wsi_mikros_wait_for_explicit_sync_release(wsi_chain, wsi_chain->image_count,
++                                                      images, info->timeout, image_index);
+ #else
+    result = VK_ERROR_FEATURE_NOT_PRESENT;
+ #endif
+@@ -3399,6 +3478,22 @@
+       queue_dispatched = true;
+    }
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   if (chain->mikros_sync) {
++      struct wsi_wl_image *image = &chain->images[image_index];
++      /* Incremented by signal in base queue_present. */
++      uint64_t acquire_point = image->base.explicit_sync[WSI_ES_ACQUIRE].timeline;
++      uint64_t release_point = image->base.explicit_sync[WSI_ES_RELEASE].timeline;
++      mikros_surface_sync_v1_set_acquire_point(chain->mikros_sync,
++                                               image->mikros_timeline[WSI_ES_ACQUIRE],
++                                               (uint32_t)(acquire_point >> 32),
++                                               (uint32_t)(acquire_point & 0xffffffff));
++      mikros_surface_sync_v1_set_release_point(chain->mikros_sync,
++                                               image->mikros_timeline[WSI_ES_RELEASE],
++                                               (uint32_t)(release_point >> 32),
++                                               (uint32_t)(release_point & 0xffffffff));
++   } else
++#endif
+    if (chain->base.image_info.explicit_sync) {
+       struct wsi_wl_image *image = &chain->images[image_index];
+       /* Incremented by signal in base queue_present. */
+@@ -3709,6 +3804,36 @@
+       break;
+    }
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   case WSI_WL_BUFFER_MIKROS: {
++      int token = mikros_handle_fd(image->base.mikros_token);
++      if (token < 0)
++         goto fail_image;
++      struct wl_buffer *buffer =
++         mikros_buffer_v1_create_from_token(display->mikros_buffer, token,
++                                            chain->extent.width, chain->extent.height,
++                                            chain->drm_format,
++                                            (uint32_t)(image->base.drm_modifier >> 32),
++                                            (uint32_t)(image->base.drm_modifier & 0xffffffff),
++                                            image->base.row_pitches[0],
++                                            image->base.offsets[0]);
++      close(token);
++      loader_wayland_wrap_buffer(&image->wayland_buffer, buffer);
++
++      for (uint32_t i = 0; i < WSI_ES_COUNT; i++) {
++         int timeline = mikros_handle_fd(image->base.explicit_sync[i].handle);
++         if (timeline < 0)
++            goto fail_image;
++         image->mikros_timeline[i] =
++            mikros_buffer_v1_import_timeline(display->mikros_buffer, timeline);
++         close(timeline);
++         if (!image->mikros_timeline[i])
++            goto fail_image;
++      }
++      break;
++   }
++#endif
++
+    default:
+       UNREACHABLE("Invalid buffer type");
+    }
+@@ -3726,6 +3851,12 @@
+    for (uint32_t i = 0; i < WSI_ES_COUNT; i++) {
+       if (image->wl_syncobj_timeline[i])
+          wp_linux_drm_syncobj_timeline_v1_destroy(image->wl_syncobj_timeline[i]);
++#ifdef VK_USE_PLATFORM_MIKROS
++      if (image->mikros_timeline[i]) {
++         mikros_timeline_v1_destroy(image->mikros_timeline[i]);
++         image->mikros_timeline[i] = NULL;
++      }
++#endif
+    }
+    wsi_destroy_image(&chain->base, &image->base);
+ 
+@@ -3739,6 +3870,10 @@
+       for (uint32_t j = 0; j < WSI_ES_COUNT; j++) {
+          if (chain->images[i].wl_syncobj_timeline[j])
+             wp_linux_drm_syncobj_timeline_v1_destroy(chain->images[i].wl_syncobj_timeline[j]);
++#ifdef VK_USE_PLATFORM_MIKROS
++         if (chain->images[i].mikros_timeline[j])
++            mikros_timeline_v1_destroy(chain->images[i].mikros_timeline[j]);
++#endif
+       }
+       if (chain->images[i].wayland_buffer.buffer) {
+          loader_wayland_buffer_destroy(&chain->images[i].wayland_buffer);
+@@ -3770,6 +3905,10 @@
+       wp_tearing_control_v1_destroy(chain->tearing_control);
+    if (chain->wl_syncobj_surface)
+       wp_linux_drm_syncobj_surface_v1_destroy(chain->wl_syncobj_surface);
++#ifdef VK_USE_PLATFORM_MIKROS
++   if (chain->mikros_sync)
++      mikros_surface_sync_v1_destroy(chain->mikros_sync);
++#endif
+    if (chain->color.color_surface)
+       wp_color_management_surface_v1_destroy(chain->color.color_surface);
+ 
+@@ -3889,6 +4028,12 @@
+          wp_linux_drm_syncobj_surface_v1_destroy(old_chain->wl_syncobj_surface);
+          old_chain->wl_syncobj_surface = NULL;
+       }
++#ifdef VK_USE_PLATFORM_MIKROS
++      if (old_chain->mikros_sync) {
++         mikros_surface_sync_v1_destroy(old_chain->mikros_sync);
++         old_chain->mikros_sync = NULL;
++      }
++#endif
+       if (old_chain->color.color_surface) {
+          wp_color_management_surface_v1_destroy(old_chain->color.color_surface);
+          old_chain->color.color_surface = NULL;
+@@ -3943,6 +4088,16 @@
+    struct wsi_drm_image_params drm_image_params;
+    uint32_t num_drm_modifiers = 0;
+    const uint64_t *drm_modifiers = NULL;
++#ifdef VK_USE_PLATFORM_MIKROS
++   /* Images whose memory is exported as export tokens, for
++    * mikros_buffer_v1. */
++   struct wsi_mikros_image_params mikros_image_params = {
++      .base.image_type = WSI_IMAGE_TYPE_MIKROS,
++      .explicit_sync = true,
++   };
++   buffer_type = WSI_WL_BUFFER_MIKROS;
++   image_params = &mikros_image_params.base;
++#else
+    if (wsi_device->sw) {
+       cpu_image_params = (struct wsi_cpu_image_params) {
+          .base.image_type = WSI_IMAGE_TYPE_CPU,
+@@ -3989,6 +4144,7 @@
+       buffer_type = WSI_WL_BUFFER_NATIVE;
+       image_params = &drm_image_params.base;
+    }
++#endif
+ 
+    result = wsi_swapchain_init(wsi_device, &chain->base, device,
+                                pCreateInfo, image_params, pAllocator);
+@@ -4025,7 +4181,7 @@
+    chain->extent = pCreateInfo->imageExtent;
+    chain->vk_format = pCreateInfo->imageFormat;
+    chain->buffer_type = buffer_type;
+-   if (buffer_type == WSI_WL_BUFFER_NATIVE) {
++   if (buffer_type == WSI_WL_BUFFER_NATIVE || buffer_type == WSI_WL_BUFFER_MIKROS) {
+       chain->drm_format = wl_drm_format_for_vk_format(wsi_device,
+                                                       chain->vk_format, alpha);
+    } else {
+@@ -4100,6 +4256,17 @@
+          goto fail_free_wl_chain;
+    }
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   if (dpy->mikros_buffer) {
++      chain->mikros_sync =
++         mikros_buffer_v1_get_surface_sync(dpy->mikros_buffer,
++                                           chain->wsi_wl_surface->wayland_surface.wrapper);
++      if (!chain->mikros_sync) {
++         result = VK_ERROR_OUT_OF_HOST_MEMORY;
++         goto fail_free_wl_chain;
++      }
++   } else
++#endif
+    if (wsi_wl_use_explicit_sync(dpy, wsi_device)) {
+       chain->wl_syncobj_surface =
+          wp_linux_drm_syncobj_manager_v1_get_surface(dpy->wl_syncobj,

@@ -38,6 +38,12 @@
 #   their memory exported as an export token, and their acquire and
 #   release points on kernel timelines exported from timeline
 #   semaphores, whose release points the CPU waits for.
+# - 0011: Wayland surfaces on Mikros present through mikros_buffer_v1
+#   alone: images become buffers with create_from_token, timelines are
+#   imported with import_timeline, each present sets the acquire and
+#   release points of a surface's sync object, and the formats are
+#   those the compositor sends; the option mikros-buffer-xml names the
+#   compositor's protocol file.
 
 [source]
 url = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"

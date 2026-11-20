@@ -4,12 +4,17 @@
 //! which Meson finds through LLVM's CMake package, and with the shaders
 //! that Mesa builds into it compiled by glslang on the build host
 //! (`crate::glslang`). Its Wayland surfaces use `libwayland.dlib` and the
-//! protocol files that `crate::wayland` installs in the sysroot, and the
-//! build host's `wayland-scanner`.
+//! protocol files that `crate::wayland` installs in the sysroot, the
+//! compositor's `mikros-buffer-v1.xml`, and the build host's
+//! `wayland-scanner`.
 
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// The compositor's file of the Mikros buffer protocol, relative to the
+/// workspace, which the port's `mikros-buffer-xml` option names.
+const BUFFER_PROTOCOL: &str = "user/bin/compositor/protocols/mikros-buffer-v1.xml";
 
 /// The driver's file name in `/system/libraries`, which is its soname.
 pub const DRIVER: &str = "libvulkan_lvp.dlib";
@@ -57,6 +62,10 @@ pub fn build() -> Result<PathBuf> {
     options.push(format!(
         "-Dbuild.pkg_config_path={}",
         wayland.scanner.display()
+    ));
+    options.push(format!(
+        "-Dmikros-buffer-xml={}",
+        crate::workspace_root().join(BUFFER_PROTOCOL).display()
     ));
     options.push(format!("-Dcmake_prefix_path={}", llvm.display()));
     options.push(format!(
