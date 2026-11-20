@@ -1,27 +1,29 @@
-# SDL3, as libSDL3.dlib, the library that windowed programs reach their
-# windows, input and Vulkan surfaces through. It is built from the commit
-# of the `mikros` branch of the Mikros fork, GetMikros/SDL, whose commits
-# stand on the release-3.4.20 tag of upstream (MIKSPEC-0062.R9). The
-# branch's changes:
+# SDL3, as the position-independent static library libSDL3.slib, built
+# for the tests and the components of Mikros that use it. It is built
+# from the commit of the `mikros` branch of the Mikros fork,
+# GetMikros/SDL, whose commits stand on the release-3.4.20 tag of
+# upstream (MIKSPEC-0062.R9). The branch's changes:
 # - the CMake build knows Mikros as a platform, whose C library has the
 #   pthread functions and no libpthread;
 # - the Wayland driver's check does not ask for EGL, which Mikros does not
 #   have, though for the libraries of cursor themes and EGL windows,
 #   which its libwayland has;
-# - Vulkan is offered on Mikros, with the loader libvulkan.dlib.
+# - Vulkan is offered on Mikros, with the loader libvulkan.dlib;
+# - SDL_CloseFileDialogs closes the file dialogs that are still open.
 # Only the Wayland video driver is built, with the dummy and offscreen
 # ones, and no audio but the dummy and disk drivers; libwayland and
 # xkbcommon are linked, not loaded when they are first used.
 
 [source]
-url = "https://github.com/GetMikros/SDL/archive/d6b20e95132d1d528796b991a3cf017eabe3fba9.tar.gz"
-sha256 = "d9b88777c271a563c3d423d65d4f3a1897ec2b1c0a165e8f833854df26857858"
-dir = "SDL-d6b20e95132d1d528796b991a3cf017eabe3fba9"
+url = "https://github.com/GetMikros/SDL/archive/eab5c87b6c7f7faa585d2f013b8c2d865b136498.tar.gz"
+sha256 = "8cd3f685a982cae250c9cf2057963976e3edf7b18b820b0ce17ed4b8d6d450e1"
+dir = "SDL-eab5c87b6c7f7faa585d2f013b8c2d865b136498"
 
 [build]
 options = [
-    "-DSDL_SHARED=ON",
-    "-DSDL_STATIC=OFF",
+    "-DSDL_SHARED=OFF",
+    "-DSDL_STATIC=ON",
+    "-DSDL_STATIC_PIC=ON",
     "-DSDL_TESTS=OFF",
     "-DSDL_TEST_LIBRARY=OFF",
     "-DSDL_EXAMPLES=OFF",

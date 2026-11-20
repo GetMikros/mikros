@@ -1,15 +1,16 @@
-//! SDL3, from the port in `user/ports/sdl3`: `libSDL3.dlib`, with its
-//! headers and CMake package. It is built from the fork's commit that the
-//! port pins, against the libraries of the sysroot, which gets the
-//! libraries of the ports that SDL links: libwayland, which
-//! `crate::wayland::build` installs there, and xkbcommon, installed here.
+//! SDL3, from the port in `user/ports/sdl3`: the static library
+//! `libSDL3.slib`, position independent, with its headers and CMake
+//! package. It is built from the fork's commit that the port pins,
+//! against the libraries of the sysroot, which gets the libraries of the
+//! ports that SDL links: libwayland, which `crate::wayland::build`
+//! installs there, and xkbcommon, installed here.
 
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The library's file name in `/system/libraries`, which is its soname.
-pub const LIBRARY: &str = "libSDL3.dlib";
+/// The library's file name in the install directory's `libraries`.
+pub const LIBRARY: &str = "libSDL3.slib";
 
 /// Writes `contents` to `path`, creating its directory, unless it holds
 /// them already.
@@ -94,6 +95,5 @@ pub fn build() -> Result<PathBuf> {
         ],
         &[],
     )?;
-    crate::build_systems::check_sonames(&install, &[LIBRARY])?;
     Ok(install)
 }
