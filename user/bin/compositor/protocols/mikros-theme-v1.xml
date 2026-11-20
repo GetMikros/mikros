@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="mikros_theme_v1">
+  <description summary="MIKSPEC-0076.R17"/>
+
+  <interface name="mikros_theme_v1" version="1">
+    <description summary="MIKSPEC-0076.R17"/>
+
+    <event name="accent">
+      <arg name="red" type="uint"/>
+      <arg name="green" type="uint"/>
+      <arg name="blue" type="uint"/>
+    </event>
+
+    <event name="scheme">
+      <arg name="scheme" type="uint"/>
+    </event>
+
+    <event name="font">
+      <arg name="family" type="string"/>
+      <arg name="size" type="uint"/>
+    </event>
+
+    <event name="done"/>
+  </interface>
+</protocol>

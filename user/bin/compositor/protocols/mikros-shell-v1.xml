@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="mikros_shell_v1">
+  <description summary="MIKSPEC-0076.R3, MIKSPEC-0076.R4, MIKSPEC-0076.R5, MIKSPEC-0076.R6, MIKSPEC-0076.R8, MIKSPEC-0076.R11, MIKSPEC-0076.R12, MIKSPEC-0076.R13, MIKSPEC-0076.R14"/>
+
+  <interface name="mikros_panel_v1" version="1">
+    <description summary="MIKSPEC-0076.R3"/>
+
+    <request name="set_thickness">
+      <arg name="thickness" type="uint"/>
+    </request>
+
+    <request name="set_exclusive">
+      <arg name="exclusive" type="uint"/>
+    </request>
+
+    <request name="ack_configure">
+      <arg name="serial" type="uint"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+
+    <event name="configure">
+      <arg name="serial" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <event name="closed"/>
+  </interface>
+
+  <interface name="mikros_overlay_v1" version="1">
+    <description summary="MIKSPEC-0076.R4"/>
+
+    <request name="set_position">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+
+    <event name="dismissed"/>
+  </interface>
+
+  <interface name="mikros_toplevel_list_v1" version="1">
+    <description summary="MIKSPEC-0076.R5"/>
+
+    <event name="toplevel">
+      <arg name="toplevel" type="new_id" interface="mikros_toplevel_handle_v1"/>
+    </event>
+
+    <request name="stop"/>
+
+    <event name="finished"/>
+
+    <request name="destroy" type="destructor"/>
+  </interface>
+
+  <interface name="mikros_toplevel_handle_v1" version="1">
+    <description summary="MIKSPEC-0076.R5"/>
+
+    <event name="title">
+      <arg name="title" type="string"/>
+    </event>
+
+    <event name="app_id">
+      <arg name="app_id" type="string"/>
+    </event>
+
+    <event name="state">
+      <arg name="state" type="array"/>
+    </event>
+
+    <event name="output">
+      <arg name="output" type="object" interface="wl_output"/>
+    </event>
+
+    <event name="parent">
+      <arg name="parent" type="object" interface="mikros_toplevel_handle_v1" allow-null="true"/>
+    </event>
+
+    <event name="done"/>
+
+    <event name="closed"/>
+
+    <request name="activate">
+      <arg name="seat" type="object" interface="wl_seat"/>
+    </request>
+
+    <request name="minimize"/>
+
+    <request name="close"/>
+
+    <request name="set_minimize_target">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+  </interface>
+
+  <interface name="mikros_launch_v1" version="1">
+    <description summary="MIKSPEC-0076.R6"/>
+
+    <event name="started">
+      <arg name="pid" type="uint"/>
+    </event>
+
+    <event name="failed">
+      <arg name="status" type="int"/>
+    </event>
+  </interface>
+
+  <interface name="mikros_menubar_v1" version="1">
+    <description summary="MIKSPEC-0076.R8"/>
+
+    <event name="begin">
+      <arg name="app_id" type="string"/>
+    </event>
+
+    <event name="item">
+      <arg name="item" type="uint"/>
+      <arg name="parent" type="uint"/>
+      <arg name="kind" type="uint"/>
+      <arg name="label" type="string"/>
+      <arg name="shortcut" type="string"/>
+      <arg name="flags" type="uint"/>
+    </event>
+
+    <event name="done"/>
+
+    <request name="activate">
+      <arg name="item" type="uint"/>
+    </request>
+  </interface>
+
+  <interface name="mikros_app_list_v1" version="1">
+    <description summary="MIKSPEC-0076.R11"/>
+
+    <event name="app">
+      <arg name="app_id" type="string"/>
+      <arg name="name" type="string"/>
+      <arg name="hidden" type="uint"/>
+    </event>
+
+    <event name="icon">
+      <arg name="app_id" type="string"/>
+      <arg name="contents" type="fd"/>
+      <arg name="size" type="uint"/>
+    </event>
+
+    <event name="done"/>
+
+    <request name="destroy" type="destructor"/>
+  </interface>
+
+  <interface name="mikros_shell_v1" version="1">
+    <description summary="MIKSPEC-0076.R12, MIKSPEC-0076.R14"/>
+
+    <request name="get_panel">
+      <arg name="id" type="new_id" interface="mikros_panel_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="edge" type="uint"/>
+    </request>
+
+    <request name="get_overlay">
+      <arg name="id" type="new_id" interface="mikros_overlay_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="keyboard" type="uint"/>
+    </request>
+
+    <request name="get_toplevel_list">
+      <arg name="id" type="new_id" interface="mikros_toplevel_list_v1"/>
+    </request>
+
+    <request name="get_app_list">
+      <arg name="id" type="new_id" interface="mikros_app_list_v1"/>
+    </request>
+
+    <request name="launch">
+      <arg name="id" type="new_id" interface="mikros_launch_v1"/>
+      <arg name="app_id" type="string"/>
+    </request>
+
+    <request name="get_background">
+      <arg name="id" type="new_id" interface="mikros_background_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+
+    <request name="set_wallpaper">
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="buffer" type="object" interface="wl_buffer"/>
+    </request>
+
+    <request name="get_menubar">
+      <arg name="id" type="new_id" interface="mikros_menubar_v1"/>
+      <arg name="seat" type="object" interface="wl_seat"/>
+    </request>
+
+    <request name="logout"/>
+
+    <request name="shutdown">
+      <arg name="kind" type="uint"/>
+    </request>
+
+    <request name="get_activation_token">
+      <arg name="id" type="new_id" interface="xdg_activation_token_v1"/>
+    </request>
+
+    <request name="set_dialog">
+      <arg name="toplevel" type="object" interface="xdg_toplevel"/>
+      <arg name="request" type="uint"/>
+    </request>
+
+    <request name="switcher_choose">
+      <arg name="index" type="uint"/>
+    </request>
+
+    <request name="capture_chosen">
+      <arg name="request" type="uint"/>
+      <arg name="toplevel" type="object" interface="mikros_toplevel_handle_v1" allow-null="true"/>
+      <arg name="output" type="object" interface="wl_output" allow-null="true"/>
+    </request>
+
+    <request name="capture_canceled">
+      <arg name="request" type="uint"/>
+    </request>
+
+    <event name="toggle_start_menu">
+      <arg name="output" type="object" interface="wl_output"/>
+    </event>
+
+    <event name="switcher_show"/>
+
+    <event name="switcher_item">
+      <arg name="app_id" type="string"/>
+      <arg name="title" type="string"/>
+    </event>
+
+    <event name="switcher_select">
+      <arg name="index" type="uint"/>
+    </event>
+
+    <event name="switcher_hide"/>
+
+    <event name="show_capture_picker">
+      <arg name="request" type="uint"/>
+      <arg name="app_name" type="string"/>
+      <arg name="kinds" type="uint"/>
+    </event>
+
+    <event name="cancel_capture_picker">
+      <arg name="request" type="uint"/>
+    </event>
+
+    <request name="get_secure_surface">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="id" type="new_id" interface="mikros_secure_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+
+    <event name="ask">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+      <arg name="app_id" type="string"/>
+      <arg name="app_name" type="string"/>
+      <arg name="via" type="string"/>
+      <arg name="permission" type="string"/>
+      <arg name="reason" type="string"/>
+    </event>
+
+    <event name="authorize">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+      <arg name="app_id" type="string"/>
+      <arg name="app_name" type="string"/>
+      <arg name="via" type="string"/>
+      <arg name="action" type="string"/>
+      <arg name="reason" type="string"/>
+      <arg name="name" type="string"/>
+    </event>
+
+    <event name="confirm">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+      <arg name="kind" type="uint"/>
+      <arg name="text" type="string"/>
+    </event>
+
+    <event name="answer_failed">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+    </event>
+
+    <event name="request_ended">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+    </event>
+
+    <request name="answer_ask">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+      <arg name="allowed" type="uint"/>
+    </request>
+
+    <request name="answer_authorize">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+      <arg name="name" type="string"/>
+      <arg name="password" type="string"/>
+    </request>
+
+    <request name="answer_confirm">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+      <arg name="go_on" type="uint"/>
+    </request>
+
+    <request name="cancel">
+      <description summary="MIKSPEC-0076.R14"/>
+      <arg name="request" type="uint"/>
+    </request>
+  </interface>
+
+  <interface name="mikros_background_v1" version="1">
+    <description summary="MIKSPEC-0076.R13"/>
+
+    <request name="ack_configure">
+      <arg name="serial" type="uint"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+
+    <event name="configure">
+      <arg name="serial" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <event name="closed"/>
+  </interface>
+
+  <interface name="mikros_secure_surface_v1" version="1">
+    <description summary="MIKSPEC-0076.R14"/>
+
+    <request name="ack_configure">
+      <arg name="serial" type="uint"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+
+    <event name="configure">
+      <arg name="serial" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <event name="closed"/>
+  </interface>
+</protocol>

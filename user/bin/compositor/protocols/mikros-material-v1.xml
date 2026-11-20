@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="mikros_material_v1">
+  <description summary="MIKSPEC-0076.R16"/>
+
+  <interface name="mikros_material_v1" version="1">
+    <description summary="MIKSPEC-0076.R16"/>
+
+    <request name="get_material">
+      <arg name="id" type="new_id" interface="mikros_surface_material_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="mikros_surface_material_v1" version="1">
+    <description summary="MIKSPEC-0076.R16"/>
+
+    <request name="set_region">
+      <arg name="material" type="uint"/>
+      <arg name="region" type="object" interface="wl_region"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+  </interface>
+</protocol>
