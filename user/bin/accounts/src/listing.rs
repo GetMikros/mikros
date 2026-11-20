@@ -54,6 +54,24 @@ pub static COMMAND: Spec = Spec {
             operands: &[USER, Operand::one("text", Kind::Text, "the full name")],
             ..Spec::new("full-name", "Sets a user's full name.")
         },
+        Spec {
+            operands: &[
+                Operand::optional(
+                    "name",
+                    Kind::User,
+                    "the user's name, yours when none is given",
+                ),
+                Operand::one(
+                    "mode",
+                    Kind::Choice(&["console", "desktop"]),
+                    "console or desktop",
+                ),
+            ],
+            ..Spec::new(
+                "login",
+                "Sets whether a user's login stays on the text console or starts the desktop.",
+            )
+        },
     ],
     ..Spec::new(
         "accounts",
@@ -88,6 +106,11 @@ pub enum Request {
     FullName {
         name: String,
         text: String,
+    },
+    /// The caller's own login mode without a name.
+    Login {
+        name: Option<String>,
+        desktop: bool,
     },
 }
 
@@ -134,6 +157,24 @@ pub fn read(run: &Run) -> Result<Request, String> {
                 other => return Err(format!("unknown kind {other}")),
             }
         }
+        "login" => {
+            let (name, mode) = match run.operands.as_slice() {
+                [name, mode] => (Some(name.clone()), mode.as_str()),
+                [mode] => (None, mode.as_str()),
+                _ => return Err("missing operand <mode>".into()),
+            };
+            match mode {
+                "console" => Request::Login {
+                    name,
+                    desktop: false,
+                },
+                "desktop" => Request::Login {
+                    name,
+                    desktop: true,
+                },
+                other => return Err(format!("unknown login mode {other}")),
+            }
+        }
         _ => {
             let name = next();
             match next() {
@@ -164,12 +205,14 @@ pub struct User {
     pub full_name: String,
     /// `standard` or `admin`.
     pub kind: &'static str,
+    /// `console` or `desktop`.
+    pub login: &'static str,
 }
 
 /// The header and lines of `users`: the ID aligned to the right, the
-/// name and kind to the left, and the full name.
+/// name, kind and login mode to the left, and the full name.
 pub fn text(users: &[User], paint: Paint) -> String {
-    let header = ["ID", "NAME", "KIND", "FULL NAME"];
+    let header = ["ID", "NAME", "KIND", "LOGIN", "FULL NAME"];
     let rows: Vec<Vec<Cell>> = users
         .iter()
         .map(|u| {
@@ -177,25 +220,27 @@ pub fn text(users: &[User], paint: Paint) -> String {
                 (u.id.to_string(), Some(Role::Number)),
                 (u.name.clone(), None),
                 (u.kind.into(), None),
+                (u.login.into(), None),
                 (u.full_name.clone(), Some(Role::String)),
             ]
         })
         .collect();
-    columns(&header, &rows, &[true, false, false, false], paint)
+    columns(&header, &rows, &[true, false, false, false, false], paint)
 }
 
 /// `users` as a JSON array of objects with the members `id`, `name`,
-/// `full_name` and `kind`, on one line.
+/// `full_name`, `kind` and `login`, on one line.
 pub fn json(users: &[User]) -> String {
     let objects: Vec<String> = users
         .iter()
         .map(|u| {
             format!(
-                "{{\"id\":{},\"name\":{},\"full_name\":{},\"kind\":{}}}",
+                "{{\"id\":{},\"name\":{},\"full_name\":{},\"kind\":{},\"login\":{}}}",
                 u.id,
                 json_string(&u.name),
                 json_string(&u.full_name),
-                json_string(u.kind)
+                json_string(u.kind),
+                json_string(u.login)
             )
         })
         .collect();
@@ -292,6 +337,20 @@ mod tests {
                 text: "Bob B".into(),
             })
         );
+        assert_eq!(
+            read_args(&["login", "console"]),
+            Ok(Request::Login {
+                name: None,
+                desktop: false,
+            })
+        );
+        assert_eq!(
+            read_args(&["login", "bob", "desktop"]),
+            Ok(Request::Login {
+                name: Some("bob".into()),
+                desktop: true,
+            })
+        );
     }
 
     #[test]
@@ -347,6 +406,14 @@ mod tests {
             read_args(&["full-name", "bob", ""]),
             invalid("the full name is empty")
         );
+        assert_eq!(
+            read_args(&["login", "bob", "tty"]),
+            invalid("unknown login mode tty")
+        );
+        assert_eq!(
+            read_args(&["login", "a", "console", "x"]),
+            invalid("unexpected argument x")
+        );
     }
 
     #[test]
@@ -357,28 +424,30 @@ mod tests {
                 name: "ada".into(),
                 full_name: "Ada Lovelace".into(),
                 kind: "admin",
+                login: "desktop",
             },
             User {
                 id: 1001,
                 name: "bob".into(),
                 full_name: "Bob".into(),
                 kind: "standard",
+                login: "console",
             },
         ];
         assert_eq!(
             text(&users, Paint::never()),
-            "  ID  NAME  KIND      FULL NAME\n\
-             1000  ada   admin     Ada Lovelace\n\
-             1001  bob   standard  Bob\n"
+            "  ID  NAME  KIND      LOGIN    FULL NAME\n\
+             1000  ada   admin     desktop  Ada Lovelace\n\
+             1001  bob   standard  console  Bob\n"
         );
         let on = Paint::new(Some("always"), false, None);
         assert_eq!(
             text(&users[1..], on).lines().nth(1),
-            Some("1001  bob   standard  Bob")
+            Some("1001  bob   standard  console  Bob")
         );
         assert_eq!(
             json(&users[..1]),
-            "[{\"id\":1000,\"name\":\"ada\",\"full_name\":\"Ada Lovelace\",\"kind\":\"admin\"}]\n"
+            "[{\"id\":1000,\"name\":\"ada\",\"full_name\":\"Ada Lovelace\",\"kind\":\"admin\",\"login\":\"desktop\"}]\n"
         );
         assert_eq!(json(&[]), "[]\n");
     }

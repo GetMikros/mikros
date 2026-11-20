@@ -25,3 +25,7 @@ extern accounts full-name(
     name: user "the user's name",
     text: string "the full name"
 ) complete
+extern accounts login(
+    name?: user "the user's name, yours when none is given",
+    mode: [console desktop] "console or desktop"
+) complete

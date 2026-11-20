@@ -558,17 +558,22 @@ fn accounts_lists() -> Result<(), Failure> {
     ensure(
         &run,
         "a header line",
-        header.eq(["ID", "NAME", "KIND", "FULL", "NAME"]),
+        header.eq(["ID", "NAME", "KIND", "LOGIN", "FULL", "NAME"]),
     )?;
     let users: Vec<Vec<&str>> = lines.map(|l| l.split_whitespace().collect()).collect();
     let well_formed = users.iter().all(|u| {
-        u.len() >= 4 && u[0].parse::<u32>().is_ok() && matches!(u[2], "standard" | "admin")
+        u.len() >= 5
+            && u[0].parse::<u32>().is_ok()
+            && matches!(u[2], "standard" | "admin")
+            && matches!(u[3], "console" | "desktop")
     });
     ensure(&run, "a user per line", well_formed)?;
     let json = run_with(ACCOUNTS, &["--json"], None)?;
     ensure(&json, "succeeding with --json", json.status == 0)?;
     let objects = json.out.matches("{\"id\":").count();
-    ensure(&json, "an object per user", objects == users.len())
+    ensure(&json, "an object per user", objects == users.len())?;
+    let modes = json.out.matches("\"login\":\"").count();
+    ensure(&json, "a login mode per user", modes == users.len())
 }
 
 /// Passwords come only from a terminal, so nothing is changed or added

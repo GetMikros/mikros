@@ -7,7 +7,7 @@ use crate::listing::{self, COMMAND, Request, User};
 use mikros_cli::{FAILURE, INVALID, Paint, Run, SUCCESS, complain, start};
 use mikros_command::Directory;
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::session::{AccountsClient, UserKind};
+use mikros_rt::interfaces::mikros::session::{AccountsClient, LoginMode, UserKind};
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
@@ -180,6 +180,22 @@ fn change(accounts: &AccountsClient, request: Request, paint: Paint) -> Result<(
             let done = accounts.set_full_name(id, text, FOREVER);
             called(&name, done.map(|r| r.map(drop)), false)
         }
+        Request::Login { name, desktop } => {
+            let (id, name) = match name {
+                Some(name) => (find(accounts, &name)?, name),
+                None => {
+                    // SAFETY: the call takes no pointers.
+                    let caller = unsafe { getuid() };
+                    (caller, caller.to_string())
+                }
+            };
+            let mode = match desktop {
+                true => LoginMode::Desktop,
+                false => LoginMode::Console,
+            };
+            let done = accounts.set_login_mode(id, mode, FOREVER);
+            called(&name, done.map(|r| r.map(drop)), false)
+        }
     }
 }
 
@@ -195,15 +211,26 @@ fn list(accounts: &AccountsClient) -> Result<Vec<User>, String> {
         if users.is_empty() {
             return Ok(all);
         }
-        all.extend(users.into_iter().map(|u| User {
-            id: u.id,
-            name: u.name,
-            full_name: u.full_name,
-            kind: match u.kind {
-                UserKind::Admin => "admin",
-                _ => "standard",
-            },
-        }));
+        for u in users {
+            let login = accounts
+                .get_login_mode(u.id, FOREVER)
+                .map_err(|e| format!("GetLoginMode failed: {e:?}"))?;
+            all.push(User {
+                id: u.id,
+                name: u.name,
+                full_name: u.full_name,
+                kind: match u.kind {
+                    UserKind::Admin => "admin",
+                    _ => "standard",
+                },
+                login: match login {
+                    Ok(r) if r.mode == LoginMode::Console => "console",
+                    Ok(_) => "desktop",
+                    // A user deleted since the listing.
+                    Err(_) => "-",
+                },
+            });
+        }
     }
 }
 
