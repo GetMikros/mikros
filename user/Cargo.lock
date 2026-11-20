@@ -273,6 +273,7 @@ version = "0.0.0"
 dependencies = [
  "ash",
  "mikros-rt",
+ "mikros-yaml",
  "roxmltree",
 ]
 

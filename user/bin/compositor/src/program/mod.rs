@@ -10,6 +10,7 @@
 
 mod imports;
 mod output;
+mod parts;
 mod render;
 
 use crate::server::{ClientId, Role, Server};
@@ -263,6 +264,34 @@ impl Compositor {
     }
 }
 
+impl Compositor {
+    /// Starts the greeter, the one part of greeter mode, with the `Login`
+    /// channel, and serves its Wayland connection.
+    async fn greet(self: Rc<Self>, login: OwnedHandle) {
+        let part = match parts::find("greeter") {
+            Ok(part) => part,
+            Err(e) => {
+                eprintln!("compositor: no greeter: {e:?}");
+                return;
+            }
+        };
+        let Ok((ours, theirs)) = mikros_rt::midl::channel_create() else {
+            return;
+        };
+        // SAFETY: the kernel just made both ends for us.
+        let (ours, theirs) =
+            unsafe { (OwnedHandle::from_raw(ours), OwnedHandle::from_raw(theirs)) };
+        match parts::start(&self.reactor, &part, theirs, Some(login)).await {
+            Ok(pid) => eprintln!("compositor: started the greeter as pid {pid}"),
+            Err(e) => {
+                eprintln!("compositor: starting the greeter: {e}");
+                return;
+            }
+        }
+        self.serve_client(ours).await;
+    }
+}
+
 /// The device name of the render device that clients should allocate
 /// buffers on: the first GPU device with `RENDER`.
 async fn render_device(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<String> {
@@ -295,9 +324,8 @@ pub fn main() {
         eprintln!("compositor: the Seat channel is missing");
         std::process::exit(1);
     };
-    // In greeter mode, the Login channel is for the greeter, which is not
-    // started yet.
-    let _login = take(LOGIN_ID);
+    // In greeter mode, the Login channel goes to the greeter.
+    let login = take(LOGIN_ID);
     let Some(directory) = duplicate(std::os::mikros::directory().as_raw_handle()) else {
         std::process::exit(1);
     };
@@ -333,6 +361,9 @@ pub fn main() {
             c.server.borrow_mut().buffer_device = name;
         }
         c.spawner.spawn(c.clone().frames());
+        if let Some(login) = login {
+            c.spawner.spawn(c.clone().greet(login));
+        }
         c.clone().serve_seat(seat).await;
     });
 }
