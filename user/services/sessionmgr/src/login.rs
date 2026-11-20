@@ -18,14 +18,16 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::future::Future;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
     LauncherAsyncClient, SpawnRequest, StatusKind, WaitOptions,
 };
+use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{
-    AccountsAsyncClient, TextLogin, TextLoginAnswerAskResponse, TextLoginAnswerResponse,
+    AccountsAsyncClient, LoginMode, TextLogin, TextLoginAnswerAskResponse, TextLoginAnswerResponse,
     TextLoginAsyncServer, TextLoginCancelResponse, TextLoginLoginHandoverResponse,
     TextLoginLoginResponse, TextLoginNeedsSetupResponse, TextLoginRequest,
     TextLoginRunSetupResponse,
@@ -117,6 +119,8 @@ pub async fn hand_over(requests: &Requests, user: u32, name: &str) -> Result<u8,
 
 /// What starting a session needs, and the consoles with one.
 struct Sessions {
+    accounts: Rc<AccountsAsyncClient>,
+    directory: Rc<DirectoryAsyncClient>,
     launcher: Rc<LauncherAsyncClient>,
     requests: Rc<Requests>,
     server: Rc<TextLoginAsyncServer>,
@@ -173,6 +177,37 @@ impl Sessions {
             let _ = server.server().send_on_session_ended(console);
         });
         Ok(())
+    }
+
+    /// After a login on `console` of `user`, whose login mode is
+    /// `DESKTOP`, starts the desktop as `StartDesktop` does when one is
+    /// installed, and keeps the text session when it does not start
+    /// (MIKSPEC-0057.R39).
+    fn desktop_after_login(&self, console: u8, user: u32) -> impl Future<Output = ()> + 'static {
+        let (accounts, requests) = (self.accounts.clone(), self.requests.clone());
+        let (directory, spawner) = (self.directory.clone(), self.spawner.clone());
+        async move {
+            let installed = requests
+                .seats
+                .borrow()
+                .as_ref()
+                .is_some_and(|seats| seats.desktop_installed());
+            let desktop = matches!(
+                accounts.get_login_mode(user).await,
+                Ok(Ok(r)) if r.mode == LoginMode::Desktop
+            );
+            if !installed || !desktop {
+                return;
+            }
+            let started =
+                crate::desktop::start_for(&requests, &directory, &spawner, console, user).await;
+            if let Err(status) = started {
+                mikros_rt::log!(
+                    Error,
+                    "sessionmgr: the desktop after the login on console {console}: {status:?}"
+                );
+            }
+        }
     }
 
     /// Starts the session handed to `console` with `number`, without a
@@ -333,6 +368,7 @@ async fn end_session(launcher: &LauncherAsyncClient, reactor: &Reactor, pid: u32
 pub async fn serve(
     end: ServerEnd<TextLogin>,
     accounts: AccountsAsyncClient,
+    directory: Rc<DirectoryAsyncClient>,
     launcher: Rc<LauncherAsyncClient>,
     requests: Rc<Requests>,
     reactor: Reactor,
@@ -344,6 +380,8 @@ pub async fn serve(
     // The consoles on which a session runs.
     let running: Rc<RefCell<BTreeSet<u8>>> = Rc::new(RefCell::new(BTreeSet::new()));
     let sessions = Sessions {
+        accounts: accounts.clone(),
+        directory,
         launcher: launcher.clone(),
         requests: requests.clone(),
         server: server.clone(),
@@ -397,7 +435,11 @@ pub async fn serve(
                     }
                 };
                 let started = sessions.start(q.console, user, q.name, &q.terminal).await;
+                let logged_in = started.is_ok();
                 let _ = r.reply(s, started.map(|()| TextLoginLoginResponse {}));
+                if logged_in {
+                    spawner.spawn(sessions.desktop_after_login(q.console, user));
+                }
             }
             TextLoginRequest::LoginHandover(q, r) => {
                 let started = sessions.hand_over(q.console, q.handover, &q.terminal).await;

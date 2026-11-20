@@ -265,7 +265,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             }
         });
         let login = ServerEnd::new(login_server.into_handle());
-        login::serve(login, accounts, launcher, requests, reactor, spawner).await;
+        let d = directory.clone();
+        login::serve(login, accounts, d, launcher, requests, reactor, spawner).await;
         mikros_rt::log!(Error, "sessionmgr: the console closed TextLogin");
     });
     0
