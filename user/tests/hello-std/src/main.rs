@@ -73,8 +73,10 @@ fn checks() -> Result<String, u8> {
     check(startup::take_handle(USER, 9).is_some())?;
     check(startup::take_handle(USER, 9).is_none() && startup::take_handle(USER, 10).is_none())?;
     check(std::os::mikros::directory().as_raw_handle() != 0)?;
-    // So is the process's own handle.
+    // So are the process's own handle and its Launcher connection.
     check(std::os::mikros::process::current().as_raw_handle() != 0)?;
+    let launcher = std::os::mikros::process::launcher().as_raw_handle();
+    check(launcher != 0 && launcher != std::os::mikros::directory().as_raw_handle())?;
     // A panic unwinds to `catch_unwind`.
     panic::set_hook(Box::new(|_| {}));
     let caught = panic::catch_unwind(|| panic!("unwinding"));

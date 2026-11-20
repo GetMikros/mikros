@@ -1,0 +1,28 @@
+diff --git a/std/src/os/mikros/process.rs b/std/src/os/mikros/process.rs
+index 97e9c57..5bc2d01 100644
+--- a/std/src/os/mikros/process.rs
++++ b/std/src/os/mikros/process.rs
+@@ -28,6 +28,7 @@ struct CProcessInfo {
+ unsafe extern "C" {
+     fn mikros_process_handle(pid: c_int) -> i64;
+     fn mikros_process_self() -> RawHandle;
++    fn mikros_launcher() -> RawHandle;
+     fn mikros_process_list(pids: *mut i32, max: usize) -> isize;
+     fn mikros_process_info(pid: i32, info: *mut CProcessInfo) -> c_int;
+ }
+@@ -103,6 +104,15 @@ pub fn current() -> BorrowedHandle<'static> {
+     unsafe { BorrowedHandle::borrow_raw(mikros_process_self()) }
+ }
+ 
++/// The process's `Launcher` connection from its startup transfer, which
++/// the C library keeps open for as long as the process runs, for calls
++/// such as `Spawn` with startup handles (MIKSPEC-0060.R15).
++pub fn launcher() -> BorrowedHandle<'static> {
++    // SAFETY: the call takes no pointers, and the C library never closes
++    // the connection.
++    unsafe { BorrowedHandle::borrow_raw(mikros_launcher()) }
++}
++
+ /// The kernel handle of a child process.
+ pub trait ChildExt {
+     /// Takes the process handle that the process manager gave for the
