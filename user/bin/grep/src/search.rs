@@ -1,6 +1,6 @@
 //! What grep takes, and how it selects the lines of one input and writes
 //! them, with their context, names and numbers, or as JSON
-//! (MIKSPEC-0098.R52).
+//! (MIKSPEC-0098.R71).
 
 use crate::pattern::{Matcher, Settings, Syntax};
 use mikros_cli::{EntryType, Kind, Operand, Opt, Paint, Role, Run, Spec, json_string};
@@ -250,7 +250,7 @@ impl<W: Write> Writer<'_, W> {
             }
             for (start, end) in self.matcher.matches(line) {
                 self.prefix(number, b":")?;
-                painted(self.out, self.paint, Role::String, &line[start..end])?;
+                painted(self.out, self.paint, Role::Match, &line[start..end])?;
                 self.out.write_all(&[terminator])?;
             }
             return Ok(());
@@ -262,7 +262,7 @@ impl<W: Write> Writer<'_, W> {
             let mut at = 0;
             for (start, end) in self.matcher.matches(line) {
                 self.out.write_all(&line[at..start])?;
-                painted(self.out, self.paint, Role::String, &line[start..end])?;
+                painted(self.out, self.paint, Role::Match, &line[start..end])?;
                 at = end;
             }
             self.out.write_all(&line[at..])?;
@@ -564,7 +564,7 @@ mod tests {
         let on = Paint::new(Some("always"), false, None);
         let (text, _) = grep(&["wo"], "two\n", true, on);
         let path = on.paint(Role::Path(EntryType::Other), "f");
-        let found = on.paint(Role::String, "wo");
+        let found = on.paint(Role::Match, "wo");
         assert_eq!(text, format!("{path}:t{found}\n"));
         let options = Options {
             with_name: true,

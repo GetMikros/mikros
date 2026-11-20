@@ -1,4 +1,4 @@
-//! Colours by role (MIKSPEC-0098.R69): whether a stream is coloured, from
+//! Colours by role (MIKSPEC-0098.R70): whether a stream is coloured, from
 //! `--color`, whether it is a terminal and `NO_COLOR`, and the terminal
 //! palette, apart from msh's syntax colours, in the terminal's standard
 //! colours so that they follow its theme. Names of file system entries
@@ -19,6 +19,8 @@ pub enum Role {
     Number,
     /// Free text, such as full names and messages.
     String,
+    /// Text that a search matched.
+    Match,
     /// Failures, denied and failed states, the severity `ERROR`.
     Error,
     /// The severity `WARNING`, and states such as restarting.
@@ -38,6 +40,7 @@ impl Role {
             Role::Path(EntryType::Link) => Some("36"),
             Role::Path(EntryType::Dangling) => Some("31"),
             Role::Path(EntryType::Other) | Role::Number | Role::String => None,
+            Role::Match => Some("1;31"),
             Role::Error => Some("31"),
             Role::Warning => Some("33"),
             Role::Ok => Some("32"),
@@ -207,6 +210,7 @@ mod tests {
         assert_eq!(on.paint(Role::Path(EntryType::Other), "a"), "a");
         assert_eq!(on.paint(Role::Number, "7"), "7");
         assert_eq!(on.paint(Role::String, "s"), "s");
+        assert_eq!(on.paint(Role::Match, "m"), "\x1b[1;31mm\x1b[0m");
         assert_eq!(on.paint(Role::Error, "e"), "\x1b[31me\x1b[0m");
         assert_eq!(on.paint(Role::Warning, "w"), "\x1b[33mw\x1b[0m");
         assert_eq!(on.paint(Role::Ok, "o"), "\x1b[32mo\x1b[0m");

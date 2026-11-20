@@ -1,6 +1,6 @@
 //! Patterns as grep takes them: basic and extended regular expressions,
 //! rewritten in the syntax of the regex crate, and fixed strings, and the
-//! matcher of lines that joins them (MIKSPEC-0098.R52).
+//! matcher of lines that joins them (MIKSPEC-0098.R71).
 
 use regex::bytes::{Regex, RegexBuilder};
 

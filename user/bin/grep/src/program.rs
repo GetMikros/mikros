@@ -1,6 +1,6 @@
 //! grep on Mikros: it reads the patterns of `-f`, the files and standard
 //! input through the standard library, walks folders with `-r` and `-R`,
-//! and exits with 0, 1 or 2 as MIKSPEC-0098.R52 asks.
+//! and exits with 0, 1 or 2 as MIKSPEC-0098.R71 asks.
 
 use crate::pattern::Matcher;
 use crate::search::{self, COMMAND, Failed, Input, Options, glob};
