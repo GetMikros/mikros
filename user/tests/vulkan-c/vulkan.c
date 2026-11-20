@@ -7,9 +7,11 @@
  *
  * The memory is exportable, and the test imports it again through each
  * of its handle types, the Mikros ones and the descriptors of the C
- * library, and checks that the imports share its contents. It exits with
- * 0 when every check passed, and otherwise with the number of the first
- * check that failed. */
+ * library, and checks that the imports share its contents. The dispatch
+ * signals an exportable timeline semaphore, a kernel timeline, which the
+ * test then signals and reads through the kernel and through semaphores
+ * imported from it. It exits with 0 when every check passed, and
+ * otherwise with the number of the first check that failed. */
 
 #define VK_USE_PLATFORM_MIKROS
 #include <mikros/startup.h>
@@ -28,6 +30,8 @@ enum { MEMORY_DESCRIPTOR = 4, HANDLE_DESCRIPTOR = 10 };
 static const char *const EXTENSIONS[] = {
     VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
     VK_MIKROS_EXTERNAL_MEMORY_HANDLE_EXTENSION_NAME,
+    VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME,
+    VK_MIKROS_EXTERNAL_SEMAPHORE_HANDLE_EXTENSION_NAME,
 };
 enum { EXTENSION_COUNT = sizeof EXTENSIONS / sizeof EXTENSIONS[0] };
 
@@ -37,9 +41,21 @@ static const VkExternalMemoryHandleTypeFlags MEMORY_HANDLES =
     VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS |
     VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
+/* The semaphore handle types of Mikros and of ported software. */
+static const VkExternalSemaphoreHandleTypeFlags SEMAPHORE_HANDLES =
+    VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS |
+    VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+/* Five seconds, the longest that any wait of the test may take. */
+static const uint64_t PATIENCE = 5000000000u;
+
 static PFN_vkGetMemoryHandleMIKROS get_memory_handle;
 static PFN_vkGetMemoryHandlePropertiesMIKROS memory_handle_properties;
 static PFN_vkGetMemoryFdKHR get_memory_fd;
+static PFN_vkGetSemaphoreHandleMIKROS get_semaphore_handle;
+static PFN_vkImportSemaphoreHandleMIKROS import_semaphore_handle;
+static PFN_vkGetSemaphoreFdKHR get_semaphore_fd;
+static PFN_vkImportSemaphoreFdKHR import_semaphore_fd;
 
 /* Whether `physical` offers every extension of EXTENSIONS. */
 static int has_extensions(VkPhysicalDevice physical)
@@ -165,6 +181,141 @@ static int share_memory(VkDevice device, VkDeviceMemory memory, uint32_t type,
     return 0;
 }
 
+/* A new timeline semaphore at `value`, exportable as `handles`, or
+ * VK_NULL_HANDLE. */
+static VkSemaphore timeline(VkDevice device, uint64_t value,
+                            VkExternalSemaphoreHandleTypeFlags handles)
+{
+    VkExportSemaphoreCreateInfo export_info = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+        .handleTypes = handles,
+    };
+    VkSemaphoreTypeCreateInfo type_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .pNext = handles != 0 ? &export_info : NULL,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue = value,
+    };
+    VkSemaphoreCreateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = &type_info,
+    };
+    VkSemaphore semaphore;
+    if (vkCreateSemaphore(device, &info, NULL, &semaphore) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    return semaphore;
+}
+
+/* Whether `semaphore` reaches `value` within PATIENCE. */
+static int reaches(VkDevice device, VkSemaphore semaphore, uint64_t value)
+{
+    VkSemaphoreWaitInfo wait = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+        .semaphoreCount = 1,
+        .pSemaphores = &semaphore,
+        .pValues = &value,
+    };
+    return vkWaitSemaphores(device, &wait, PATIENCE) == VK_SUCCESS;
+}
+
+/* Exports `semaphore`, which the dispatch has signalled with 1, as a
+ * kernel timeline, and checks it through the kernel and through
+ * semaphores imported from it, with a submission to `queue` that waits
+ * for a value before anything signals it. Returns 0 or the number of the
+ * check that failed. */
+static int share_timeline(VkDevice device, VkQueue queue, VkSemaphore semaphore)
+{
+    VkSemaphoreGetHandleInfoMIKROS get = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_HANDLE_INFO_MIKROS,
+        .semaphore = semaphore,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS,
+    };
+    mikros_handle_t kernel;
+    uint64_t value = 0;
+    if (get_semaphore_handle(device, &get, &kernel) != VK_SUCCESS || kernel == 0)
+        return 100;
+    if (mikros_timeline_get(kernel, &value) != 0 || value != 1)
+        return 101;
+
+    /* A batch that waits for 2 and then signals 3, before the kernel
+     * signals 2. */
+    const uint64_t wait_value = 2, signal_value = 3;
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkTimelineSemaphoreSubmitInfo values = {
+        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .waitSemaphoreValueCount = 1,
+        .pWaitSemaphoreValues = &wait_value,
+        .signalSemaphoreValueCount = 1,
+        .pSignalSemaphoreValues = &signal_value,
+    };
+    VkSubmitInfo submit = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = &values,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &semaphore,
+        .pWaitDstStageMask = &stage,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &semaphore,
+    };
+    if (vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS)
+        return 102;
+    if (mikros_timeline_signal(kernel, 2) != 0)
+        return 103;
+    if (!reaches(device, semaphore, 3))
+        return 104;
+
+    /* A semaphore of the same kernel timeline, imported from a copy of
+     * the handle. */
+    VkSemaphore second = timeline(device, 0, 0);
+    if (second == VK_NULL_HANDLE)
+        return 105;
+    VkImportSemaphoreHandleInfoMIKROS import = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_HANDLE_INFO_MIKROS,
+        .semaphore = second,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS,
+    };
+    if (get_semaphore_handle(device, &get, &import.handle) != VK_SUCCESS)
+        return 106;
+    if (import_semaphore_handle(device, &import) != VK_SUCCESS)
+        return 107;
+    if (vkGetSemaphoreCounterValue(device, second, &value) != VK_SUCCESS || value != 3)
+        return 108;
+
+    /* And one imported from a descriptor that holds the timeline, which
+     * the host signals. */
+    VkSemaphore third = timeline(device, 0, 0);
+    if (third == VK_NULL_HANDLE)
+        return 109;
+    VkSemaphoreGetFdInfoKHR get_fd = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+        .semaphore = semaphore,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    VkImportSemaphoreFdInfoKHR import_fd = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+        .semaphore = third,
+        .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT,
+    };
+    if (get_semaphore_fd(device, &get_fd, &import_fd.fd) != VK_SUCCESS)
+        return 110;
+    if (import_semaphore_fd(device, &import_fd) != VK_SUCCESS)
+        return 111;
+    VkSemaphoreSignalInfo signal = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO,
+        .semaphore = third,
+        .value = 4,
+    };
+    if (vkSignalSemaphore(device, &signal) != VK_SUCCESS)
+        return 112;
+    if (mikros_timeline_get(kernel, &value) != 0 || value != 4 || !reaches(device, second, 4))
+        return 113;
+
+    vkDestroySemaphore(device, third, NULL);
+    vkDestroySemaphore(device, second, NULL);
+    mikros_handle_close(kernel);
+    return 0;
+}
+
 int main(void)
 {
     VkApplicationInfo app = {
@@ -233,7 +384,16 @@ int main(void)
     memory_handle_properties = (PFN_vkGetMemoryHandlePropertiesMIKROS)vkGetDeviceProcAddr(
         device, "vkGetMemoryHandlePropertiesMIKROS");
     get_memory_fd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR");
-    if (get_memory_handle == NULL || memory_handle_properties == NULL || get_memory_fd == NULL)
+    get_semaphore_handle = (PFN_vkGetSemaphoreHandleMIKROS)vkGetDeviceProcAddr(
+        device, "vkGetSemaphoreHandleMIKROS");
+    import_semaphore_handle = (PFN_vkImportSemaphoreHandleMIKROS)vkGetDeviceProcAddr(
+        device, "vkImportSemaphoreHandleMIKROS");
+    get_semaphore_fd = (PFN_vkGetSemaphoreFdKHR)vkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR");
+    import_semaphore_fd =
+        (PFN_vkImportSemaphoreFdKHR)vkGetDeviceProcAddr(device, "vkImportSemaphoreFdKHR");
+    if (get_memory_handle == NULL || memory_handle_properties == NULL || get_memory_fd == NULL ||
+        get_semaphore_handle == NULL || import_semaphore_handle == NULL ||
+        get_semaphore_fd == NULL || import_semaphore_fd == NULL)
         return 23;
     VkQueue queue;
     vkGetDeviceQueue(device, family, 0, &queue);
@@ -379,7 +539,35 @@ int main(void)
     };
     vkUpdateDescriptorSets(device, 1, &write, 0, NULL);
 
-    /* One dispatch, waited for. */
+    /* A timeline semaphore that every handle type exports and imports. */
+    VkSemaphoreTypeCreateInfo timeline_type = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+    };
+    for (uint32_t bit = 1; bit != 0; bit <<= 1) {
+        if (!(SEMAPHORE_HANDLES & bit))
+            continue;
+        VkPhysicalDeviceExternalSemaphoreInfo external_semaphore_info = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
+            .pNext = &timeline_type,
+            .handleType = bit,
+        };
+        VkExternalSemaphoreProperties external = {
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES,
+        };
+        vkGetPhysicalDeviceExternalSemaphoreProperties(physical, &external_semaphore_info,
+                                                       &external);
+        const VkExternalSemaphoreFeatureFlags both =
+            VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
+            VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
+        if ((external.externalSemaphoreFeatures & both) != both)
+            return 46;
+    }
+    VkSemaphore semaphore = timeline(device, 0, SEMAPHORE_HANDLES);
+    if (semaphore == VK_NULL_HANDLE)
+        return 47;
+
+    /* One dispatch, which signals the semaphore with 1. */
     VkCommandPoolCreateInfo command_pool_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .queueFamilyIndex = family,
@@ -404,14 +592,23 @@ int main(void)
     vkCmdDispatch(commands, COUNT / GROUP, 1, 1);
     if (vkEndCommandBuffer(commands) != VK_SUCCESS)
         return 53;
+    const uint64_t done = 1;
+    VkTimelineSemaphoreSubmitInfo submit_values = {
+        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .signalSemaphoreValueCount = 1,
+        .pSignalSemaphoreValues = &done,
+    };
     VkSubmitInfo submit = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = &submit_values,
         .commandBufferCount = 1,
         .pCommandBuffers = &commands,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &semaphore,
     };
     if (vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS)
         return 54;
-    if (vkQueueWaitIdle(queue) != VK_SUCCESS)
+    if (!reaches(device, semaphore, done))
         return 55;
 
     /* The squares. */
@@ -425,7 +622,13 @@ int main(void)
     if (failed != 0)
         return failed;
     vkUnmapMemory(device, memory);
+    failed = share_timeline(device, queue, semaphore);
+    if (failed != 0)
+        return failed;
+    if (vkQueueWaitIdle(queue) != VK_SUCCESS)
+        return 56;
 
+    vkDestroySemaphore(device, semaphore, NULL);
     vkDestroyCommandPool(device, command_pool, NULL);
     vkDestroyDescriptorPool(device, pool, NULL);
     vkDestroyPipeline(device, pipeline, NULL);
