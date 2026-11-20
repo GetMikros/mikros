@@ -31,3 +31,5 @@ provides:
   - protocol: mikros.session.Authorization
   # For every process of a login session; sudo calls it.
   - protocol: mikros.session.Elevation
+  # For every process; StartDesktop checks the caller's login session.
+  - protocol: mikros.session.Desktop

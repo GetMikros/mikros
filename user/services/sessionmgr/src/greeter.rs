@@ -116,7 +116,9 @@ fn desktop_setting(bytes: &[u8]) -> Option<bool> {
 
 /// Runs the compositor in greeter mode, serving its `Login` channel and
 /// giving it the seat, and starts it again whenever it exits. Returns once
-/// it has exited three times within 60 seconds.
+/// it has exited three times within 60 seconds. While a desktop started
+/// from a text login runs, it does not run, and its ending then does not
+/// count as an exit.
 pub async fn run(
     directory: Rc<DirectoryAsyncClient>,
     launcher: Rc<LauncherAsyncClient>,
@@ -127,7 +129,12 @@ pub async fn run(
     spawner: Spawner,
 ) {
     let mut exits = VecDeque::new();
+    let desktops = &requests.desktops;
     loop {
+        desktops
+            .changed
+            .until(|| desktops.linked.borrow().is_none())
+            .await;
         let (Ok((seat, seat_server)), Ok((login_client, login_server))) =
             (endpoints::<Seat>(), endpoints::<Login>())
         else {
@@ -172,16 +179,25 @@ pub async fn run(
             Info,
             "sessionmgr: started the compositor in greeter mode as pid {pid}"
         );
+        desktops.greeter.set(Some(pid));
         let seat = Rc::new(SeatAsyncClient::new(seat, reactor.clone()));
         spawner.spawn(seats.clone().switches(seat.clone()));
-        seats.set_compositor(Some(seat)).await;
+        seats.set_compositor(seat.clone()).await;
         let login =
             LoginAsyncServer::new(ServerEnd::new(login_server.into_handle()), reactor.clone());
         let (d, a, r) = (directory.clone(), accounts.clone(), reactor.clone());
         let (q, s) = (requests.clone(), seats.clone());
         spawner.spawn(async move { serve(login, &d, &a, &q, &s, &r).await });
         exited(&launcher, pid).await;
-        seats.set_compositor(None).await;
+        desktops.greeter.set(None);
+        desktops.changed.wake_all();
+        seats
+            .release_compositor(&seat, seats.console_screen(1))
+            .await;
+        if desktops.linked.borrow().is_some() {
+            mikros_rt::log!(Info, "sessionmgr: ended the compositor in greeter mode");
+            continue;
+        }
         let at = now();
         exits.push_back(at);
         while exits.front().is_some_and(|&t| at - t > EXIT_WINDOW) {
@@ -273,7 +289,7 @@ async fn log_in(
 }
 
 /// Asks the service manager to power off or restart the machine.
-async fn shutdown(
+pub async fn shutdown(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
     kind: ShutdownKind,

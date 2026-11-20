@@ -1,0 +1,19 @@
+// MIKSPEC-0075.R11, MIKSPEC-0075.R24
+
+library mikros.session;
+using mikros.base;
+using mikros.service;
+
+protocol Session {
+    @1 Logout() -> () error base.Status;
+    @2 Shutdown(kind mikros.service.ShutdownKind) -> () error base.Status;
+    @3 -> OnAuthorize(request u32, app_id string<128>, via string<128>,
+                      action string<64>, reason string<256>, name string<32>);
+    @4 Answer(request u32, name string<32>, password string<1024>)
+        -> () error base.Status;
+    @5 Cancel(request u32) -> () error base.Status;
+    @6 -> OnAuthorizeEnded(request u32);
+    @7 -> OnAsk(request u32, app_id string<128>, via string<128>,
+                permission string<64>, reason string<256>);
+    @8 AnswerAsk(request u32, allowed bool) -> () error base.Status;
+};

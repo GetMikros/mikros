@@ -1,0 +1,3 @@
+# Access policy of the methods of desktop.midl (MIKSPEC-0023.R47).
+
+Desktop.StartDesktop: data-dependent:sessionmgr::desktop::start

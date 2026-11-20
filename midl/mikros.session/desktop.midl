@@ -1,0 +1,8 @@
+// MIKSPEC-0057.R41
+
+library mikros.session;
+using mikros.base;
+
+protocol Desktop {
+    @1 StartDesktop() -> () error base.Status;
+};

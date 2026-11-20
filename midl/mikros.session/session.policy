@@ -1,0 +1,9 @@
+# Access policy of the methods of session.midl (MIKSPEC-0023.R47).
+# Served by the session manager only on the channel of the compositor of a
+# user session.
+
+Session.Logout: public
+Session.Shutdown: public
+Session.Answer: public
+Session.Cancel: public
+Session.AnswerAsk: public

@@ -18,6 +18,7 @@ extern crate alloc;
 
 mod authorize;
 mod boot;
+mod desktop;
 mod elevate;
 mod greeter;
 mod login;
@@ -51,6 +52,8 @@ const ACCOUNTS: &str = "mikros.session.Accounts";
 const AUTHORIZATION: &str = "mikros.session.Authorization";
 const BROKER_APP: &str = "system.permbroker";
 const ELEVATION: &str = "mikros.session.Elevation";
+/// For every process; the session manager checks the caller.
+const DESKTOP: &str = "mikros.session.Desktop";
 /// The `USER` startup handle IDs of the console's channels.
 const TEXT_LOGIN_ID: u32 = 3;
 const SEAT_ID: u32 = 7;
@@ -144,6 +147,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         if let Some(provider) = provider {
             let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
             let (requests, spawner) = (requests.clone(), spawner.clone());
+            let directory = directory.clone();
             spawner.clone().spawn(async move {
                 while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
                     // Other protocols and named instances are not ours;
@@ -154,6 +158,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     if c.protocol == AUTHORIZATION && c.client.app_id == BROKER_APP {
                         let end = ServerEnd::new(c.server);
                         let serving = authorize::serve(requests.clone(), end, spawner.clone());
+                        spawner.spawn(serving);
+                    } else if c.protocol == DESKTOP {
+                        let end = ServerEnd::new(c.server);
+                        let serving = desktop::serve(
+                            requests.clone(),
+                            directory.clone(),
+                            end,
+                            c.client,
+                            spawner.clone(),
+                        );
                         spawner.spawn(serving);
                     } else if c.protocol == ELEVATION {
                         let end = ServerEnd::new(c.server);
@@ -228,6 +242,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             desktop,
             SeatAsyncClient::new(seat, reactor.clone()),
         );
+        *requests.seats.borrow_mut() = Some(seats.clone());
         spawner.spawn(seats.clone().switches(seats.console()));
         spawner.spawn(seats.clone().keep_giving());
         let greeting = match desktop {

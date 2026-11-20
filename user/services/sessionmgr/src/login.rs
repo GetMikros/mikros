@@ -166,6 +166,7 @@ impl Sessions {
         let requests = self.requests.clone();
         self.spawner.spawn(async move {
             end_session(&launcher, &reactor, pid).await;
+            crate::desktop::end_linked(&requests, pid).await;
             mikros_rt::log!(Info, "sessionmgr: ended session {pid}");
             requests.sessions.borrow_mut().remove(&console);
             running.borrow_mut().remove(&console);

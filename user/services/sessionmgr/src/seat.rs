@@ -124,22 +124,33 @@ impl Seats {
         self.hand_out().await;
     }
 
-    /// Makes `seat` the compositor's, and the compositor the owner; or,
-    /// without one, the text console the owner on the screen of its
-    /// console 1.
-    pub async fn set_compositor(&self, seat: Option<Rc<SeatAsyncClient>>) {
-        match seat {
-            Some(seat) => {
-                *self.compositor.borrow_mut() = Some(seat);
-                self.give(Owner::Compositor).await;
-            }
-            None => {
-                *self.compositor.borrow_mut() = None;
-                if self.owner.get() == Owner::Compositor {
-                    self.give(Owner::Console).await;
-                    let _ = self.console.set_screen(self.console_screen(1));
-                }
-            }
+    /// Whether a desktop is installed.
+    pub fn desktop_installed(&self) -> bool {
+        self.desktop
+    }
+
+    /// Makes `seat` the compositor's, and the compositor the owner.
+    pub async fn set_compositor(&self, seat: Rc<SeatAsyncClient>) {
+        *self.compositor.borrow_mut() = Some(seat);
+        self.give(Owner::Compositor).await;
+    }
+
+    /// Once the compositor of `seat` has exited, makes the text console
+    /// the owner on `screen`, unless another compositor has the seat
+    /// meanwhile.
+    pub async fn release_compositor(&self, seat: &Rc<SeatAsyncClient>, screen: u8) {
+        let same = self
+            .compositor
+            .borrow()
+            .as_ref()
+            .is_some_and(|current| Rc::ptr_eq(current, seat));
+        if !same {
+            return;
+        }
+        *self.compositor.borrow_mut() = None;
+        if self.owner.get() == Owner::Compositor {
+            self.give(Owner::Console).await;
+            let _ = self.console.set_screen(screen);
         }
     }
 

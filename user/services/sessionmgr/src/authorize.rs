@@ -71,6 +71,11 @@ pub struct Requests {
     pub sessions: RefCell<BTreeMap<u8, u32>>,
     /// The sessions handed to consoles that have not started them yet.
     pub handovers: RefCell<BTreeMap<u8, crate::login::Handover>>,
+    /// The seat, once the console runs.
+    pub seats: RefCell<Option<Rc<crate::seat::Seats>>>,
+    /// The desktop started from a text login, and the greeter's
+    /// compositor.
+    pub desktops: crate::desktop::Desktops,
     /// The open requests by number.
     open: RefCell<BTreeMap<u32, Open>>,
     /// The tasks that wait for a console's open request to end.
@@ -92,6 +97,8 @@ impl Requests {
             elevations: RefCell::new(None),
             sessions: RefCell::new(BTreeMap::new()),
             handovers: RefCell::new(BTreeMap::new()),
+            seats: RefCell::new(None),
+            desktops: crate::desktop::Desktops::default(),
             open: RefCell::new(BTreeMap::new()),
             freed: Waiters::default(),
             next: Cell::new(1),
@@ -202,7 +209,7 @@ impl Requests {
     /// ID and portable checksum must all be the client's, so that a
     /// question names the app of the process that holds the answer
     /// (MIKSPEC-0057.R33).
-    async fn console_of(
+    pub async fn console_of(
         &self,
         client: &ClientIdentity,
         what: &str,
