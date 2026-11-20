@@ -29,10 +29,10 @@ use mikros_rt::interfaces::mikros::session::{
 
 const COMPOSITOR: &str = "/system/bin/compositor";
 const COMPOSITOR_APP: &str = "system.compositor";
-/// Below `/system`: the compositor's program manifest, and the session
-/// settings.
+/// The compositor's program manifest, below `/system`, and the session
+/// settings, below `/system/config`.
 const MANIFEST: &str = "programs/system.compositor.yaml";
-const SETTINGS: &str = "config/session.yaml";
+const SETTINGS: &str = "session.yaml";
 const CONTROL: &str = "mikros.service.Control";
 /// The `USER` startup handle IDs of the compositor's channels.
 const LOGIN_ID: u32 = 3;
@@ -42,9 +42,13 @@ const EXITS: usize = 3;
 const EXIT_WINDOW: i64 = 60 * SECOND;
 const FOREVER: i64 = i64::MAX;
 
-/// Whether a desktop is installed, from the files under `system`, the
-/// directory of `/system`.
-pub async fn installed(system: &NodeAsyncClient, reactor: &Reactor) -> bool {
+/// Whether a desktop is installed, from the files under `system` and
+/// `config`, the directories of `/system` and `/system/config`.
+pub async fn installed(
+    system: &NodeAsyncClient,
+    config: &NodeAsyncClient,
+    reactor: &Reactor,
+) -> bool {
     match files::read(system, reactor, MANIFEST, mikros_yaml::SIZE_MAX).await {
         Ok(_) => {}
         Err(Failure::Fs(Error::NotFound)) => return false,
@@ -53,11 +57,14 @@ pub async fn installed(system: &NodeAsyncClient, reactor: &Reactor) -> bool {
             return false;
         }
     }
-    match files::read(system, reactor, SETTINGS, mikros_yaml::SIZE_MAX).await {
+    match files::read(config, reactor, SETTINGS, mikros_yaml::SIZE_MAX).await {
         Ok(bytes) => desktop_setting(&bytes) != Some(false),
         Err(Failure::Fs(Error::NotFound)) => true,
         Err(e) => {
-            mikros_rt::log!(Error, "sessionmgr: reading /system/{SETTINGS}: {e:?}");
+            mikros_rt::log!(
+                Error,
+                "sessionmgr: reading /system/config/{SETTINGS}: {e:?}"
+            );
             true
         }
     }
@@ -69,7 +76,7 @@ fn desktop_setting(bytes: &[u8]) -> Option<bool> {
     let invalid = |line: usize, column: usize| {
         mikros_rt::log!(
             Error,
-            "sessionmgr: /system/{SETTINGS} is invalid at line {line}, column {column}"
+            "sessionmgr: /system/config/{SETTINGS} is invalid at line {line}, column {column}"
         );
     };
     let root = match mikros_yaml::parse(bytes) {
@@ -90,7 +97,7 @@ fn desktop_setting(bytes: &[u8]) -> Option<bool> {
         let key = &entry.key;
         mikros_rt::log!(
             Info,
-            "sessionmgr: /system/{SETTINGS}: ignored the key {key}"
+            "sessionmgr: /system/config/{SETTINGS}: ignored the key {key}"
         );
     }
     match map.get("desktop")?.boolean() {

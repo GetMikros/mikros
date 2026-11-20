@@ -26,7 +26,8 @@
 //!   a program's arguments for msh, installed as
 //!   `system/share/msh/completions/<name>.msh`.
 //! - `config`: the file names, in its package, of settings of the system
-//!   that it installs as `system/config/<file>`.
+//!   that it installs as `config/<file>`, in the root file system's
+//!   subvolume `config`, which processes see as `/system/config`.
 //! - `share`: the paths, in its package, of data files that it installs
 //!   as `system/share/<path>`.
 
@@ -130,7 +131,7 @@ impl Component {
             ));
         }
         for file in &self.config {
-            members.push((format!("system/config/{file}"), self.dir.join(file)));
+            members.push((format!("config/{file}"), self.dir.join(file)));
         }
         for path in &self.share {
             members.push((format!("system/share/{path}"), self.dir.join(path)));
@@ -398,7 +399,7 @@ mod tests {
             [
                 "system/services/system.sessionmgr/sessionmgr",
                 "system/services/system.sessionmgr/service.yaml",
-                "system/config/session.yaml"
+                "config/session.yaml"
             ]
         );
         assert_eq!(

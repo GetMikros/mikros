@@ -9,6 +9,9 @@ after: [devicemgr, accountsvc]
 namespace:
   - path: /system
     rights: rx
+  # The session settings.
+  - path: /system/config
+    rights: r
 permissions:
   - system.user_id.set
   - system.identity.set

@@ -90,9 +90,11 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             mikros_rt::log::connect(&managed.header.directory);
         }
     }
-    // The directory of `/system`, where the compositor's program manifest
-    // and the session settings are.
+    // The directories of `/system`, where the compositor's program
+    // manifest is, and of `/system/config`, where the session settings are.
     let system = managed::take_entry(&mut managed.namespace, "/system")
+        .map(|(dir, _)| NodeAsyncClient::new(dir, reactor.clone()));
+    let config = managed::take_entry(&mut managed.namespace, "/system/config")
         .map(|(dir, _)| NodeAsyncClient::new(dir, reactor.clone()));
     let header = managed.header;
     let directory = Rc::new(DirectoryAsyncClient::new(header.directory, reactor.clone()));
@@ -211,9 +213,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             }
         }
         let seat = SeatAsyncClient::new(seat, reactor.clone());
-        let desktop = match &system {
-            Some(system) => greeter::installed(system, &reactor).await,
-            None => false,
+        let desktop = match (&system, &config) {
+            (Some(system), Some(config)) => greeter::installed(system, config, &reactor).await,
+            _ => false,
         };
         let greeting = match desktop {
             true => connect_accounts(&directory, &reactor).await,

@@ -98,7 +98,7 @@ pub struct Built {
 }
 
 /// The member of the session settings, which turn the desktop off.
-const SESSION_SETTINGS: &str = "system/config/session.yaml";
+const SESSION_SETTINGS: &str = "config/session.yaml";
 
 /// The boot images that can be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
