@@ -93,7 +93,10 @@ fn make() -> Result<PathBuf> {
     write(&cfg, driver_config().as_bytes())?;
     let llvm = llvm_from_sysroot()?;
     for (file, contents) in [
-        (meson_cross_file(), meson_cross(&llvm)),
+        (
+            meson_cross_file(),
+            meson_cross(&llvm, &from_sysroot(&crate::cmake::program())?),
+        ),
         (cmake_toolchain_file(), cmake_toolchain(&llvm)),
         (
             sysroot.join("share/cmake/Platform/Mikros.cmake"),
@@ -356,17 +359,22 @@ pub fn cmake_toolchain_file() -> PathBuf {
 /// The directory of the LLVM programs relative to the sysroot, beside
 /// which the LLVM directory lies.
 fn llvm_from_sysroot() -> Result<String> {
-    let bin = llvm::bin();
-    match dir().parent().map(|parent| bin.strip_prefix(parent)) {
+    from_sysroot(&llvm::bin())
+}
+
+/// `path`, which lies in `target/` beside the sysroot, relative to it.
+fn from_sysroot(path: &Path) -> Result<String> {
+    match dir().parent().map(|parent| path.strip_prefix(parent)) {
         Some(Ok(relative)) => Ok(format!("../{}", relative.display())),
-        _ => bail!("{} lies apart from the sysroot", bin.display()),
+        _ => bail!("{} lies apart from the sysroot", path.display()),
     }
 }
 
-/// The Meson cross file, with the LLVM programs in `llvm`, relative to
-/// the sysroot. Meson replaces `@DIRNAME@` with the file's directory,
-/// the sysroot.
-fn meson_cross(llvm: &str) -> String {
+/// The Meson cross file, with the LLVM programs in `llvm` and the CMake
+/// that `crate::cmake` builds at `cmake`, both relative to the sysroot,
+/// for the dependencies that Meson finds through their CMake packages.
+/// Meson replaces `@DIRNAME@` with the file's directory, the sysroot.
+fn meson_cross(llvm: &str, cmake: &str) -> String {
     let tool = |name: &str| format!("'@DIRNAME@/{llvm}/{name}'");
     let compiler = |name: &str| format!("[{}, '--config=@DIRNAME@/{TRIPLE}.cfg']", tool(name));
     format!(
@@ -380,6 +388,7 @@ c = {}
 cpp = {}
 ar = {}
 ranlib = {}
+cmake = '@DIRNAME@/{cmake}'
 
 [properties]
 sys_root = '@DIRNAME@'
@@ -535,11 +544,12 @@ mod tests {
 
     #[test]
     fn build_system_files_select_mikros_and_the_compilers() {
-        let cross = meson_cross("../llvm/bin");
+        let cross = meson_cross("../llvm/bin", "../cmake/install/bin/cmake");
         for line in [
             "c = ['@DIRNAME@/../llvm/bin/clang', '--config=@DIRNAME@/x86_64-unknown-mikros.cfg']",
             "sys_root = '@DIRNAME@'",
             "system = 'mikros'",
+            "cmake = '@DIRNAME@/../cmake/install/bin/cmake'",
         ] {
             assert!(cross.lines().any(|l| l == line), "{line}");
         }

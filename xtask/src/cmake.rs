@@ -31,6 +31,11 @@ fn dir() -> PathBuf {
     crate::workspace_root().join("target/cmake")
 }
 
+/// Where `build` installs `cmake`.
+pub fn program() -> PathBuf {
+    dir().join("install/bin/cmake")
+}
+
 /// Fetches, patches, builds and installs CMake, and returns the path of
 /// the installed `cmake`. A build that is up to date only checks the
 /// patches and runs Ninja.
@@ -78,5 +83,5 @@ pub fn build() -> Result<PathBuf> {
             .stdout(Stdio::null()),
     )
     .context("installing CMake")?;
-    Ok(install.join("bin/cmake"))
+    Ok(program())
 }

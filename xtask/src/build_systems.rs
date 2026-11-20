@@ -72,6 +72,9 @@ pub fn cmake(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
 /// in.
 pub fn meson(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
     crate::sysroot::build()?;
+    // The CMake that the cross file names, for dependencies that Meson
+    // finds through their CMake packages.
+    crate::cmake::build()?;
     let cross = crate::sysroot::meson_cross_file();
     let (build, staging) = (build_dir(name), dir(name).join("install"));
     let mut setup = crate::meson::command()?;
