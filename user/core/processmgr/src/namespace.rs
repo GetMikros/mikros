@@ -1129,17 +1129,18 @@ impl Namespaces {
                 );
             }
             // The name of the process's user, which `<user>` in a listed
-            // path stands for, from the user's record, without which a
-            // process of another user than 0 does not start
-            // (MIKSPEC-0050.R24).
-            let user_name = match user {
+            // path stands for: from the user's record, without which a
+            // process of another user than 0 does not start, or the
+            // greeter account's, whose entries below /users/greeter come
+            // from /system/state/greeter (MIKSPEC-0050.R55).
+            let named = match user {
                 0 => None,
-                _ => Some(crate::users::name(shared, user).await?),
+                _ => Some(user_name(shared, user).await?),
             };
             for (path, text) in listed {
-                let path = match (&user_name, path.contains("<user>")) {
+                let path = match (&named, path.contains("<user>")) {
                     (None, true) => continue,
-                    (Some(name), true) => path.replace("<user>", name),
+                    (Some(name), true) => greeter_path(user, path.replace("<user>", name)),
                     (_, false) => path,
                 };
                 let path = path::normalize(&path).ok_or(Status::NotFound)?;

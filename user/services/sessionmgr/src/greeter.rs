@@ -1,10 +1,10 @@
 //! The graphical login. A desktop counts as installed when the
 //! compositor's program manifest exists and `/system/config/session.yaml`
 //! does not set `desktop` to `false`. The compositor then runs in greeter
-//! mode, as user 0, with a `Login` channel, which the session manager
-//! serves, and a `Seat` channel, through which it gets the display and the
-//! input devices. When it has exited three times within 60 seconds, the
-//! text console's login takes over until the next boot.
+//! mode, as the greeter account, with a `Login` channel, which the session
+//! manager serves, and a `Seat` channel, through which it gets the display
+//! and the input devices. When it has exited three times within 60
+//! seconds, the text console's login takes over until the next boot.
 
 use crate::spawn::block;
 use crate::{SECOND, now};
@@ -41,6 +41,9 @@ const SEAT_ID: u32 = 7;
 const EXITS: usize = 3;
 const EXIT_WINDOW: i64 = 60 * SECOND;
 const FOREVER: i64 = i64::MAX;
+/// The user ID of the greeter account, which the compositor in greeter
+/// mode runs as.
+const GREETER_USER: u32 = 1;
 
 /// Whether a desktop is installed, from the files under `system` and
 /// `config`, the directories of `/system` and `/system/config`.
@@ -145,7 +148,7 @@ pub async fn run(
                 },
             ],
             app_id: Some(COMPOSITOR_APP.into()),
-            user: 0,
+            user: GREETER_USER,
             login_session: false,
             new_session: false,
             working_directory: None,

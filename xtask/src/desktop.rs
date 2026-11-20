@@ -1,8 +1,10 @@
 //! The desktop run: the system of the system tests without the session
-//! settings, so that a desktop counts as installed, boots, the session
-//! manager starts the compositor in greeter mode and gives it the
-//! display, and the compositor shows its background. The run takes screen
-//! dumps until the background covers the screen, and keeps the last in
+//! settings, so that a desktop counts as installed, and with shell
+//! settings that name the greeter probe as the greeter, boots, the
+//! session manager starts the compositor in greeter mode and gives it the
+//! display, and the compositor starts the probe, a system app, which
+//! draws a fullscreen toplevel in one colour with Vulkan. The run takes
+//! screen dumps until that colour covers the screen, and keeps the last in
 //! `desktop.ppm`.
 
 use crate::build::{self, Kind};
@@ -13,28 +15,29 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// What the session manager logs once it started the compositor.
+/// What the session manager logs once it started the compositor, and the
+/// compositor once it started the greeter.
 const STARTED: &str = "sessionmgr: started the compositor in greeter mode";
-/// The compositor's background, [0.11, 0.12, 0.14] in the unsigned
-/// normalized bytes of the display, and how far a pixel may be from it.
-const BACKGROUND: [u8; 3] = [28, 31, 36];
+const GREETER: &str = "compositor: started the greeter as pid";
+/// The probe's colour, in the bytes of the display, and how far a pixel
+/// may be from it.
+const COLOUR: [u8; 3] = [200, 40, 120];
 const TOLERANCE: u8 = 2;
-/// The share of the screen that the background must cover, with no
-/// window on it.
+/// The share of the screen that the colour must cover.
 const COVERED: f64 = 0.9;
-/// How often the screen is dumped while the run waits for the background.
+/// How often the screen is dumped while the run waits for the colour.
 const DUMP_EVERY: Duration = Duration::from_secs(1);
 
-/// The share of the pixels of the screen dump `ppm` that show the
-/// background, or None when it is not a PPM image.
-pub fn background_share(ppm: &[u8]) -> Option<f64> {
+/// The share of the pixels of the screen dump `ppm` that show the probe's
+/// colour, or None when it is not a PPM image.
+pub fn colour_share(ppm: &[u8]) -> Option<f64> {
     let pixels = scenario::ppm_pixels(ppm)?;
     if pixels.is_empty() {
         return Some(0.0);
     }
     let near = |p: &[u8; 3]| {
         p.iter()
-            .zip(BACKGROUND)
+            .zip(COLOUR)
             .all(|(&a, b)| a.abs_diff(b) <= TOLERANCE)
     };
     let shown = pixels.iter().filter(|p| near(p)).count();
@@ -42,7 +45,7 @@ pub fn background_share(ppm: &[u8]) -> Option<f64> {
 }
 
 /// Boots the desktop run of the build kind `kind` in `dir`, and fails
-/// unless the compositor's background covers the screen before `timeout`.
+/// unless the probe's colour covers the screen before `timeout`.
 pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> Result<()> {
     let built = build::build_tests(kind)?;
     let system = built
@@ -58,19 +61,20 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
     let deadline = Instant::now() + timeout;
     let ended = (|| -> Result<f64> {
         scenario::wait_for_line(&log, STARTED, &mut qemu, deadline)?;
+        scenario::wait_for_line(&log, GREETER, &mut qemu, deadline)?;
         let dump = dir.join("desktop.ppm");
         loop {
             let ppm = scenario::screen_dump(&socket, &dump)?;
-            let share = background_share(&ppm).context("the screen dump is not a PPM image")?;
+            let share = colour_share(&ppm).context("the screen dump is not a PPM image")?;
             if share >= COVERED {
                 return Ok(share);
             }
             if qemu.try_wait()?.is_some() {
-                bail!("QEMU exited before the background covered the screen");
+                bail!("QEMU exited before the probe's colour covered the screen");
             }
             if Instant::now() > deadline {
                 bail!(
-                    "timed out with the background on {:.0}% of the screen",
+                    "timed out with the probe's colour on {:.0}% of the screen",
                     share * 100.0
                 );
             }
@@ -100,9 +104,9 @@ mod tests {
     }
 
     #[test]
-    fn counts_the_pixels_near_the_background() {
-        let screen = ppm(&[[28, 31, 36], [29, 30, 37], [0, 0, 0], [28, 31, 36]]);
-        assert_eq!(background_share(&screen), Some(0.75));
-        assert_eq!(background_share(b"not a picture"), None);
+    fn counts_the_pixels_near_the_colour() {
+        let screen = ppm(&[[200, 40, 120], [201, 39, 122], [28, 31, 36], [200, 40, 120]]);
+        assert_eq!(colour_share(&screen), Some(0.75));
+        assert_eq!(colour_share(b"not a picture"), None);
     }
 }
