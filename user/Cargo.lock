@@ -1484,6 +1484,7 @@ name = "sessionmgr"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
+ "mikros-yaml",
 ]
 
 [[package]]

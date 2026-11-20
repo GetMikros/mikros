@@ -2,7 +2,9 @@
 //! channel, through which it gives the console the display and the input
 //! devices, and a `TextLogin` channel, through which the console runs
 //! first-boot setup and logs users in, checked with the accounts
-//! service. A login starts the user's shell in a new login session on the
+//! service. When a desktop is installed, the compositor in greeter mode
+//! gets the display and the input devices instead, until it fails
+//! (`greeter`). A login starts the user's shell in a new login session on the
 //! console's terminal; once the shell exits, the session's processes are
 //! ended and the console shows its login prompt again. Once the console
 //! has started, the session manager marks the boot good through the boot
@@ -17,6 +19,7 @@ extern crate alloc;
 mod authorize;
 mod boot;
 mod elevate;
+mod greeter;
 mod login;
 mod seat;
 mod spawn;
@@ -26,6 +29,7 @@ use alloc::rc::Rc;
 use alloc::vec;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
+use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 use mikros_rt::interfaces::mikros::process::{
     Elevations, ElevationsAsyncClient, HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle,
 };
@@ -86,6 +90,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             mikros_rt::log::connect(&managed.header.directory);
         }
     }
+    // The directory of `/system`, where the compositor's program manifest
+    // and the session settings are.
+    let system = managed::take_entry(&mut managed.namespace, "/system")
+        .map(|(dir, _)| NodeAsyncClient::new(dir, reactor.clone()));
     let header = managed.header;
     let directory = Rc::new(DirectoryAsyncClient::new(header.directory, reactor.clone()));
     let launcher = Rc::new(LauncherAsyncClient::new(header.launcher, reactor.clone()));
@@ -203,11 +211,44 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             }
         }
         let seat = SeatAsyncClient::new(seat, reactor.clone());
-        let (d, r) = (directory.clone(), reactor.clone());
-        spawner.spawn(async move { seat::serve(&d, &r, seat).await });
+        let desktop = match &system {
+            Some(system) => greeter::installed(system, &reactor).await,
+            None => false,
+        };
+        let greeting = match desktop {
+            true => connect_accounts(&directory, &reactor).await,
+            false => None,
+        };
+        let (d, r, l, s) = (
+            directory.clone(),
+            reactor.clone(),
+            launcher.clone(),
+            spawner.clone(),
+        );
+        spawner.spawn(async move {
+            // The compositor in greeter mode owns the seat while it runs,
+            // and the console once the compositor failed.
+            if let Some(accounts) = greeting {
+                greeter::run(d.clone(), l, Rc::new(accounts), r.clone(), s).await;
+                mikros_rt::log!(Error, "sessionmgr: the text console's login takes over");
+            }
+            seat::serve(&d, &r, seat).await
+        });
         let login = ServerEnd::new(login_server.into_handle());
         login::serve(login, accounts, launcher, requests, reactor, spawner).await;
         mikros_rt::log!(Error, "sessionmgr: the console closed TextLogin");
     });
     0
+}
+
+/// A new connection to the accounts service.
+async fn connect_accounts(
+    directory: &DirectoryAsyncClient,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Option<AccountsAsyncClient> {
+    let (accounts, server) = endpoints::<Accounts>().ok()?;
+    let connected = directory
+        .connect(ACCOUNTS.into(), None, server.into_handle())
+        .await;
+    matches!(connected, Ok(Ok(_))).then(|| AccountsAsyncClient::new(accounts, reactor.clone()))
 }
