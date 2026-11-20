@@ -13,6 +13,7 @@ mod keys;
 mod output;
 mod parts;
 mod render;
+mod session;
 
 use crate::server::{ClientId, Role, Server};
 use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
@@ -36,6 +37,7 @@ use std::task::{Poll, Waker};
 /// The `USER` startup handles: the `Login` channel of greeter mode, and
 /// the `Seat` channel.
 const USER: u32 = 16;
+const SESSION_ID: u32 = 2;
 const LOGIN_ID: u32 = 3;
 const SEAT_ID: u32 = 7;
 const SAME_RIGHTS: u32 = 1 << 31;
@@ -298,33 +300,61 @@ impl Compositor {
     /// Starts the greeter, the one part of greeter mode, with the `Login`
     /// channel, and serves its Wayland connection.
     async fn greet(self: Rc<Self>, login: OwnedHandle) {
-        let part = match parts::find("greeter") {
-            Ok(part) => part,
-            Err(e) => {
-                mikros_rt::log!(Error, "compositor: no greeter: {e:?}");
-                return;
+        match parts::find("greeter") {
+            Ok(part) => self.run_part(part, Some(login), "the greeter".into()).await,
+            Err(e) => mikros_rt::log!(Error, "compositor: no greeter: {e:?}"),
+        }
+    }
+
+    /// Starts every part of the packages of a user session, and serves
+    /// their Wayland connections (MIKSPEC-0075.R20). A package that cannot
+    /// be found leaves its roles empty.
+    async fn start_shell(self: Rc<Self>) {
+        for (key, package) in parts::session_packages() {
+            let package = match package {
+                Ok(package) => package,
+                Err(e) => {
+                    mikros_rt::log!(Error, "compositor: no {key}: {e:?}");
+                    continue;
+                }
+            };
+            let found = match parts::parts_of(&package) {
+                Ok(found) => found,
+                Err(e) => {
+                    mikros_rt::log!(Error, "compositor: the {key} {package}: {e:?}");
+                    continue;
+                }
+            };
+            for part in found {
+                let name = format!("the part {} of {package}", part.roles.join(" "));
+                self.spawner.spawn(self.clone().run_part(part, None, name));
             }
-        };
+        }
+    }
+
+    /// Starts `part`, called `name` in the log, with `login` in greeter
+    /// mode, logs how it exits, and serves its Wayland connection.
+    async fn run_part(self: Rc<Self>, part: parts::Part, login: Option<OwnedHandle>, name: String) {
         let Ok((ours, theirs)) = mikros_rt::midl::channel_create() else {
             return;
         };
         // SAFETY: the kernel just made both ends for us.
         let (ours, theirs) =
             unsafe { (OwnedHandle::from_raw(ours), OwnedHandle::from_raw(theirs)) };
-        let pid = match parts::start(&self.reactor, &part, theirs, Some(login)).await {
+        let pid = match parts::start(&self.reactor, &part, theirs, login).await {
             Ok(pid) => pid,
             Err(e) => {
-                mikros_rt::log!(Error, "compositor: starting the greeter: {e}");
+                mikros_rt::log!(Error, "compositor: starting {name}: {e}");
                 return;
             }
         };
-        mikros_rt::log!(Info, "compositor: started the greeter as pid {pid}");
+        mikros_rt::log!(Info, "compositor: started {name} as pid {pid}");
         let reactor = self.reactor.clone();
         self.spawner.spawn(async move {
             match parts::exited(&reactor, pid).await {
-                Ok(0) => mikros_rt::log!(Info, "compositor: the greeter exited"),
-                Ok(code) => mikros_rt::log!(Error, "compositor: the greeter exited with {code}"),
-                Err(e) => mikros_rt::log!(Error, "compositor: waiting for the greeter: {e}"),
+                Ok(0) => mikros_rt::log!(Info, "compositor: {name} exited"),
+                Ok(code) => mikros_rt::log!(Error, "compositor: {name} exited with {code}"),
+                Err(e) => mikros_rt::log!(Error, "compositor: waiting for {name}: {e}"),
             }
         });
         self.serve_client(ours).await;
@@ -370,8 +400,10 @@ pub fn main() {
         mikros_rt::log!(Error, "compositor: the Seat channel is missing");
         std::process::exit(1);
     };
-    // In greeter mode, the Login channel goes to the greeter.
+    // In greeter mode, the Login channel goes to the greeter; in a user
+    // session, the session manager asks its questions on Session.
     let login = take(LOGIN_ID);
+    let session = take(SESSION_ID);
     let renderer = match Renderer::new() {
         Ok(renderer) => renderer,
         Err(e) => {
@@ -405,8 +437,12 @@ pub fn main() {
             c.server.borrow_mut().buffer_device = name;
         }
         c.spawner.spawn(c.clone().frames());
-        if let Some(login) = login {
-            c.spawner.spawn(c.clone().greet(login));
+        match login {
+            Some(login) => c.spawner.spawn(c.clone().greet(login)),
+            None => c.spawner.spawn(c.clone().start_shell()),
+        }
+        if let Some(session) = session {
+            c.spawner.spawn(session::serve(c.reactor.clone(), session));
         }
         c.clone().serve_seat(seat).await;
     });

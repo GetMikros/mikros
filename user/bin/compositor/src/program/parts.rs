@@ -1,9 +1,12 @@
-//! Starting the parts of the shell. `shell.yaml` names, for each system
-//! role, the system app whose part provides it: the compositor reads the
-//! app's manifest for its `shell_parts`, and starts the part's executable
-//! as a child, through the process manager's `Spawn`, with a channel for
-//! its Wayland connection and its roles in `MIKROS_SHELL_ROLE`. In greeter
-//! mode only the `greeter` part runs, which also gets the `Login` channel.
+//! Starting the parts of the shell. `shell.yaml` names the system app of
+//! the shell, under `shell`, and, for each system role, the system app
+//! whose part provides it: the compositor reads the app's manifest for its
+//! `shell_parts`, and starts the part's executable as a child, through the
+//! process manager's `Spawn`, with a channel for its Wayland connection
+//! and its roles in `MIKROS_SHELL_ROLE`. In greeter mode only the
+//! `greeter` part runs, which also gets the `Login` channel; in a user
+//! session every part of the shell and of the `file-picker` and
+//! `capture-picker` apps does.
 
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
@@ -51,23 +54,49 @@ fn yaml_error(path: &str, e: mikros_yaml::Error) -> Missing {
     Missing::Manifest(format!("{path}: line {}, column {}", e.line, e.column))
 }
 
-/// The ID of the package that provides the system role `role`.
-fn package_of(role: &str) -> Result<String, Missing> {
+/// The ID of the package that `shell.yaml` names under `key`.
+fn package_of(key: &str) -> Result<String, Missing> {
     let (path, text) = match std::fs::read(SHELL_OVERRIDE) {
         Ok(text) => (SHELL_OVERRIDE, text),
         Err(_) => (SHELL, std::fs::read(SHELL).map_err(|_| Missing::NoPackage)?),
     };
     let root = mikros_yaml::parse(&text).map_err(|e| yaml_error(path, e))?;
     let map = root.map().map_err(|e| yaml_error(path, e))?;
-    let package = map.get(role).ok_or(Missing::NoPackage)?;
+    let package = map.get(key).ok_or(Missing::NoPackage)?;
     package
         .string()
         .map(str::to_owned)
         .map_err(|e| yaml_error(path, e))
 }
 
+/// The packages whose parts run in a user session, each with why it
+/// cannot be found when it cannot: the shell, and the `file-picker` and
+/// `capture-picker` packages that `shell.yaml` names.
+pub fn session_packages() -> Vec<(&'static str, Result<String, Missing>)> {
+    ["shell", "file-picker", "capture-picker"]
+        .into_iter()
+        .filter_map(|key| match package_of(key) {
+            // A picker that no package provides leaves its role empty.
+            Err(Missing::NoPackage) if key != "shell" => None,
+            found => Some((key, found)),
+        })
+        .collect()
+}
+
 /// The part of the system app `package` that provides `role`.
 fn part_of(package: &str, role: &str) -> Result<Part, Missing> {
+    let mut found: Vec<Part> = parts_of(package)?
+        .into_iter()
+        .filter(|part| part.roles.iter().any(|r| r == role))
+        .collect();
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        _ => Err(Missing::NoPart),
+    }
+}
+
+/// Every part of the system app `package`.
+pub fn parts_of(package: &str) -> Result<Vec<Part>, Missing> {
     let root = PathBuf::from(SYSTEM_APPS).join(package);
     let path = root.join("manifest.yaml");
     let shown = path.display().to_string();
@@ -91,9 +120,6 @@ fn part_of(package: &str, role: &str) -> Result<Part, Missing> {
                 .map_err(|e| yaml_error(&shown, e))?,
             None => Vec::new(),
         };
-        if !roles.iter().any(|r| r == role) {
-            continue;
-        }
         let executable = part
             .get("executable")
             .ok_or_else(|| Missing::Manifest(format!("{shown}: a part without an executable")))?
@@ -115,10 +141,7 @@ fn part_of(package: &str, role: &str) -> Result<Part, Missing> {
             roles,
         });
     }
-    match found.len() {
-        1 => Ok(found.remove(0)),
-        _ => Err(Missing::NoPart),
-    }
+    Ok(found)
 }
 
 /// The part that provides the system role `role`.
