@@ -264,6 +264,9 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 [[package]]
 name = "compositor"
 version = "0.0.0"
+dependencies = [
+ "roxmltree",
+]
 
 [[package]]
 name = "console"
@@ -1304,6 +1307,15 @@ version = "0.0.0"
 dependencies = [
  "mikros-cli",
  "mikros-command",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
