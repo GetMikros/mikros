@@ -9,9 +9,9 @@ use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::interfaces::mikros::session::{
     Accounts, AccountsAsyncServer, AccountsAuthenticateResponse, AccountsCreateUserResponse,
-    AccountsDeleteUserResponse, AccountsListUsersResponse, AccountsRequest,
-    AccountsSetFullNameResponse, AccountsSetKindResponse, AccountsSetPasswordResponse, User,
-    UserKind,
+    AccountsDeleteUserResponse, AccountsGetLoginModeResponse, AccountsListUsersResponse,
+    AccountsRequest, AccountsSetFullNameResponse, AccountsSetKindResponse,
+    AccountsSetLoginModeResponse, AccountsSetPasswordResponse, User, UserKind,
 };
 use mikros_userdb::{Kind, Record};
 
@@ -25,15 +25,24 @@ pub async fn serve(
     let server = Rc::new(AccountsAsyncServer::new(end, service.reactor.clone()));
     let client = Rc::new(client);
     while let Ok(request) = server.next().await {
-        if let AccountsRequest::ListUsers(q, r) = request {
-            let _ = r.reply(server.server(), list(&service, q.after));
-            continue;
-        }
+        let request = match request {
+            AccountsRequest::ListUsers(q, r) => {
+                let _ = r.reply(server.server(), list(&service, q.after));
+                continue;
+            }
+            AccountsRequest::GetLoginMode(q, r) => {
+                let mode = service.login_mode(q.user);
+                let mode = mode.map(|mode| AccountsGetLoginModeResponse { mode });
+                let _ = r.reply(server.server(), mode);
+                continue;
+            }
+            other => other,
+        };
         let (service, server, client) = (service.clone(), server.clone(), client.clone());
         spawner.spawn(async move {
             let (v, s, c) = (&service, server.server(), &*client);
             let _ = match request {
-                AccountsRequest::ListUsers(..) => Ok(()),
+                AccountsRequest::ListUsers(..) | AccountsRequest::GetLoginMode(..) => Ok(()),
                 AccountsRequest::Authenticate(q, r) => {
                     let password = Secret(q.password);
                     let user = v.authenticate(c, &q.name, password).await;
@@ -62,6 +71,10 @@ pub async fn serve(
                 AccountsRequest::SetFullName(q, r) => {
                     let set = v.set_full_name(c, q.user, &q.full_name).await;
                     r.reply(s, set.map(|()| AccountsSetFullNameResponse {}))
+                }
+                AccountsRequest::SetLoginMode(q, r) => {
+                    let set = v.set_login_mode(c, q.user, q.mode).await;
+                    r.reply(s, set.map(|()| AccountsSetLoginModeResponse {}))
                 }
             };
         });

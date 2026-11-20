@@ -40,7 +40,7 @@ use mikros_rt::interfaces::mikros::service::{
 };
 use mikros_rt::interfaces::mikros::session::{
     Accounts, AccountsAsyncClient, AccountsClient, Authorization, AuthorizationAsyncServer,
-    AuthorizationAuthorizeResponse, AuthorizationRequest, UserKind,
+    AuthorizationAuthorizeResponse, AuthorizationRequest, LoginMode, UserKind,
 };
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
@@ -170,6 +170,12 @@ fn expect(condition: bool, code: i64) -> Result<(), i64> {
     if condition { Ok(()) } else { Err(code) }
 }
 
+fn login_mode(accounts: &AccountsClient, user: u32) -> Reply<LoginMode> {
+    accounts
+        .get_login_mode(user, FOREVER)
+        .map(|r| r.map(|r| r.mode))
+}
+
 fn authenticate(accounts: &AccountsClient, name: &str, password: &str) -> Reply<u32> {
     accounts
         .authenticate(name.into(), password.into(), FOREVER)
@@ -292,6 +298,20 @@ fn probe(a: &AccountsClient) -> Result<(), i64> {
         40,
     )?;
     expect(now() - start >= SECOND, 41)?;
+    // Login modes: the desktop for the users that xtask made, and
+    // another user's changed with admin.accounts.manage.
+    expect(
+        matches!(login_mode(a, 1001), Ok(Ok(LoginMode::Desktop))),
+        46,
+    )?;
+    expect(ok(a.set_login_mode(1001, LoginMode::Console, FOREVER)), 47)?;
+    expect(
+        matches!(login_mode(a, 1001), Ok(Ok(LoginMode::Console))),
+        48,
+    )?;
+    expect(fails(login_mode(a, 5000), Status::NotFound), 49)?;
+    let unknown = a.set_login_mode(5000, LoginMode::Console, FOREVER);
+    expect(fails(unknown, Status::NotFound), 50)?;
     Ok(())
 }
 
@@ -370,7 +390,15 @@ fn guest(a: &AccountsClient) -> Result<(), i64> {
         "pw".into(),
         FOREVER,
     );
-    expect(fails(create, denied), 18)
+    expect(fails(create, denied), 18)?;
+    // Anyone reads a login mode; only the user or with
+    // admin.accounts.manage changes it.
+    expect(
+        matches!(login_mode(a, 1000), Ok(Ok(LoginMode::Desktop))),
+        19,
+    )?;
+    let other = a.set_login_mode(1000, LoginMode::Console, FOREVER);
+    expect(fails(other, denied), 20)
 }
 
 fn now() -> i64 {

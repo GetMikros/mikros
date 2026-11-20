@@ -5,6 +5,9 @@ using mikros.base;
 
 type UserKind = enum : u32 { STANDARD = 1; ADMIN = 2; };
 
+// MIKSPEC-0056.R17
+type LoginMode = enum : u32 { CONSOLE = 1; DESKTOP = 2; };
+
 type User = struct {
     id u32;
     name string<32>;
@@ -22,4 +25,7 @@ protocol Accounts {
                    new_password string<1024>) -> () error base.Status;
     @6 SetKind(user u32, kind UserKind) -> () error base.Status;
     @7 SetFullName(user u32, full_name string<128>) -> () error base.Status;
+    // MIKSPEC-0056.R17
+    @8 GetLoginMode(user u32) -> (mode LoginMode) error base.Status;
+    @9 SetLoginMode(user u32, mode LoginMode) -> () error base.Status;
 };

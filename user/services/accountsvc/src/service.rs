@@ -14,7 +14,7 @@ use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Error, Node, NodeAsyncClient, OpenFlags, Rights};
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
-use mikros_rt::interfaces::mikros::session::UserKind;
+use mikros_rt::interfaces::mikros::session::{LoginMode, UserKind};
 use mikros_rt::objects;
 use mikros_userdb::{Attempts, Kind, LAST_ID, Refusal, Users, hash, valid_name};
 
@@ -338,6 +338,42 @@ impl Service {
         let _changing = self.changes.lock().await;
         let mut users = self.store.users().clone();
         users.set_full_name(user, full_name).map_err(status)?;
+        self.save(users).await
+    }
+
+    /// The login mode of `user`.
+    pub fn login_mode(&self, user: u32) -> Result<LoginMode, Status> {
+        let users = self.store.users();
+        let record = users.get(user).ok_or(Status::NotFound)?;
+        Ok(match record.login {
+            mikros_userdb::LoginMode::Console => LoginMode::Console,
+            mikros_userdb::LoginMode::Desktop => LoginMode::Desktop,
+        })
+    }
+
+    /// Sets the login mode of `user`, which needs `admin.accounts.manage`
+    /// unless `client` runs as that user.
+    pub async fn set_login_mode(
+        &self,
+        client: &ClientIdentity,
+        user: u32,
+        mode: LoginMode,
+    ) -> Result<(), Status> {
+        let mode = match mode {
+            LoginMode::Console => mikros_userdb::LoginMode::Console,
+            LoginMode::Desktop => mikros_userdb::LoginMode::Desktop,
+            LoginMode::Unknown(_) => return Err(Status::InvalidArgs),
+        };
+        if self.store.users().get(user).is_none() {
+            return Err(Status::NotFound);
+        }
+        let reason = format!("Change the login mode of the user {user}");
+        if client.user != user && !self.may_manage(client, reason).await {
+            return Err(Status::AccessDenied);
+        }
+        let _changing = self.changes.lock().await;
+        let mut users = self.store.users().clone();
+        users.set_login_mode(user, mode).map_err(status)?;
         self.save(users).await
     }
 

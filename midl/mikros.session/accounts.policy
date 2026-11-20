@@ -7,3 +7,5 @@ Accounts.DeleteUser: permission:admin.accounts.manage
 Accounts.SetPassword: data-dependent:accountsvc::service::Service::set_password
 Accounts.SetKind: permission:admin.accounts.manage
 Accounts.SetFullName: data-dependent:accountsvc::service::Service::set_full_name
+Accounts.GetLoginMode: public
+Accounts.SetLoginMode: data-dependent:accountsvc::service::Service::set_login_mode
