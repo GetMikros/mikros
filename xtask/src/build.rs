@@ -221,6 +221,24 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 let program = component_build(component, kind)?;
                 members.extend(component.members(kind, &program)?);
             }
+            if tests {
+                // Two system tests in C, which selftest runs as it runs
+                // the others: the C bindings of the MIDL libraries, built
+                // without warnings.
+                let strict = ["-Wall".to_string(), "-Wextra".into(), "-Werror".into()];
+                for (name, source, linking) in [
+                    ("midl-c", "user/tests/midl-c/midl.c", Linking::Static),
+                    (
+                        "midl-cxx",
+                        "user/tests/midl-c/headers.cpp",
+                        Linking::Dynamic,
+                    ),
+                ] {
+                    let program = c_build(name, &[source], linking, &strict)?;
+                    println!("built    {}", program.display());
+                    only_tests.push((format!("system/bin/tests/{name}"), program));
+                }
+            }
             // The system fonts and the fontconfig configuration that names
             // them as the defaults.
             for file in crate::fonts::FILES {
