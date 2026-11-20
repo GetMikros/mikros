@@ -34,6 +34,10 @@
 #   VK_KHR_external_semaphore_fd.
 # - 0009: the Wayland platform does without wayland-server on Mikros,
 #   which has the client library alone.
+# - 0010: swapchain images of the image type of Mikros are linear, with
+#   their memory exported as an export token, and their acquire and
+#   release points on kernel timelines exported from timeline
+#   semaphores, whose release points the CPU waits for.
 
 [source]
 url = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"

@@ -1,0 +1,389 @@
+diff -ruN a/src/vulkan/wsi/meson.build b/src/vulkan/wsi/meson.build
+--- a/src/vulkan/wsi/meson.build
++++ b/src/vulkan/wsi/meson.build
+@@ -27,6 +27,11 @@
+   files_vulkan_wsi += wp_files['color-management-v1']
+ endif
+ 
++# Images exported as export tokens, with kernel timelines.
++if host_machine.system() == 'mikros'
++  files_vulkan_wsi += files('wsi_common_mikros.c')
++endif
++
+ if with_platform_windows
+   files_vulkan_wsi += files('wsi_common_win32.cpp')
+   platform_deps += dep_dxheaders
+diff -ruN a/src/vulkan/wsi/wsi_common.h b/src/vulkan/wsi/wsi_common.h
+--- a/src/vulkan/wsi/wsi_common.h
++++ b/src/vulkan/wsi/wsi_common.h
+@@ -258,6 +258,11 @@
+    WSI_CB(WaitSemaphores);
+ #undef WSI_CB
+ 
++   /* vkGetMemoryHandleMIKROS and vkGetSemaphoreHandleMIKROS on Mikros,
++    * whatever the platforms a file is built for. */
++   PFN_vkVoidFunction GetMemoryHandleMIKROS;
++   PFN_vkVoidFunction GetSemaphoreHandleMIKROS;
++
+     struct wsi_interface *                  wsi[VK_ICD_WSI_PLATFORM_MAX];
+ };
+ 
+diff -ruN a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -49,6 +49,7 @@
+    WSI_IMAGE_TYPE_DRM,
+    WSI_IMAGE_TYPE_DXGI,
+    WSI_IMAGE_TYPE_METAL,
++   WSI_IMAGE_TYPE_MIKROS,
+ };
+ 
+ struct wsi_base_image_params {
+@@ -73,6 +74,12 @@
+    const uint64_t *const *modifiers;
+ };
+ 
++struct wsi_mikros_image_params {
++   struct wsi_base_image_params base;
++   /* See wsi_image_info.explicit_sync. */
++   bool explicit_sync;
++};
++
+ struct wsi_dxgi_image_params {
+    struct wsi_base_image_params base;
+    bool storage_image;
+@@ -191,6 +198,8 @@
+    int dma_buf_fd;
+ #endif
+    void *cpu_map;
++   /* On Mikros, the export token of the image's memory. */
++   uint32_t mikros_token;
+ 
+    VkQueryPool query_pool;
+    VkCommandBuffer *timestamp_cmd_buffers;
+@@ -506,6 +515,35 @@
+ 
+ #endif
+ 
++VkResult
++wsi_mikros_configure_image(const struct wsi_swapchain *chain,
++                           const VkSwapchainCreateInfoKHR *pCreateInfo,
++                           const struct wsi_mikros_image_params *params,
++                           struct wsi_image_info *info);
++
++VkResult
++wsi_create_image_explicit_sync_mikros(const struct wsi_swapchain *chain,
++                                      struct wsi_image *image);
++
++void
++wsi_destroy_image_explicit_sync_mikros(const struct wsi_swapchain *chain,
++                                       struct wsi_image *image);
++
++/* Closes the export token of the image's memory. */
++void
++wsi_mikros_finish_image(struct wsi_image *image);
++
++/* A duplicate of the kernel handle `handle`, or 0. */
++uint32_t
++wsi_mikros_duplicate(uint32_t handle);
++
++VkResult
++wsi_mikros_wait_for_explicit_sync_release(struct wsi_swapchain *chain,
++                                          uint32_t image_count,
++                                          struct wsi_image **images,
++                                          uint64_t rel_timeout_ns,
++                                          uint32_t *image_index);
++
+ struct wsi_interface {
+    VkResult (*get_support)(VkIcdSurfaceBase *surface,
+                            struct wsi_device *wsi_device,
+diff -ruN a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -185,6 +185,10 @@
+ 
+    list_inithead(&wsi->hotplug_fences);
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   wsi->GetMemoryHandleMIKROS = proc_addr(pdevice, "vkGetMemoryHandleMIKROS");
++   wsi->GetSemaphoreHandleMIKROS = proc_addr(pdevice, "vkGetSemaphoreHandleMIKROS");
++#endif
+ #define WSI_GET_CB(func) \
+    wsi->func = (PFN_vk##func)proc_addr(pdevice, "vk" #func)
+    WSI_GET_CB(AllocateMemory);
+@@ -423,6 +427,10 @@
+       return wsi_dxgi_image_needs_blit(wsi, dxgi_params, device);
+    }
+ #endif
++#ifdef VK_USE_PLATFORM_MIKROS
++   case WSI_IMAGE_TYPE_MIKROS:
++      return WSI_SWAPCHAIN_NO_BLIT;
++#endif
+ #if defined(VK_USE_PLATFORM_METAL_EXT)
+    case WSI_IMAGE_TYPE_METAL: {
+       /* Due to mismatches between WSI and Metal, we require rendering into an
+@@ -479,6 +487,13 @@
+       return wsi_metal_configure_image(chain, pCreateInfo, metal_params, info);
+    }
+ #endif
++#ifdef VK_USE_PLATFORM_MIKROS
++   case WSI_IMAGE_TYPE_MIKROS: {
++      const struct wsi_mikros_image_params *mikros_params =
++         container_of(params, const struct wsi_mikros_image_params, base);
++      return wsi_mikros_configure_image(chain, pCreateInfo, mikros_params, info);
++   }
++#endif
+    default:
+       UNREACHABLE("Invalid image type");
+    }
+@@ -915,6 +930,10 @@
+       result = wsi_create_image_explicit_sync_drm(chain, image);
+       if (result != VK_SUCCESS)
+          goto fail;
++#elif defined(VK_USE_PLATFORM_MIKROS)
++      result = wsi_create_image_explicit_sync_mikros(chain, image);
++      if (result != VK_SUCCESS)
++         goto fail;
+ #else
+       result = VK_ERROR_FEATURE_NOT_PRESENT;
+       goto fail;
+@@ -1029,8 +1048,13 @@
+    if (image->explicit_sync[WSI_ES_ACQUIRE].semaphore) {
+ #if HAVE_LIBDRM
+       wsi_destroy_image_explicit_sync_drm(chain, image);
++#elif defined(VK_USE_PLATFORM_MIKROS)
++      wsi_destroy_image_explicit_sync_mikros(chain, image);
+ #endif
+    }
++#ifdef VK_USE_PLATFORM_MIKROS
++   wsi_mikros_finish_image(image);
++#endif
+ 
+    if (image->cpu_map != NULL) {
+       wsi->UnmapMemory(chain->device, image->blit.buffer != VK_NULL_HANDLE ?
+diff -ruN a/src/vulkan/wsi/wsi_common_mikros.c b/src/vulkan/wsi/wsi_common_mikros.c
+--- /dev/null
++++ b/src/vulkan/wsi/wsi_common_mikros.c
+@@ -0,0 +1,222 @@
++/*
++ * Swapchain images on Mikros: linear images whose memory is exported as
++ * an export token, and acquire and release points on kernel timelines,
++ * exported from timeline semaphores, which the CPU waits on with the
++ * timeline system calls.
++ */
++
++#include "wsi_common_private.h"
++
++#include <mikros/syscalls.h>
++
++#include "drm-uapi/drm_fourcc.h"
++#include "util/os_time.h"
++#include "vk_device.h"
++#include "vk_util.h"
++
++/* The rights that a duplicate keeps: all of the original's. */
++#define SAME_RIGHTS (1u << 31)
++#define STATUS_TIMED_OUT (-21)
++
++static VkResult
++wsi_mikros_create_image_mem(const struct wsi_swapchain *chain,
++                            const struct wsi_image_info *info,
++                            struct wsi_image *image)
++{
++   const struct wsi_device *wsi = chain->wsi;
++   VkResult result;
++
++   VkMemoryRequirements reqs;
++   wsi->GetImageMemoryRequirements(chain->device, image->image, &reqs);
++
++   const VkExportMemoryAllocateInfo export_info = {
++      .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
++      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS,
++   };
++   const VkMemoryDedicatedAllocateInfo dedicated = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
++      .pNext = &export_info,
++      .image = image->image,
++   };
++   const VkMemoryAllocateInfo allocate = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++      .pNext = &dedicated,
++      .allocationSize = reqs.size,
++      .memoryTypeIndex = wsi_select_device_memory_type(wsi, reqs.memoryTypeBits),
++   };
++   result = wsi->AllocateMemory(chain->device, &allocate, &chain->alloc, &image->memory);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const VkMemoryGetHandleInfoMIKROS get = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_GET_HANDLE_INFO_MIKROS,
++      .memory = image->memory,
++      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS,
++   };
++   PFN_vkGetMemoryHandleMIKROS get_handle =
++      (PFN_vkGetMemoryHandleMIKROS)wsi->GetMemoryHandleMIKROS;
++   result = get_handle(chain->device, &get, &image->mikros_token);
++   if (result != VK_SUCCESS)
++      return result;
++
++   const VkImageSubresource subresource = {
++      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++   };
++   VkSubresourceLayout layout;
++   wsi->GetImageSubresourceLayout(chain->device, image->image, &subresource, &layout);
++   image->num_planes = 1;
++   image->sizes[0] = reqs.size;
++   image->row_pitches[0] = layout.rowPitch;
++   image->offsets[0] = layout.offset;
++   image->drm_modifier = DRM_FORMAT_MOD_LINEAR;
++   return VK_SUCCESS;
++}
++
++VkResult
++wsi_mikros_configure_image(const struct wsi_swapchain *chain,
++                           const VkSwapchainCreateInfoKHR *pCreateInfo,
++                           const struct wsi_mikros_image_params *params,
++                           struct wsi_image_info *info)
++{
++   VkResult result =
++      wsi_configure_image(chain, pCreateInfo, VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS,
++                          info);
++   if (result != VK_SUCCESS)
++      return result;
++
++   info->create.tiling = VK_IMAGE_TILING_LINEAR;
++   info->explicit_sync = params->explicit_sync;
++   info->create_mem = wsi_mikros_create_image_mem;
++   return VK_SUCCESS;
++}
++
++VkResult
++wsi_create_image_explicit_sync_mikros(const struct wsi_swapchain *chain,
++                                      struct wsi_image *image)
++{
++   const struct wsi_device *wsi = chain->wsi;
++   PFN_vkGetSemaphoreHandleMIKROS get_handle =
++      (PFN_vkGetSemaphoreHandleMIKROS)wsi->GetSemaphoreHandleMIKROS;
++
++   for (uint32_t i = 0; i < WSI_ES_COUNT; i++) {
++      const VkExportSemaphoreCreateInfo export_info = {
++         .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
++         .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS,
++      };
++      const VkSemaphoreTypeCreateInfo type_info = {
++         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
++         .pNext = &export_info,
++         .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
++      };
++      const VkSemaphoreCreateInfo create = {
++         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
++         .pNext = &type_info,
++      };
++      VkResult result = wsi->CreateSemaphore(chain->device, &create, &chain->alloc,
++                                             &image->explicit_sync[i].semaphore);
++      if (result != VK_SUCCESS)
++         return result;
++
++      const VkSemaphoreGetHandleInfoMIKROS get = {
++         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_HANDLE_INFO_MIKROS,
++         .semaphore = image->explicit_sync[i].semaphore,
++         .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS,
++      };
++      result = get_handle(chain->device, &get, &image->explicit_sync[i].handle);
++      if (result != VK_SUCCESS)
++         return result;
++   }
++   return VK_SUCCESS;
++}
++
++void
++wsi_destroy_image_explicit_sync_mikros(const struct wsi_swapchain *chain,
++                                       struct wsi_image *image)
++{
++   const struct wsi_device *wsi = chain->wsi;
++
++   for (uint32_t i = 0; i < WSI_ES_COUNT; i++) {
++      if (image->explicit_sync[i].handle != 0) {
++         mikros_handle_close(image->explicit_sync[i].handle);
++         image->explicit_sync[i].handle = 0;
++      }
++      if (image->explicit_sync[i].semaphore != VK_NULL_HANDLE) {
++         wsi->DestroySemaphore(chain->device, image->explicit_sync[i].semaphore, &chain->alloc);
++         image->explicit_sync[i].semaphore = VK_NULL_HANDLE;
++      }
++   }
++}
++
++void
++wsi_mikros_finish_image(struct wsi_image *image)
++{
++   if (image->mikros_token != 0) {
++      mikros_handle_close(image->mikros_token);
++      image->mikros_token = 0;
++   }
++}
++
++uint32_t
++wsi_mikros_duplicate(uint32_t handle)
++{
++   mikros_handle_t copy = 0;
++   if (mikros_handle_duplicate(handle, SAME_RIGHTS, &copy) != 0)
++      return 0;
++   return copy;
++}
++
++/* Whether the compositor has reached the release point of `image`, which
++ * is free when it was never presented. */
++static bool
++released(const struct wsi_image *image)
++{
++   const struct wsi_image_explicit_sync_timeline *release =
++      &image->explicit_sync[WSI_ES_RELEASE];
++   uint64_t value = 0;
++   return release->timeline == 0 ||
++          (mikros_timeline_get(release->handle, &value) == 0 && value >= release->timeline);
++}
++
++VkResult
++wsi_mikros_wait_for_explicit_sync_release(struct wsi_swapchain *chain,
++                                          uint32_t image_count,
++                                          struct wsi_image **images,
++                                          uint64_t rel_timeout_ns,
++                                          uint32_t *image_index)
++{
++   const uint64_t deadline = os_time_get_absolute_timeout(rel_timeout_ns);
++
++   for (;;) {
++      /* An image that is free already, or else the one presented longest
++       * ago, which the compositor is likely to release first. */
++      struct wsi_image *oldest = NULL;
++      uint32_t oldest_index = 0;
++      for (uint32_t i = 0; i < image_count; i++) {
++         if (images[i]->acquired)
++            continue;
++         if (released(images[i])) {
++            *image_index = i;
++            return VK_SUCCESS;
++         }
++         if (oldest == NULL || images[i]->present_serial < oldest->present_serial) {
++            oldest = images[i];
++            oldest_index = i;
++         }
++      }
++      if (oldest == NULL || rel_timeout_ns == 0)
++         return rel_timeout_ns == 0 ? VK_NOT_READY : VK_TIMEOUT;
++
++      const struct wsi_image_explicit_sync_timeline *release =
++         &oldest->explicit_sync[WSI_ES_RELEASE];
++      int64_t until = deadline > INT64_MAX ? INT64_MAX : (int64_t)deadline;
++      mikros_status_t s = mikros_timeline_wait(release->handle, release->timeline, until);
++      if (s == 0) {
++         *image_index = oldest_index;
++         return VK_SUCCESS;
++      }
++      if (s != STATUS_TIMED_OUT)
++         return VK_ERROR_DEVICE_LOST;
++      if (os_time_get_nano() >= deadline)
++         return VK_TIMEOUT;
++   }
++}
