@@ -154,6 +154,26 @@ impl Seats {
         }
     }
 
+    /// Makes the text console the owner on `screen` while it asks a
+    /// question, when the compositor owns the seat: whether it did
+    /// (MIKSPEC-0057.R37).
+    pub async fn lend_to_console(&self, screen: u8) -> bool {
+        if self.owner.get() != Owner::Compositor {
+            return false;
+        }
+        self.give(Owner::Console).await;
+        let _ = self.console.set_screen(screen);
+        true
+    }
+
+    /// Gives the seat back to the compositor after `lend_to_console`,
+    /// unless the compositor has exited or the seat changed owner since.
+    pub async fn give_back(&self) {
+        if self.owner.get() == Owner::Console && self.compositor.borrow().is_some() {
+            self.give(Owner::Compositor).await;
+        }
+    }
+
     /// The screen of text console `console`.
     pub fn console_screen(&self, console: u8) -> u8 {
         console + u8::from(self.desktop)

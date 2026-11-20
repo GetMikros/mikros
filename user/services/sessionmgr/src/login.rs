@@ -7,7 +7,7 @@
 //! the console a new random number, with which it calls `LoginHandover`
 //! within 30 seconds (MIKSPEC-0057.R40).
 
-use crate::authorize::Requests;
+use crate::authorize::{Answerer, Requests};
 use crate::spawn::{block, standard};
 use crate::wait::{Either, Slot, select};
 use crate::{SECOND, now};
@@ -450,17 +450,20 @@ pub async fn serve(
             TextLoginRequest::Answer(q, r) => {
                 let (requests, server) = (requests.clone(), server.clone());
                 spawner.spawn(async move {
-                    let answered = requests.answer(q.request, q.name, q.password).await;
+                    let answerer = Answerer::TextConsole;
+                    let answered = requests
+                        .answer(answerer, q.request, q.name, q.password)
+                        .await;
                     let reply = answered.map(|()| TextLoginAnswerResponse {});
                     let _ = r.reply(server.server(), reply);
                 });
             }
             TextLoginRequest::AnswerAsk(q, r) => {
-                let answered = requests.answer_ask(q.request, q.allowed);
+                let answered = requests.answer_ask(Answerer::TextConsole, q.request, q.allowed);
                 let _ = r.reply(s, answered.map(|()| TextLoginAnswerAskResponse {}));
             }
             TextLoginRequest::Cancel(q, r) => {
-                let cancelled = requests.cancel(q.request);
+                let cancelled = requests.cancel(Answerer::TextConsole, q.request);
                 let _ = r.reply(s, cancelled.map(|()| TextLoginCancelResponse {}));
             }
         }

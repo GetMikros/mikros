@@ -2,12 +2,14 @@
 //! `mikros.session.Authorization`, which the session manager serves to
 //! the permission broker alone, for the clients that ask the broker for
 //! `admin` permissions, and `mikros.permissions.Prompter`, with which the
-//! broker asks it for `user` permissions (MIKSPEC-0057.R30). It asks
-//! through the authorization screen of the text console that the
-//! client's login session runs on, with `OnAuthorize` or `OnAsk`, one
-//! request per console at a time, and ends the request on `Answer`,
-//! `AnswerAsk` or `Cancel`, after 60 seconds, or when the client
-//! terminates (MIKSPEC-0057.R33).
+//! broker asks it for `user` permissions (MIKSPEC-0057.R30). It asks on
+//! the front end of the client's login session, with `OnAuthorize` or
+//! `OnAsk`: the authorization screen of the text console that the session
+//! runs on, which owns the seat while it asks, or, for the desktop's
+//! login session, its compositor's `Session` channel. It asks one request
+//! per front end at a time, and ends the request on `Answer`,
+//! `AnswerAsk` or `Cancel` from that front end, after 60 seconds, or
+//! when the client terminates (MIKSPEC-0057.R37).
 
 use crate::wait::{Either, Slot, Waiters, select};
 use crate::{SECOND, now};
@@ -29,7 +31,7 @@ use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{
     AccountsAsyncClient, Authorization, AuthorizationAsyncServer, AuthorizationAuthorizeResponse,
-    AuthorizationRequest, TextLoginAsyncServer, User, UserKind,
+    AuthorizationRequest, SessionAsyncServer, TextLoginAsyncServer, User, UserKind,
 };
 
 /// How long a request waits for an answer, and how often its task looks
@@ -48,10 +50,103 @@ enum Outcome {
     Cancelled,
 }
 
-/// An open request: its console, and the slot of its outcome, which its
+/// Where a request is asked: on a text console, through `TextLogin`, or
+/// on the desktop, through its compositor's `Session`.
+#[derive(Clone)]
+pub enum FrontEnd {
+    Console(u8, Rc<TextLoginAsyncServer>),
+    Desktop(Rc<SessionAsyncServer>),
+}
+
+/// The front end of a request, as answers name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Front {
+    Console(u8),
+    Desktop,
+}
+
+/// Who answers: the text console, for each of its consoles, or the
+/// desktop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answerer {
+    TextConsole,
+    Desktop,
+}
+
+impl Answerer {
+    /// Whether it may answer the requests of `front`.
+    fn answers(self, front: Front) -> bool {
+        matches!(
+            (self, front),
+            (Answerer::TextConsole, Front::Console(_)) | (Answerer::Desktop, Front::Desktop)
+        )
+    }
+}
+
+impl FrontEnd {
+    fn front(&self) -> Front {
+        match self {
+            FrontEnd::Console(console, _) => Front::Console(*console),
+            FrontEnd::Desktop(_) => Front::Desktop,
+        }
+    }
+
+    /// Sends `OnAuthorize`: whether it was sent.
+    fn authorize(
+        &self,
+        request: u32,
+        app_id: String,
+        via: String,
+        action: String,
+        reason: String,
+        name: String,
+    ) -> bool {
+        match self {
+            FrontEnd::Console(console, server) => server
+                .server()
+                .send_on_authorize(request, *console, app_id, via, action, reason, name)
+                .is_ok(),
+            FrontEnd::Desktop(server) => server
+                .server()
+                .send_on_authorize(request, app_id, via, action, reason, name)
+                .is_ok(),
+        }
+    }
+
+    /// Sends `OnAsk`: whether it was sent.
+    fn ask(
+        &self,
+        request: u32,
+        app_id: String,
+        via: String,
+        permission: String,
+        reason: String,
+    ) -> bool {
+        match self {
+            FrontEnd::Console(console, server) => server
+                .server()
+                .send_on_ask(request, *console, app_id, via, permission, reason)
+                .is_ok(),
+            FrontEnd::Desktop(server) => server
+                .server()
+                .send_on_ask(request, app_id, via, permission, reason)
+                .is_ok(),
+        }
+    }
+
+    /// Sends `OnAuthorizeEnded`.
+    fn ended(&self, request: u32) {
+        let _ = match self {
+            FrontEnd::Console(_, server) => server.server().send_on_authorize_ended(request),
+            FrontEnd::Desktop(server) => server.server().send_on_authorize_ended(request),
+        };
+    }
+}
+
+/// An open request: its front end, and the slot of its outcome, which its
 /// task waits on.
 struct Open {
-    console: u8,
+    front: Front,
     outcome: Rc<Slot<Outcome>>,
     /// Whether it is an `OnAsk`, which `AnswerAsk` answers, rather than
     /// an `OnAuthorize`, which `Answer` does.
@@ -105,11 +200,27 @@ impl Requests {
         }
     }
 
-    /// Checks `name` and `password` for open request `request`, once:
-    /// fails with `NOT_FOUND` for a request that is not open, and with
-    /// `ACCESS_DENIED` unless they are an administrator's.
-    pub async fn answer(&self, request: u32, name: String, password: String) -> Result<(), Status> {
-        if !self.open.borrow().get(&request).is_some_and(|o| !o.ask) {
+    /// Whether `answerer` may answer the open request `request` of the
+    /// kind `ask`.
+    fn answerable(&self, answerer: Answerer, request: u32, ask: bool) -> bool {
+        self.open
+            .borrow()
+            .get(&request)
+            .is_some_and(|o| o.ask == ask && answerer.answers(o.front))
+    }
+
+    /// Checks `name` and `password` from `answerer` for open request
+    /// `request`, once: fails with `NOT_FOUND` for a request that is not
+    /// open or not its to answer, and with `ACCESS_DENIED` unless they
+    /// are an administrator's.
+    pub async fn answer(
+        &self,
+        answerer: Answerer,
+        request: u32,
+        name: String,
+        password: String,
+    ) -> Result<(), Status> {
+        if !self.answerable(answerer, request, false) {
             return Err(Status::NotFound);
         }
         let admin = match self.accounts.authenticate(name, password).await {
@@ -124,17 +235,31 @@ impl Requests {
         admin.map(drop).ok_or(Status::AccessDenied)
     }
 
-    /// Answers open `OnAsk` request `request` with `allowed`, once: fails
-    /// with `NOT_FOUND` for one that is not open or not an `OnAsk`.
-    pub fn answer_ask(&self, request: u32, allowed: bool) -> Result<(), Status> {
-        if !self.open.borrow().get(&request).is_some_and(|o| o.ask) {
+    /// Answers open `OnAsk` request `request` with `allowed` from
+    /// `answerer`, once: fails with `NOT_FOUND` for one that is not open,
+    /// not an `OnAsk` or not its to answer.
+    pub fn answer_ask(
+        &self,
+        answerer: Answerer,
+        request: u32,
+        allowed: bool,
+    ) -> Result<(), Status> {
+        if !self.answerable(answerer, request, true) {
             return Err(Status::NotFound);
         }
         self.give(request, Outcome::Asked(allowed))
     }
 
-    /// Ends open request `request` without an answer.
-    pub fn cancel(&self, request: u32) -> Result<(), Status> {
+    /// Ends open request `request` of `answerer` without an answer.
+    pub fn cancel(&self, answerer: Answerer, request: u32) -> Result<(), Status> {
+        let ours = self
+            .open
+            .borrow()
+            .get(&request)
+            .is_some_and(|o| answerer.answers(o.front));
+        if !ours {
+            return Err(Status::NotFound);
+        }
         self.give(request, Outcome::Cancelled)
     }
 
@@ -154,9 +279,9 @@ impl Requests {
         self.freed.wake_all();
     }
 
-    /// Whether `console` has an open request.
-    fn busy(&self, console: u8) -> bool {
-        self.open.borrow().values().any(|o| o.console == console)
+    /// Whether `front` has an open request.
+    fn busy(&self, front: Front) -> bool {
+        self.open.borrow().values().any(|o| o.front == front)
     }
 
     /// The administrator who elevated the process with the kernel object
@@ -202,18 +327,14 @@ impl Requests {
         self.ask(client, via, action, reason).await
     }
 
-    /// The text console of the client's login session, and the
-    /// `TextLogin` server to ask there, or none when it runs in no text
-    /// console's session or when the process that the launcher describes
-    /// is not the one that `client` names: its kernel object ID, user, app
-    /// ID and portable checksum must all be the client's, so that a
-    /// question names the app of the process that holds the answer
-    /// (MIKSPEC-0057.R33).
-    pub async fn console_of(
-        &self,
-        client: &ClientIdentity,
-        what: &str,
-    ) -> Option<(u8, Rc<TextLoginAsyncServer>)> {
+    /// The front end of the client's login session: its text console,
+    /// or the desktop when it runs in the desktop's login session; none
+    /// when it runs in neither, or when the process that the launcher
+    /// describes is not the one that `client` names: its kernel object
+    /// ID, user, app ID and portable checksum must all be the client's,
+    /// so that a question names the app of the process that holds the
+    /// answer (MIKSPEC-0057.R37).
+    pub async fn front_of(&self, client: &ClientIdentity, what: &str) -> Option<FrontEnd> {
         let pid = client.pid;
         let info = match self.launcher.get_info(pid).await {
             Ok(Ok(info)) => info.info,
@@ -229,33 +350,43 @@ impl Requests {
             );
             return None;
         }
+        let session = info.login_session;
         let console = self
             .sessions
             .borrow()
             .iter()
-            .find(|&(_, &s)| s != 0 && s == info.login_session)
+            .find(|&(_, &s)| s != 0 && s == session)
             .map(|(&c, _)| c);
-        let (Some(console), Some(server)) = (console, self.text_login.borrow().clone()) else {
-            mikros_rt::log!(
-                Info,
-                "sessionmgr: {what}: process {pid} runs on no text console; refused"
-            );
-            return None;
-        };
-        Some((console, server))
+        if let (Some(console), Some(server)) = (console, self.text_login.borrow().clone()) {
+            return Some(FrontEnd::Console(console, server));
+        }
+        // The desktop's login session has its compositor's process ID.
+        let desktop = self
+            .desktops
+            .linked
+            .borrow()
+            .is_some_and(|l| session != 0 && l.leader == Some(session));
+        if let (true, Some(server)) = (desktop, self.desktops.session.borrow().clone()) {
+            return Some(FrontEnd::Desktop(server));
+        }
+        mikros_rt::log!(
+            Info,
+            "sessionmgr: {what}: process {pid} runs in no session with a front end; refused"
+        );
+        None
     }
 
-    /// Opens a request on `console` of the kind `ask`, once the console
+    /// Opens a request on `front` of the kind `ask`, once the front end
     /// has no other open request, and its number and the slot of its
     /// outcome.
-    async fn open(&self, console: u8, ask: bool) -> (u32, Rc<Slot<Outcome>>) {
-        // One request per console: the next starts once it is free.
-        self.freed.until(|| !self.busy(console)).await;
+    async fn open(&self, front: Front, ask: bool) -> (u32, Rc<Slot<Outcome>>) {
+        // One request per front end: the next starts once it is free.
+        self.freed.until(|| !self.busy(front)).await;
         let request = self.next.get();
         self.next.set(request.wrapping_add(1).max(1));
         let slot = Rc::new(Slot::default());
         let open = Open {
-            console,
+            front,
             outcome: slot.clone(),
             ask,
         };
@@ -263,16 +394,38 @@ impl Requests {
         (request, slot)
     }
 
+    /// For a request on a text console, makes the console the seat's
+    /// owner on that console's screen while the compositor owns it:
+    /// whether it did, so that the seat goes back once the request ended.
+    async fn lend_seat(&self, front: &FrontEnd) -> bool {
+        let FrontEnd::Console(console, _) = front else {
+            return false;
+        };
+        let seats = self.seats.borrow().clone();
+        match seats {
+            Some(seats) => seats.lend_to_console(seats.console_screen(*console)).await,
+            None => false,
+        }
+    }
+
+    /// Gives the seat back to the compositor after `lend_seat` lent it.
+    async fn return_seat(&self, lent: bool) {
+        let seats = self.seats.borrow().clone();
+        if let (true, Some(seats)) = (lent, seats) {
+            seats.give_back().await;
+        }
+    }
+
     /// The outcome of open request `request` once it was sent with
     /// `sent`: none after 60 seconds, and `Err` when the client
-    /// terminated first. The request is closed, and the console told
+    /// terminated first. The request is closed, and the front end told
     /// that it ended unless it ended there.
     async fn wait(
         &self,
         client: &ClientIdentity,
         request: u32,
         slot: &Slot<Outcome>,
-        server: &TextLoginAsyncServer,
+        front: &FrontEnd,
         sent: bool,
     ) -> Result<Option<Outcome>, ()> {
         let deadline = now() + TIMEOUT;
@@ -291,7 +444,7 @@ impl Requests {
                     let info = self.launcher.get_info(client.pid).await;
                     if !matches!(info, Ok(Ok(r)) if r.info.koid == client.koid) {
                         self.close(request);
-                        let _ = server.server().send_on_authorize_ended(request);
+                        front.ended(request);
                         return Err(());
                     }
                 }
@@ -299,13 +452,13 @@ impl Requests {
         };
         self.close(request);
         if outcome.is_none() {
-            let _ = server.server().send_on_authorize_ended(request);
+            front.ended(request);
         }
         Ok(outcome)
     }
 
-    /// Asks on the client's console for `action`, as `authorize` does for
-    /// a process that is not elevated.
+    /// Asks on the client's front end for `action`, as `authorize` does
+    /// for a process that is not elevated.
     /// `via` is the service that asks for its client, or empty
     /// (MIKSPEC-0057.R35).
     async fn ask(
@@ -316,22 +469,20 @@ impl Requests {
         reason: String,
     ) -> Option<(bool, u32)> {
         let denied = Some((false, 0));
-        let Some((console, server)) = self.console_of(client, "Authorize").await else {
+        let Some(front) = self.front_of(client, "Authorize").await else {
             return denied;
         };
         let name = match user(&self.accounts, client.user).await {
             Some(u) if u.kind == UserKind::Admin => u.name,
             _ => String::new(),
         };
-        let (request, slot) = self.open(console, false).await;
+        let (request, slot) = self.open(front.front(), false).await;
+        let lent = self.lend_seat(&front).await;
         let app_id = client.app_id.clone();
-        let sent = server
-            .server()
-            .send_on_authorize(request, console, app_id, via, action, reason, name);
-        match self
-            .wait(client, request, &slot, &server, sent.is_ok())
-            .await
-        {
+        let sent = front.authorize(request, app_id, via, action, reason, name);
+        let outcome = self.wait(client, request, &slot, &front, sent).await;
+        self.return_seat(lent).await;
+        match outcome {
             Err(()) => None,
             Ok(Some(Outcome::Answered(Some(admin)))) => Some((true, admin)),
             Ok(_) => denied,
@@ -339,9 +490,9 @@ impl Requests {
     }
 
     /// `Ask` of the broker for the `user` permission `permission` of
-    /// `client`: asked as a `[y/N]` line on the client's text console, and
-    /// `UNDETERMINED` when nobody answers there or it runs in no text
-    /// console's session (MIKSPEC-0057.R33).
+    /// `client`: asked on the client's front end, and `UNDETERMINED` when
+    /// nobody answers there or it runs in no session with a front end
+    /// (MIKSPEC-0057.R37).
     pub async fn ask_permission(
         &self,
         client: &ClientIdentity,
@@ -349,18 +500,16 @@ impl Requests {
         permission: String,
         reason: String,
     ) -> Decision {
-        let Some((console, server)) = self.console_of(client, "Ask").await else {
+        let Some(front) = self.front_of(client, "Ask").await else {
             return Decision::Undetermined;
         };
-        let (request, slot) = self.open(console, true).await;
+        let (request, slot) = self.open(front.front(), true).await;
+        let lent = self.lend_seat(&front).await;
         let app_id = client.app_id.clone();
-        let sent = server
-            .server()
-            .send_on_ask(request, console, app_id, via, permission, reason);
-        match self
-            .wait(client, request, &slot, &server, sent.is_ok())
-            .await
-        {
+        let sent = front.ask(request, app_id, via, permission, reason);
+        let outcome = self.wait(client, request, &slot, &front, sent).await;
+        self.return_seat(lent).await;
+        match outcome {
             Ok(Some(Outcome::Asked(true))) => Decision::Allowed,
             Ok(Some(Outcome::Asked(false))) => Decision::Denied,
             _ => Decision::Undetermined,

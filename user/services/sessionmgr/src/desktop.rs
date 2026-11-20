@@ -8,7 +8,7 @@
 //! exited, the console owns the seat on the screen of the caller's
 //! console, and the greeter starts again.
 
-use crate::authorize::Requests;
+use crate::authorize::{Answerer, FrontEnd, Requests};
 use crate::spawn::block;
 use crate::wait::Waiters;
 use crate::{SECOND, now};
@@ -26,8 +26,8 @@ use mikros_rt::interfaces::mikros::process::{
 use mikros_rt::interfaces::mikros::service::{ClientIdentity, DirectoryAsyncClient};
 use mikros_rt::interfaces::mikros::session::{
     Desktop, DesktopAsyncServer, DesktopRequest, DesktopStartDesktopResponse, Seat,
-    SeatAsyncClient, Session, SessionAsyncServer, SessionLogoutResponse, SessionRequest,
-    SessionShutdownResponse,
+    SeatAsyncClient, Session, SessionAnswerAskResponse, SessionAnswerResponse, SessionAsyncServer,
+    SessionCancelResponse, SessionLogoutResponse, SessionRequest, SessionShutdownResponse,
 };
 
 const COMPOSITOR: &str = "/system/bin/compositor";
@@ -61,6 +61,9 @@ pub struct Desktops {
     pub linked: RefCell<Option<Linked>>,
     /// The process ID of the greeter's compositor while it runs.
     pub greeter: Cell<Option<u32>>,
+    /// The `Session` server of the desktop's compositor, which its login
+    /// session's questions are asked on.
+    pub session: RefCell<Option<Rc<SessionAsyncServer>>>,
     /// Woken when the greeter's compositor or the desktop ended.
     pub changed: Waiters,
 }
@@ -105,7 +108,8 @@ pub async fn start(
     client: &ClientIdentity,
     spawner: &Spawner,
 ) -> Result<(), Status> {
-    let Some((console, _)) = requests.console_of(client, "StartDesktop").await else {
+    let Some(FrontEnd::Console(console, _)) = requests.front_of(client, "StartDesktop").await
+    else {
         return Err(Status::AccessDenied);
     };
     let seats = requests.seats.borrow().clone().ok_or(Status::BadState)?;
@@ -285,14 +289,16 @@ pub async fn end_linked(requests: &Requests, text_session: u32) {
 /// Serves the compositor's `Session` channel `session` until it closes:
 /// `Logout` ends the desktop's login session, led by `pid`, and
 /// `Shutdown` ends it and then asks the service manager to shut down.
-/// Questions do not reach the desktop yet, so no request is open there.
+/// The questions of the desktop's login session are asked there, and
+/// `Answer`, `AnswerAsk` and `Cancel` answer them (MIKSPEC-0075.R24).
 async fn serve_session(
     requests: &Requests,
     directory: &DirectoryAsyncClient,
     session: ServerEnd<Session>,
     pid: u32,
 ) {
-    let server = SessionAsyncServer::new(session, requests.reactor.clone());
+    let server = Rc::new(SessionAsyncServer::new(session, requests.reactor.clone()));
+    *requests.desktops.session.borrow_mut() = Some(server.clone());
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
@@ -309,9 +315,21 @@ async fn serve_session(
                 let done = crate::greeter::shutdown(directory, &requests.reactor, q.kind).await;
                 r.reply(s, done.map(|()| SessionShutdownResponse {}))
             }
-            SessionRequest::Answer(_, r) => r.reply(s, Err(Status::NotFound)),
-            SessionRequest::Cancel(_, r) => r.reply(s, Err(Status::NotFound)),
-            SessionRequest::AnswerAsk(_, r) => r.reply(s, Err(Status::NotFound)),
+            SessionRequest::Answer(q, r) => {
+                let answered = requests
+                    .answer(Answerer::Desktop, q.request, q.name, q.password)
+                    .await;
+                r.reply(s, answered.map(|()| SessionAnswerResponse {}))
+            }
+            SessionRequest::Cancel(q, r) => {
+                let cancelled = requests.cancel(Answerer::Desktop, q.request);
+                r.reply(s, cancelled.map(|()| SessionCancelResponse {}))
+            }
+            SessionRequest::AnswerAsk(q, r) => {
+                let answered = requests.answer_ask(Answerer::Desktop, q.request, q.allowed);
+                r.reply(s, answered.map(|()| SessionAnswerAskResponse {}))
+            }
         };
     }
+    *requests.desktops.session.borrow_mut() = None;
 }
