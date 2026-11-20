@@ -1,0 +1,7 @@
+# The system's theme, installed as system/share/desktop/theme.yaml
+# (MIKSPEC-0066.R19): /system/config/desktop/theme.yaml replaces it as a
+# whole, and a user's file sets any of its values over it.
+accent: "#0066ff"
+scheme: light
+font: sans-serif
+font_size: 10

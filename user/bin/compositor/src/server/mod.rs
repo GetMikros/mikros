@@ -11,6 +11,7 @@ mod buffer;
 mod material;
 mod shell;
 mod surface;
+mod theme;
 mod xdg;
 
 pub use buffer::{BufferId, Imports, Point, TimelineId};
@@ -19,8 +20,8 @@ pub use buffer::{Layout, Memory};
 pub use surface::{Rect, Role, Surface, SurfaceId};
 
 use crate::wayland::protocols::{
-    mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, wl_callback, wl_compositor, wl_display,
-    wl_output, wl_registry, xdg_wm_base,
+    mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, mikros_theme_v1, wl_callback,
+    wl_compositor, wl_display, wl_output, wl_registry, xdg_wm_base,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -56,6 +57,7 @@ pub enum Resource {
     Shell,
     Materials,
     Material(SurfaceId),
+    Theme,
 }
 
 /// An object of a client.
@@ -215,6 +217,8 @@ pub struct Server {
     imported_timelines: BTreeSet<TimelineId>,
     /// The release points of buffers that surfaces no longer show.
     releases: Vec<Point>,
+    /// The desktop's theme (MIKSPEC-0066.R19).
+    theme: crate::theme::Theme,
 }
 
 impl Server {
@@ -231,6 +235,7 @@ impl Server {
         server.add_global(&wl_output::INTERFACE, 3, Resource::Output);
         server.add_global(&mikros_shell_v1::INTERFACE, 1, Resource::Shell);
         server.add_global(&mikros_material_v1::INTERFACE, 1, Resource::Materials);
+        server.add_global(&mikros_theme_v1::INTERFACE, 1, Resource::Theme);
         server
     }
 
@@ -401,6 +406,12 @@ impl Server {
             Resource::Materials | Resource::Material(_) => {
                 self.material_request(request, resource, args)?
             }
+            Resource::Theme => {
+                return Err(ProtocolError::invalid_method(
+                    header.sender,
+                    "the theme has no requests",
+                ));
+            }
         }
         Ok(rest)
     }
@@ -487,6 +498,9 @@ impl Server {
         }
         if resource == Resource::Output {
             self.describe_output(request.client, id.0, id_version);
+        }
+        if resource == Resource::Theme {
+            self.send_theme(request.client, id.0);
         }
         Ok(())
     }
@@ -664,7 +678,8 @@ pub(crate) mod tests {
                 &Arg::String(Some("xdg_wm_base".into())),
                 &Arg::String(Some("mikros_buffer_v1".into())),
                 &Arg::String(Some("wl_output".into())),
-                &Arg::String(Some("mikros_material_v1".into()))
+                &Arg::String(Some("mikros_material_v1".into())),
+                &Arg::String(Some("mikros_theme_v1".into()))
             ]
         );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);

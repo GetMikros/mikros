@@ -1,9 +1,9 @@
 //! The compositor. `wayland` holds the Wayland protocols it serves: the
 //! wire format of their messages on a client's channel, and the code
 //! that the build script generates for each interface from the protocol
-//! files. `server` holds its side of the clients' connections, and
-//! `program`, which only runs on Mikros, shows their surfaces on the
-//! display and serves their channels.
+//! files. `server` holds its side of the clients' connections, `theme`
+//! the desktop's theme from its files, and `program`, which only runs on
+//! Mikros, shows their surfaces on the display and serves their channels.
 
 #![cfg_attr(target_os = "mikros", feature(mikros_handles))]
 // The program does not use every part of the protocols and the server
@@ -13,6 +13,7 @@
 #[cfg(target_os = "mikros")]
 mod program;
 mod server;
+mod theme;
 mod wayland;
 
 #[cfg(target_os = "mikros")]

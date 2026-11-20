@@ -14,6 +14,7 @@ mod output;
 mod parts;
 mod render;
 mod session;
+mod themes;
 
 use crate::server::{ClientId, Role, Server};
 use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
@@ -488,6 +489,7 @@ pub fn main() {
         if let Some(name) = render_device(&c.directory, &c.reactor).await {
             c.server.borrow_mut().buffer_device = name;
         }
+        c.spawner.spawn(c.clone().themes());
         c.spawner.spawn(c.clone().frames());
         match login {
             Some(login) => c.spawner.spawn(c.clone().greet(login)),
