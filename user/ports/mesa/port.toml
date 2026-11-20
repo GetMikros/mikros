@@ -1,6 +1,6 @@
 # Mesa, for lavapipe, the CPU Vulkan driver, as libvulkan_lvp.dlib with
-# its driver manifest. Nothing else of Mesa is built: no OpenGL, EGL,
-# GBM or window systems yet. It is built against libLLVM.dlib of the
+# its driver manifest, and its Wayland surfaces. Nothing else of Mesa is
+# built: no OpenGL, EGL or GBM. It is built against libLLVM.dlib of the
 # llvm port, which Meson finds through LLVM's CMake package, without
 # RTTI as LLVM is, and glslang compiles its shaders on the build host.
 # The patches:
@@ -21,6 +21,19 @@
 #   vendor and device IDs 0, which the screen opens through the
 #   directory: each allocation is a buffer whose memory object it maps,
 #   and freeing it destroys the buffer.
+# - 0005: the Mikros extensions VK_MIKROS_external_memory_handle and
+#   VK_MIKROS_external_semaphore_handle in vk.xml and Mesa's Vulkan
+#   headers, the same as the vulkan-headers port's, with
+#   VK_USE_PLATFORM_MIKROS defined for Mesa's Vulkan code on Mikros.
+# - 0006: llvmpipe exports an allocation as an export token or its memory
+#   object, and imports either, through the render instance.
+# - 0007: lavapipe offers VK_MIKROS_external_memory_handle and
+#   VK_KHR_external_memory_fd, whose descriptors are the C library's.
+# - 0008: lavapipe's timeline semaphores are kernel timelines, offered
+#   through VK_MIKROS_external_semaphore_handle and
+#   VK_KHR_external_semaphore_fd.
+# - 0009: the Wayland platform does without wayland-server on Mikros,
+#   which has the client library alone.
 
 [source]
 url = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"
@@ -29,7 +42,7 @@ dir = "mesa-26.3.1"
 
 [build]
 options = [
-    "-Dplatforms=",
+    "-Dplatforms=wayland",
     "-Dvulkan-drivers=swrast",
     "-Dgallium-drivers=llvmpipe",
     "-Dopengl=false",

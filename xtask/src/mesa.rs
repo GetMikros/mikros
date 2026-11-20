@@ -3,7 +3,9 @@
 //! built against `libLLVM.dlib` of the llvm port (`crate::llvm_port`),
 //! which Meson finds through LLVM's CMake package, and with the shaders
 //! that Mesa builds into it compiled by glslang on the build host
-//! (`crate::glslang`).
+//! (`crate::glslang`). Its Wayland surfaces use `libwayland.dlib` and the
+//! protocol files that `crate::wayland` installs in the sysroot, and the
+//! build host's `wayland-scanner`.
 
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -49,7 +51,13 @@ pub fn build() -> Result<PathBuf> {
     let source = source(&port)?;
     check_extensions(&source)?;
     let llvm = crate::llvm_port::build_library()?;
+    let wayland = crate::wayland::build()?;
+    crate::wayland::install_protocols()?;
     let mut options = port.options.clone();
+    options.push(format!(
+        "-Dbuild.pkg_config_path={}",
+        wayland.scanner.display()
+    ));
     options.push(format!("-Dcmake_prefix_path={}", llvm.display()));
     options.push(format!(
         "--native-file={}",
