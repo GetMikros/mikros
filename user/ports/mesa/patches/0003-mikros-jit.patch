@@ -1,0 +1,135 @@
+diff -ruN a/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp b/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
+--- a/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
++++ b/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
+@@ -79,6 +79,15 @@
+ #include "util/u_debug.h"
+ #include "util/u_cpu_detect.h"
+ #include "util/u_string.h"
++#include "util/detect_os.h"
++
++#if DETECT_OS_MIKROS
++#include <stdlib.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include <vector>
++#include <llvm/Object/ObjectFile.h>
++#endif
+ 
+ #include "lp_bld_misc.h"
+ #include "lp_bld_debug.h"
+@@ -216,7 +225,103 @@
+       virtual bool finalizeMemory(std::string *ErrMsg = 0) {
+          return mgr()->finalizeMemory(ErrMsg);
+       }
++      virtual void notifyObjectLoaded(llvm::ExecutionEngine *EE,
++                                      const llvm::object::ObjectFile &Obj) {
++         mgr()->notifyObjectLoaded(EE, Obj);
++      }
++};
++
++#if DETECT_OS_MIKROS
++/*
++ * The manager of generated code on Mikros, which never maps memory both
++ * writable and executable: each code section is a memory object that
++ * LLVM writes through one mapping and that runs from another, read-only
++ * and executable. Once an object is loaded, its code sections are given
++ * their executable addresses, so that relocations are resolved for those
++ * and function addresses point there. Data sections are memory of their
++ * own. Everything is freed with the manager.
++ */
++class DualMappingMemoryManager : public BaseMemoryManager {
++   struct CodeSection {
++      uint8_t *writable;
++      uint8_t *executable;
++      size_t size;
++      bool placed;
++   };
++   std::vector<CodeSection> code;
++   std::vector<void *> data;
++
++   public:
++      virtual ~DualMappingMemoryManager() {
++         for (const CodeSection &c : code) {
++            munmap(c.writable, c.size);
++            munmap(c.executable, c.size);
++         }
++         for (void *d : data)
++            free(d);
++      }
++
++      virtual uint8_t *allocateCodeSection(uintptr_t Size,
++                                           unsigned Alignment,
++                                           unsigned SectionID,
++                                           llvm::StringRef SectionName) {
++         size_t page = sysconf(_SC_PAGESIZE);
++         if (Alignment > page)
++            return nullptr;
++         size_t size = Size ? (Size + page - 1) / page * page : page;
++         int fd = memfd_create("llvmpipe code", MFD_CLOEXEC);
++         if (fd < 0)
++            return nullptr;
++         void *writable = MAP_FAILED, *executable = MAP_FAILED;
++         if (ftruncate(fd, size) == 0) {
++            writable = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++            executable = mmap(NULL, size, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
++         }
++         close(fd);
++         if (writable == MAP_FAILED || executable == MAP_FAILED) {
++            if (writable != MAP_FAILED)
++               munmap(writable, size);
++            if (executable != MAP_FAILED)
++               munmap(executable, size);
++            return nullptr;
++         }
++         code.push_back({(uint8_t *)writable, (uint8_t *)executable, size, false});
++         return (uint8_t *)writable;
++      }
++
++      virtual uint8_t *allocateDataSection(uintptr_t Size,
++                                           unsigned Alignment,
++                                           unsigned SectionID,
++                                           llvm::StringRef SectionName,
++                                           bool IsReadOnly) {
++         void *p = NULL;
++         if (posix_memalign(&p, Alignment > 16 ? Alignment : 16, Size ? Size : 1) != 0)
++            return nullptr;
++         data.push_back(p);
++         return (uint8_t *)p;
++      }
++
++      virtual void notifyObjectLoaded(llvm::ExecutionEngine *EE,
++                                      const llvm::object::ObjectFile &Obj) {
++         for (CodeSection &c : code) {
++            if (!c.placed) {
++               EE->mapSectionAddress(c.writable, (uint64_t)(uintptr_t)c.executable);
++               c.placed = true;
++            }
++         }
++      }
++
++      virtual bool finalizeMemory(std::string *ErrMsg = 0) {
++         return false;
++      }
++
++      virtual void registerEHFrames(uint8_t *Addr, uint64_t LoadAddr, size_t Size) {
++      }
++
++      virtual void deregisterEHFrames() {
++      }
+ };
++#endif
+ 
+ 
+ /*
+@@ -666,7 +771,11 @@
+ lp_get_default_memory_manager()
+ {
+    BaseMemoryManager *mm;
++#if DETECT_OS_MIKROS
++   mm = new DualMappingMemoryManager();
++#else
+    mm = new llvm::SectionMemoryManager();
++#endif
+    return reinterpret_cast<LLVMMCJITMemoryManagerRef>(mm);
+ }
+ 

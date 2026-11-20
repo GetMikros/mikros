@@ -11,6 +11,11 @@
 # - 0002: Mikros is a POSIX system for Mesa's checks of the operating
 #   system, takes its memory size from sysconf, and the DRM header takes
 #   ioctl numbers from <sys/ioctl.h>.
+# - 0003: llvmpipe's generated code on Mikros goes into memory objects,
+#   each mapped writable for LLVM to write it and executable, read-only,
+#   to run it, and never both, with the executable addresses given to
+#   MCJIT once an object is loaded; the delegating manager passes that
+#   notification on.
 
 [source]
 url = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"
