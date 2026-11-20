@@ -1,0 +1,218 @@
+diff -ruN a/src/vulkan/runtime/vk_device_memory.c b/src/vulkan/runtime/vk_device_memory.c
+--- a/src/vulkan/runtime/vk_device_memory.c
++++ b/src/vulkan/runtime/vk_device_memory.c
+@@ -94,6 +94,19 @@
+          break;
+       }
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++      case VK_STRUCTURE_TYPE_IMPORT_MEMORY_HANDLE_INFO_MIKROS: {
++         const VkImportMemoryHandleInfoMIKROS *handle_info = ext;
++         if (handle_info->handleType) {
++            assert(handle_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS ||
++                   handle_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS);
++            assert(mem->import_handle_type == 0);
++            mem->import_handle_type = handle_info->handleType;
++         }
++         break;
++      }
++#endif
++
+       case VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT: {
+          const VkImportMemoryHostPointerInfoEXT *host_ptr_info = ext;
+          if (host_ptr_info->handleType) {
+diff -ruN a/src/gallium/frontends/lavapipe/lvp_device.c b/src/gallium/frontends/lavapipe/lvp_device.c
+--- a/src/gallium/frontends/lavapipe/lvp_device.c
++++ b/src/gallium/frontends/lavapipe/lvp_device.c
+@@ -60,6 +60,11 @@
+ #include <sys/sysinfo.h>
+ #endif
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++#include <mikros/startup.h>
++#include "lp_mikros.h"
++#endif
++
+ #ifdef VK_USE_PLATFORM_ANDROID_KHR
+ #include "vk_android.h"
+ #endif
+@@ -163,6 +168,9 @@
+ #ifdef PIPE_MEMORY_FD
+    .KHR_external_memory_fd                = true,
+ #endif
++#ifdef VK_USE_PLATFORM_MIKROS
++   .MIKROS_external_memory_handle         = true,
++#endif
+    .KHR_external_semaphore                = true,
+ #ifdef HAVE_LIBDRM
+    .KHR_external_semaphore_fd             = true,
+@@ -346,6 +354,10 @@
+    unsigned valid[] = {
+       VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+       VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++#ifdef VK_USE_PLATFORM_MIKROS
++      VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS,
++      VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS,
++#endif
+    };
+    for (unsigned i = 0; i < ARRAY_SIZE(valid); i++) {
+       if (types & valid[i])
+@@ -363,6 +375,12 @@
+    if (types == 0)
+       return LVP_DEVICE_MEMORY_TYPE_DEFAULT;
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   if (types & (VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
++                VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS |
++                VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS))
++      return LVP_DEVICE_MEMORY_TYPE_OPAQUE_FD;
++#endif
+ #ifdef PIPE_MEMORY_FD
+    if (types & (VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)) {
+@@ -2220,6 +2238,9 @@
+    VK_FROM_HANDLE(lvp_device, device, _device);
+    struct lvp_device_memory *mem;
+    ASSERTED const VkImportMemoryFdInfoKHR *import_info = NULL;
++#ifdef VK_USE_PLATFORM_MIKROS
++   const VkImportMemoryHandleInfoMIKROS *handle_import = NULL;
++#endif
+    const VkMemoryAllocateFlagsInfo *mem_flags = NULL;
+    VkResult error = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    assert(pAllocateInfo->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
+@@ -2231,6 +2252,12 @@
+          import_info = (VkImportMemoryFdInfoKHR*)ext;
+          assert_memhandle_type(import_info->handleType);
+          break;
++#ifdef VK_USE_PLATFORM_MIKROS
++      case VK_STRUCTURE_TYPE_IMPORT_MEMORY_HANDLE_INFO_MIKROS:
++         handle_import = (VkImportMemoryHandleInfoMIKROS *)ext;
++         assert_memhandle_type(handle_import->handleType);
++         break;
++#endif
+       case VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT: {
+          VkMemoryPriorityAllocateInfoEXT *prio = (VkMemoryPriorityAllocateInfoEXT*)ext;
+          priority = get_mem_priority(prio->priority);
+@@ -2274,6 +2301,25 @@
+          goto fail;
+    }
+ #endif
++#ifdef VK_USE_PLATFORM_MIKROS
++   else if (handle_import) {
++      uint64_t size;
++      if (!llvmpipe_mikros_import(device->pscreen, handle_import->handle, &mem->pmem, &size)) {
++         error = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++         goto fail;
++      }
++      if (size < pAllocateInfo->allocationSize) {
++         device->pscreen->free_memory_fd(device->pscreen, mem->pmem);
++         error = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++         goto fail;
++      }
++      /* The memory owns the handle from now on, and needs it no more. */
++      mikros_handle_close(handle_import->handle);
++      mem->vk.size = size;
++      mem->map = device->pscreen->map_memory(device->pscreen, mem->pmem);
++      mem->memory_type = LVP_DEVICE_MEMORY_TYPE_OPAQUE_FD;
++   }
++#endif
+ #ifdef PIPE_MEMORY_FD
+    else if (mem->vk.import_handle_type) {
+       assert(import_info &&
+@@ -2685,11 +2731,57 @@
+    assert(pGetFdInfo->sType == VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR);
+    assert_memhandle_type(pGetFdInfo->handleType);
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   /* A memory descriptor of the C library, whatever the memory was
++    * imported from. */
++   VK_FROM_HANDLE(lvp_device, device, _device);
++   mikros_handle_t handle = llvmpipe_mikros_export(device->pscreen, memory->pmem, false);
++   *pFD = handle != 0 ? mikros_fd_from_handle(handle, 4) : -1;
++   if (*pFD < 0) {
++      if (handle != 0)
++         mikros_handle_close(handle);
++      return vk_error(device, VK_ERROR_TOO_MANY_OBJECTS);
++   }
++   return VK_SUCCESS;
++#endif
+    *pFD = os_dupfd_cloexec(memory->backed_fd);
+    assert(*pFD >= 0);
+    return VK_SUCCESS;
+ }
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++VKAPI_ATTR VkResult VKAPI_CALL
++lvp_GetMemoryHandleMIKROS(VkDevice _device, const VkMemoryGetHandleInfoMIKROS *pGetHandleInfo,
++                          mikros_handle_t *pHandle)
++{
++   VK_FROM_HANDLE(lvp_device, device, _device);
++   VK_FROM_HANDLE(lvp_device_memory, memory, pGetHandleInfo->memory);
++
++   assert(pGetHandleInfo->sType == VK_STRUCTURE_TYPE_MEMORY_GET_HANDLE_INFO_MIKROS);
++   assert_memhandle_type(pGetHandleInfo->handleType);
++
++   const bool token = pGetHandleInfo->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS;
++   *pHandle = llvmpipe_mikros_export(device->pscreen, memory->pmem, token);
++   if (*pHandle == 0)
++      return vk_error(device, VK_ERROR_TOO_MANY_OBJECTS);
++   return VK_SUCCESS;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL
++lvp_GetMemoryHandlePropertiesMIKROS(VkDevice _device,
++                                    VkExternalMemoryHandleTypeFlagBits handleType,
++                                    mikros_handle_t handle,
++                                    VkMemoryHandlePropertiesMIKROS *pMemoryHandleProperties)
++{
++   VK_FROM_HANDLE(lvp_device, device, _device);
++
++   if (!assert_memhandle_type(handleType) || handle == 0)
++      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++   pMemoryHandleProperties->memoryTypeBits = 1;
++   return VK_SUCCESS;
++}
++#endif
++
+ VkResult
+ lvp_GetMemoryFdPropertiesKHR(VkDevice _device,
+                              VkExternalMemoryHandleTypeFlagBits handleType,
+diff -ruN a/src/gallium/frontends/lavapipe/lvp_formats.c b/src/gallium/frontends/lavapipe/lvp_formats.c
+--- a/src/gallium/frontends/lavapipe/lvp_formats.c
++++ b/src/gallium/frontends/lavapipe/lvp_formats.c
+@@ -509,7 +509,16 @@
+          break;
+       }
+ #endif
+-#ifdef PIPE_MEMORY_FD
++#ifdef VK_USE_PLATFORM_MIKROS
++      case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
++      case VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS:
++      case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS:
++         flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
++         export_flags = compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
++                                       VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS |
++                                       VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS;
++         break;
++#elif defined(PIPE_MEMORY_FD)
+       case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
+          flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+          export_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+@@ -688,7 +697,16 @@
+          break;
+       }
+ #endif
+-#ifdef PIPE_MEMORY_FD
++#ifdef VK_USE_PLATFORM_MIKROS
++   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
++   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS:
++   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS:
++      flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
++      export_flags = compat_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
++                                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS |
++                                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS;
++      break;
++#elif defined(PIPE_MEMORY_FD)
+    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT:
+       flags = VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+       export_flags = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
