@@ -1,7 +1,7 @@
 //! The names in an ELF64 image's dynamic section: the libraries it names
 //! in `DT_NEEDED` and its own `DT_SONAME`, which `pkg pack` writes into a
 //! package's `needs` and pkg-config files (MIKSPEC-0101.R29,
-//! MIKSPEC-0101.R52) and the install service keeps libraries for
+//! MIKSPEC-0101.R85) and the install service keeps libraries for
 //! (MIKSPEC-0101.R51).
 
 use alloc::string::String;

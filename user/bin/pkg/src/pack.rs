@@ -1,7 +1,7 @@
 //! `pkg pack`: a package from a folder, whose `manifest.yaml` needs only
 //! `id`, `kind` and `version`, and gets its `checksum` filled in
 //! (MIKSPEC-0101.R28), a pkg-config file for its libraries
-//! (MIKSPEC-0101.R52), and the library packages that its programs and
+//! (MIKSPEC-0101.R85), and the library packages that its programs and
 //! libraries need added to its `needs` (MIKSPEC-0101.R29).
 
 use mikros_cli::{Paint, Role};
@@ -87,14 +87,15 @@ fn package_name(name: &str) -> Option<(&str, &str)> {
 }
 
 /// The pkg-config file of the libraries `paths` of the package `id`, in
-/// `version` (MIKSPEC-0101.R52).
+/// `version` (MIKSPEC-0101.R85), which lies in the package's `pkgconfig/`
+/// and so finds the package's root one folder up.
 pub fn pkg_config(id: &str, description: &str, version: &str, paths: &[&str]) -> String {
     let libs: Vec<String> = paths
         .iter()
         .map(|p| format!("${{prefix}}/{p}.dlib"))
         .collect();
     format!(
-        "prefix=${{pcfiledir}}/../..\n\nName: {id}\nDescription: {description}\n\
+        "prefix=${{pcfiledir}}/..\n\nName: {id}\nDescription: {description}\n\
          Version: {version}\nLibs: {}\nCflags: -I${{prefix}}/include\n",
         libs.join(" ")
     )
@@ -169,7 +170,7 @@ pub fn pack(
         }
         needed.extend(names.needed);
     }
-    // A pkg-config file for each library package ID (MIKSPEC-0101.R52).
+    // A pkg-config file for each library package ID (MIKSPEC-0101.R85).
     let description = manifest
         .description
         .as_deref()
@@ -178,7 +179,7 @@ pub fn pack(
     let mut pc = Vec::new();
     for (id, paths) in &libraries {
         let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-        let file = format!("lib/pkgconfig/{id}.pc");
+        let file = format!("pkgconfig/{id}.pc");
         pc.push((file, pkg_config(id, &description, &version, &paths)));
     }
     // The library packages that it needs and does not hold
@@ -219,10 +220,8 @@ pub fn pack(
         }
     }
     if !pc.is_empty() {
-        for folder in ["lib", "lib/pkgconfig"] {
-            if !folders.contains(folder) {
-                builder.folder(folder);
-            }
+        if !folders.contains("pkgconfig") {
+            builder.folder("pkgconfig");
         }
         for (path, contents) in pc {
             builder.file(&path, contents.into_bytes(), false);
@@ -326,7 +325,7 @@ mod tests {
     fn writes_pkg_config_files() {
         assert_eq!(
             pkg_config("org.glfw.dev", "Windows.", "3.4.0", &["3/glfw"]),
-            "prefix=${pcfiledir}/../..\n\nName: org.glfw.dev\nDescription: Windows.\n\
+            "prefix=${pcfiledir}/..\n\nName: org.glfw.dev\nDescription: Windows.\n\
              Version: 3.4.0\nLibs: ${prefix}/3/glfw.dlib\nCflags: -I${prefix}/include\n"
         );
     }
@@ -372,7 +371,7 @@ mod tests {
         let versions = |id: &str| (id == "org.other.lib").then(|| "2.0.1".to_string());
         let (bytes, manifest, warnings) = pack(&dir, &versions).unwrap();
         let package = Package::open(&bytes[..]).unwrap();
-        let pc = package.find("lib/pkgconfig/org.example.lib.pc").unwrap();
+        let pc = package.find("pkgconfig/org.example.lib.pc").unwrap();
         let pc = String::from_utf8(package.read(&bytes[..], pc).unwrap()).unwrap();
         assert!(pc.contains("Libs: ${prefix}/3/a.dlib\n") && pc.contains("Version: 3.1.0\n"));
         // Only the library package that is found, not its own nor the

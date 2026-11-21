@@ -20,7 +20,7 @@ fn main() -> std::process::ExitCode {
 }
 
 /// On the build machine, pkg only packs, with the needed libraries'
-/// versions taken from the toolchain's sysroot (MIKSPEC-0101.R52).
+/// versions taken from the toolchain's sysroot (MIKSPEC-0101.R85).
 #[cfg(not(target_os = "mikros"))]
 fn main() -> std::process::ExitCode {
     use mikros_cli::{Paint, complain, start};
