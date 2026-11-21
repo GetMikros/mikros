@@ -10,6 +10,10 @@
 # - 0002: LLVM on Mikros links no libm, whose functions the C library
 #   has, takes the byte order from <endian.h>, and counts every file
 #   system as remote, since statvfs does not tell them apart.
+# - 0003: libc++abi defines __cxa_thread_atexit on Mikros, as it does on
+#   Linux, so that thread-local objects with destructors link; the C
+#   library has no __cxa_thread_atexit_impl (xtask tells the build so),
+#   so it uses its own list of destructors, run by a thread-specific key.
 
 [source]
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/llvm-project-23.1.4.src.tar.xz"

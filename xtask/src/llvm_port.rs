@@ -70,7 +70,7 @@ fn source() -> Result<PathBuf> {
 /// libc++abi and libc++, each shared and static, the shared ones linking
 /// each other and libunwind.dlib rather than holding them, so that a
 /// process has one unwinder, on the C library's threads, files and time.
-const CXX_RUNTIME_OPTIONS: [&str; 35] = [
+const CXX_RUNTIME_OPTIONS: [&str; 36] = [
     "-DLLVM_ENABLE_RUNTIMES=libunwind;libcxxabi;libcxx",
     "-DCMAKE_BUILD_TYPE=Release",
     // musl declares `Dl_info`, which libunwind uses, only for _GNU_SOURCE.
@@ -112,6 +112,10 @@ const CXX_RUNTIME_OPTIONS: [&str; 35] = [
     "-DLIBCXX_HAS_ATOMIC_LIB=OFF",
     "-DLIBCXXABI_HAS_PTHREAD_LIB=OFF",
     "-DLIBCXX_HAS_PTHREAD_API=ON",
+    // The C library has no __cxa_thread_atexit_impl, which that kind of
+    // check would find as well, and libc++abi would then call it instead
+    // of keeping the destructors of thread-local objects itself.
+    "-DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF",
 ];
 
 /// Builds LLVM's C++ runtimes for Mikros from the port's source with the
