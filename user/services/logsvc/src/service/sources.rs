@@ -1,7 +1,10 @@
 //! `mikros.log.Sources`: the standard output and error of services,
 //! whose streams the service manager adds with the pid and app ID of
-//! each. Each line becomes a record, of severity INFO from the output
-//! and ERROR from the error, which is also copied into the kernel log.
+//! each, and `mikros.log.ProcessSources`, those that the process manager
+//! gives the processes it starts (MIKSPEC-0063.R21), which only it may
+//! connect to. Each line becomes a record, of severity INFO from the
+//! output and ERROR from the error, which is also copied into the kernel
+//! log.
 
 use crate::service::log::Log;
 use crate::store::Lines;
@@ -10,10 +13,14 @@ use alloc::string::String;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::log::{
+    ProcessSources, ProcessSourcesAddResponse, ProcessSourcesAsyncServer, ProcessSourcesRequest,
     Sources, SourcesAddResponse, SourcesAsyncServer, SourcesRequest,
 };
+use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::sys;
 
+/// The only client of `ProcessSources`.
+const PROCESS_MANAGER: &str = "system.processmgr";
 const INFO: u8 = 1;
 const ERROR: u8 = 3;
 /// The longest message of a record; longer lines make several.
@@ -45,6 +52,38 @@ pub async fn serve(log: Rc<Log>, end: ServerEnd<Sources>, reactor: Reactor, spaw
             ERROR,
         ));
         let _ = responder.reply(server.server(), Ok(SourcesAddResponse {}));
+    }
+}
+
+/// Serves the process manager's `ProcessSources` on `end` until it
+/// closes the connection; for any other `client`, closes it at once.
+pub async fn serve_process(
+    log: Rc<Log>,
+    end: ServerEnd<ProcessSources>,
+    reactor: Reactor,
+    spawner: Spawner,
+    client: ClientIdentity,
+) {
+    if client.app_id != PROCESS_MANAGER {
+        return;
+    }
+    let server = ProcessSourcesAsyncServer::new(end, reactor.clone());
+    while let Ok(ProcessSourcesRequest::Add(add, responder)) = server.next().await {
+        let streams = [(add.output, INFO), (add.error, ERROR)];
+        for (stream, severity) in streams {
+            if let Some(stream) = stream {
+                let (log, reactor) = (log.clone(), reactor.clone());
+                spawner.spawn(lines(
+                    log,
+                    reactor,
+                    stream,
+                    add.pid,
+                    add.app_id.clone(),
+                    severity,
+                ));
+            }
+        }
+        let _ = responder.reply(server.server(), Ok(ProcessSourcesAddResponse {}));
     }
 }
 

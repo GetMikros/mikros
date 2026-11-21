@@ -33,3 +33,8 @@ protocol Sources {
     @1 Add(pid u32, app_id string<128>, output handle<Stream>,
            error handle<Stream>) -> () error base.Status;
 };
+
+protocol ProcessSources {
+    @1 Add(pid u32, app_id string<128>, output handle<Stream>?,
+           error handle<Stream>?) -> () error base.Status;
+};

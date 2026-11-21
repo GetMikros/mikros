@@ -13,3 +13,6 @@ provides:
     permission: admin.logs.read
   - protocol: mikros.log.Sources
     permission: system.log_sources.create
+  # The output and error that the process manager gives processes
+  # (MIKSPEC-0063.R21), which only it may add.
+  - protocol: mikros.log.ProcessSources

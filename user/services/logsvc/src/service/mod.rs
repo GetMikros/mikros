@@ -10,7 +10,9 @@
 //! as the directory gave it, and its message is also copied into the
 //! kernel log, whose records from this process are not taken again.
 //! The service manager adds the standard output and error of services
-//! through `mikros.log.Sources`, which `system.log_sources.create` lets it use.
+//! through `mikros.log.Sources`, which `system.log_sources.create` lets it use,
+//! and the process manager those that it gives processes through
+//! `mikros.log.ProcessSources`.
 //!
 //! Once the root file system and the EFI system partition are
 //! published, the records also go to files on them (see `files`), or on
@@ -45,6 +47,7 @@ const READER: &str = "mikros.log.Reader";
 const OWN_READER: &str = "mikros.log.OwnReader";
 const SAME_RIGHTS: u32 = 1 << 31;
 const SOURCES: &str = "mikros.log.Sources";
+const PROCESS_SOURCES: &str = "mikros.log.ProcessSources";
 /// The `id` of the `log_manage` boot handle among the `USER` startup
 /// handles.
 const LOG_MANAGE_ID: u32 = 2;
@@ -175,6 +178,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     end,
                     reactor.clone(),
                     spawner.clone(),
+                );
+                spawner.spawn(task);
+            } else if c.protocol == PROCESS_SOURCES {
+                let end = ServerEnd::new(c.server);
+                let task = crate::service::sources::serve_process(
+                    log.clone(),
+                    end,
+                    reactor.clone(),
+                    spawner.clone(),
+                    c.client,
                 );
                 spawner.spawn(task);
             }

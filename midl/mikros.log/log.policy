@@ -5,3 +5,4 @@ Reader.Read: permission:admin.logs.read
 Reader.Follow: permission:admin.logs.read
 OwnReader.Read: data-dependent:logsvc::service::own::serve
 Sources.Add: permission:system.log_sources.create
+ProcessSources.Add: data-dependent:logsvc::service::sources::serve_process
