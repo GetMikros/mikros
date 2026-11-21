@@ -31,13 +31,14 @@ use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{SeatAsyncServer, SeatRequest};
 use output::Output;
-use render::{Layer, Look, Renderer, Under};
+use render::{Haze, Layer, Look, Renderer, Under};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::os::mikros::startup;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
+use std::time::Duration;
 
 /// The `USER` startup handles: the `Login` channel of greeter mode, and
 /// the `Seat` channel.
@@ -49,6 +50,9 @@ const SAME_RIGHTS: u32 = 1 << 31;
 const GPU: &str = "device.gpu";
 /// The colour behind every surface, until the theme gives one.
 const BACKGROUND: [f32; 4] = [0.11, 0.12, 0.14, 1.0];
+
+/// The time between the frames of a haze that fades in, in nanoseconds.
+const FADE_FRAME: i64 = 16_000_000;
 
 /// Completes the wait of `changed` after the next `notify`, or at once
 /// when one came since the last wait.
@@ -286,39 +290,62 @@ impl Compositor {
                     let _ = self.reactor.timeline(timeline, point.value).await;
                 }
             }
-            // The theme's colours under the materials.
-            let scheme = self.server.borrow().theme().scheme;
-            let drawn = {
+            let (drawn, fading) = {
                 let store = self.store.borrow();
+                let target = output.back();
+                // The haze of the output's size, fading in for 250 ms
+                // after it was made (MIKSPEC-0066.R18).
+                let elapsed =
+                    (mikros_rt::objects::now() - store.haze.as_ref().map_or(0, |h| h.made)).max(0);
+                let haze = store
+                    .haze
+                    .as_ref()
+                    .filter(|h| (h.new.width, h.new.height) == (target.width, target.height))
+                    .map(|h| Haze {
+                        new: &h.new,
+                        old: h.old.as_ref().unwrap_or(&h.new),
+                        fade: match h.old {
+                            Some(_) => haze::faded_in(Duration::from_nanos(elapsed as u64)),
+                            None => 1.0,
+                        },
+                    });
                 // The wallpaper below every surface (MIKSPEC-0075.R22).
                 let wallpaper = store.wallpaper.as_ref().map(|w| Layer {
-                    pixels: w.pixels(),
+                    pixels: w.buffer.pixels(),
                     x: 0,
                     y: 0,
                     under: Under::Flat,
                     haze: &[],
                     blur: &[],
                 });
+                // Every toplevel is told that it is activated, so each
+                // shows the haze, as panels do.
                 let surfaces = shown.iter().filter_map(|s| {
                     Some(Layer {
                         pixels: store.buffers.get(&s.buffer)?.pixels(),
                         x: s.x,
                         y: s.y,
-                        under: Under::Flat,
+                        under: Under::Haze,
                         haze: &s.haze,
                         blur: &s.blur,
                     })
                 });
                 let layers: Vec<Layer> = wallpaper.into_iter().chain(surfaces).collect();
                 let look = Look {
-                    flat: haze::flat(scheme),
-                    translucent: haze::translucent(scheme),
+                    flat: haze::flat(store.scheme),
+                    translucent: haze::translucent(store.scheme),
                 };
-                self.renderer
-                    .draw(output.back(), BACKGROUND, &layers, None, &look)
+                let fading = haze.as_ref().is_some_and(|h| h.fade < 1.0);
+                let drawn = self
+                    .renderer
+                    .draw(target, BACKGROUND, &layers, haze.as_ref(), &look);
+                (drawn, fading)
             };
             if let Err(e) = drawn {
                 mikros_rt::log!(Error, "compositor: drawing a frame: {e:?}");
+            }
+            if !fading {
+                self.store.borrow_mut().faded_in(&self.renderer);
             }
             // No frame reads the buffers that surfaces no longer show.
             let releases = self.server.borrow_mut().take_releases();
@@ -334,6 +361,12 @@ impl Compositor {
             }
             self.server.borrow_mut().frames_done(milliseconds());
             self.flush_all();
+            // While the haze fades in, frames follow each other.
+            if fading {
+                let next = mikros_rt::objects::now() + FADE_FRAME;
+                let _ = self.reactor.sleep_until(next).await;
+                self.changed.notify();
+            }
         }
     }
 }

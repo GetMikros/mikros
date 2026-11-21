@@ -44,6 +44,13 @@ impl Compositor {
                 reported = problems;
             }
             if *self.server.borrow().theme() != theme {
+                // The haze is tinted with the scheme.
+                let mut store = self.store.borrow_mut();
+                if store.scheme != theme.scheme {
+                    store.scheme = theme.scheme;
+                    store.remake_haze(&self.renderer);
+                }
+                drop(store);
                 self.server.borrow_mut().set_theme(theme);
                 self.flush_all();
                 self.changed.notify();

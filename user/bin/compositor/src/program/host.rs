@@ -1,7 +1,9 @@
 //! Buffers of the compositor's own in host memory, which stay mapped and
-//! which the shaders read: the values of each frame, and pixels.
+//! which the shaders read: the pixels of the wallpaper and of its haze,
+//! and the values of each frame. The wallpaper's pixels are read from the
+//! client's buffer, whose memory the renderer imports as host-visible.
 
-use super::render::{Error, Pixels, Renderer};
+use super::render::{ClientBuffer, Error, Pixels, Renderer};
 use ash::vk;
 
 /// A buffer of the compositor's own in host memory, mapped: the pixels of
@@ -46,6 +48,31 @@ impl HostBuffer {
 }
 
 impl Renderer {
+    /// The pixels of `source`, rows of its width without padding.
+    pub fn read(&self, source: &ClientBuffer) -> Result<Vec<u32>, Error> {
+        let (width, height) = (source.width as usize, source.height as usize);
+        let mut pixels = Vec::with_capacity(width * height);
+        // SAFETY: the memory is host-visible, as `import` chose it, and
+        // holds the buffer's rows; nothing else maps it.
+        unsafe {
+            let base = self.device.map_memory(
+                source.memory,
+                0,
+                vk::WHOLE_SIZE,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            for y in 0..height {
+                let row = base
+                    .cast::<u8>()
+                    .add(source.offset as usize + y * source.stride as usize)
+                    .cast::<u32>();
+                pixels.extend_from_slice(std::slice::from_raw_parts(row, width));
+            }
+            self.device.unmap_memory(source.memory);
+        }
+        Ok(pixels)
+    }
+
     /// A buffer of host memory of at least `size` bytes, mapped.
     pub(super) fn host_buffer(&self, size: u64) -> Result<HostBuffer, Error> {
         let d = &self.device;

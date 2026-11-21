@@ -1,9 +1,15 @@
 //! The buffers and timelines of clients: buffers imported into the
 //! renderer, and kernel timelines kept as handles, whose release points
-//! the compositor reaches with the timeline system calls.
+//! the compositor reaches with the timeline system calls. The store also
+//! holds the output's wallpaper, its pixels and a buffer of them that the
+//! renderer draws, and its haze (MIKSPEC-0066.R18), made again whenever
+//! the wallpaper or the theme's scheme changes, with the one before it
+//! while the new one fades in.
 
+use super::host::HostBuffer;
 use super::render::{ClientBuffer, Renderer};
 use crate::server::{BufferId, Imports, Layout, Memory, Point, TimelineId};
+use crate::theme::Scheme;
 use crate::wayland::wire::Fd;
 use std::collections::BTreeMap;
 
@@ -17,13 +23,29 @@ const LINEAR: u64 = 0;
 const OBJECT_TIMELINE: u32 = 14;
 
 /// The imported buffers and timelines, by the IDs the server knows them by,
-/// and the copy of the output's wallpaper.
+/// and the output's wallpaper and haze.
 #[derive(Default)]
 pub struct Store {
     pub buffers: BTreeMap<BufferId, ClientBuffer>,
-    pub wallpaper: Option<ClientBuffer>,
+    pub wallpaper: Option<Wallpaper>,
+    pub haze: Option<Haze>,
+    /// The theme's scheme, which tints the haze.
+    pub scheme: Scheme,
     timelines: BTreeMap<TimelineId, Fd>,
     next: u64,
+}
+
+pub struct Wallpaper {
+    pixels: Vec<u32>,
+    pub buffer: HostBuffer,
+}
+
+/// The output's haze, the one before it while the new one fades in, and
+/// when the new one was made, in nanoseconds of the monotonic clock.
+pub struct Haze {
+    pub new: HostBuffer,
+    pub old: Option<HostBuffer>,
+    pub made: i64,
 }
 
 impl Store {
@@ -35,6 +57,42 @@ impl Store {
     /// The handle of the timeline `id`, while the server knows it.
     pub fn timeline(&self, id: TimelineId) -> Option<u32> {
         self.timelines.get(&id).map(|t| t.as_raw_handle())
+    }
+
+    /// Makes the haze of the wallpaper again, with the scheme, keeping the
+    /// last one to fade from.
+    pub fn remake_haze(&mut self, renderer: &Renderer) {
+        let Some(wallpaper) = &self.wallpaper else {
+            return;
+        };
+        let (width, height) = (wallpaper.buffer.width, wallpaper.buffer.height);
+        let (w, h) = (width as usize, height as usize);
+        let pixels = crate::haze::haze(&wallpaper.pixels, w, h, w, self.scheme);
+        let new = match renderer.host_pixels(&pixels, width, height) {
+            Ok(new) => new,
+            Err(e) => {
+                mikros_rt::log!(Error, "compositor: making the haze: {e:?}");
+                return;
+            }
+        };
+        let made = mikros_rt::objects::now();
+        let old = match self.haze.take() {
+            Some(haze) => {
+                if let Some(older) = haze.old {
+                    renderer.forget_host(older);
+                }
+                Some(haze.new)
+            }
+            None => None,
+        };
+        self.haze = Some(Haze { new, old, made });
+    }
+
+    /// Forgets the haze before the new one once that one has faded in.
+    pub fn faded_in(&mut self, renderer: &Renderer) {
+        if let Some(old) = self.haze.as_mut().and_then(|h| h.old.take()) {
+            renderer.forget_host(old);
+        }
     }
 
     /// Reaches `point`, a release point of a buffer that no frame reads
@@ -97,11 +155,17 @@ impl Imports for Importer<'_> {
         let Some(source) = self.store.buffers.get(&buffer) else {
             return false;
         };
-        match self.renderer.copy(source) {
-            Ok(copy) => {
-                if let Some(old) = self.store.wallpaper.replace(copy) {
-                    self.renderer.forget(old);
+        let (width, height) = (source.width, source.height);
+        let copied = self.renderer.read(source).and_then(|pixels| {
+            let buffer = self.renderer.host_pixels(&pixels, width, height)?;
+            Ok(Wallpaper { pixels, buffer })
+        });
+        match copied {
+            Ok(wallpaper) => {
+                if let Some(old) = self.store.wallpaper.replace(wallpaper) {
+                    self.renderer.forget_host(old.buffer);
                 }
+                self.store.remake_haze(self.renderer);
                 true
             }
             Err(e) => {
