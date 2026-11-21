@@ -50,24 +50,13 @@ fn install_xkbcommon() -> Result<()> {
     write_if_changed(&sysroot.join("lib/pkgconfig/xkbcommon.pc"), pc.as_bytes())
 }
 
-/// The patched source of the port.
-fn source(port: &crate::ports::Port) -> Result<PathBuf> {
-    let dir = crate::workspace_root()
-        .join("target/sources")
-        .join(&port.name);
-    let archive = dir.join(format!("{}.tar.gz", port.source));
-    let what = format!("{} source", port.name);
-    crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
-    crate::port::patched_source(&archive, &dir, &port.source, &port.dir.join("patches"), &[])
-}
-
 /// Builds SDL3, and returns the directory its prefix, `/system`, was
 /// installed in.
 pub fn build() -> Result<PathBuf> {
     let wayland = crate::wayland::build()?;
     install_xkbcommon()?;
     let port = crate::ports::load("sdl3")?;
-    let source = source(&port)?;
+    let source = crate::ports::source(&port)?;
     let sysroot = crate::sysroot::dir();
     let mut options = port.options.clone();
     options.push(format!(

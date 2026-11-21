@@ -26,13 +26,7 @@ const LOADER_OPTIONS: [&str; 8] = [
 
 /// The patched source of the port `port`.
 fn source(port: &crate::ports::Port) -> Result<PathBuf> {
-    let dir = crate::workspace_root()
-        .join("target/sources")
-        .join(&port.name);
-    let archive = dir.join(format!("{}.tar.gz", port.source));
-    let what = format!("{} source", port.name);
-    crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
-    crate::port::patched_source(&archive, &dir, &port.source, &port.dir.join("patches"), &[])
+    crate::ports::source(port)
 }
 
 /// The patched source of the headers, for a project that builds them with
