@@ -154,6 +154,14 @@ impl Imports for Importer<'_> {
         self.store.timelines.remove(&timeline);
     }
 
+    fn memory(&mut self, bytes: &[u8]) -> Option<Fd> {
+        let size = (bytes.len() as u64).next_multiple_of(4096);
+        let memory = mikros_rt::objects::memory(size, 0).ok()?;
+        mikros_rt::objects::write_memory(memory.raw(), 0, bytes).ok()?;
+        // SAFETY: the handle is ours, and is handed over once.
+        Some(unsafe { Fd::from_raw_handle(memory.into_raw()) })
+    }
+
     fn set_wallpaper(&mut self, buffer: BufferId) -> bool {
         let Some(source) = self.store.buffers.get(&buffer) else {
             return false;

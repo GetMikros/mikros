@@ -10,6 +10,7 @@ mod area;
 mod buffer;
 mod cursor_shape;
 mod damage;
+mod keyboard;
 mod material;
 mod panel;
 mod scene;
@@ -71,6 +72,7 @@ pub enum Resource {
     Panel(SurfaceId),
     Seat,
     Pointer,
+    Keyboard,
     CursorShapes,
     CursorShape,
 }
@@ -233,8 +235,9 @@ pub struct Server {
     imported_buffers: BTreeSet<BufferId>,
     /// The width and height of each imported buffer.
     buffer_sizes: BTreeMap<BufferId, (u32, u32)>,
-    /// The seat's pointer.
+    /// The seat's pointer and keyboard.
     pub pointer: seat::Pointer,
+    keyboard: keyboard::Keyboard,
     /// Where the surfaces shown at the last `take_damage` lay, and what
     /// commits damaged since, in surface coordinates.
     drawn: BTreeMap<SurfaceId, Rect>,
@@ -438,7 +441,9 @@ impl Server {
                 self.material_request(request, resource, args)?
             }
             Resource::Panel(id) => self.panel_request(request, id, args)?,
-            Resource::Seat | Resource::Pointer => self.seat_request(request, resource, args)?,
+            Resource::Seat | Resource::Pointer | Resource::Keyboard => {
+                self.seat_request(imports, request, resource, args)?
+            }
             Resource::CursorShapes | Resource::CursorShape => {
                 self.cursor_shape_request(request, resource, args)?
             }
@@ -602,6 +607,11 @@ pub(crate) mod tests {
         fn set_wallpaper(&mut self, buffer: BufferId) -> bool {
             self.wallpapers.push(buffer);
             true
+        }
+
+        fn memory(&mut self, _: &[u8]) -> Option<Fd> {
+            self.next += 1;
+            Some(Fd(self.next as u32))
         }
     }
 

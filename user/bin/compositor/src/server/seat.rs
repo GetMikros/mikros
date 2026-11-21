@@ -1,5 +1,6 @@
 //! `wl_seat` and `wl_pointer` of the core protocol (MIKSPEC-0066.R16): the
-//! one seat, with a pointer, and the pointer's focus. The program moves
+//! one seat, with a pointer and, once it has a keymap, a keyboard
+//! (`keyboard`), and the pointer's focus. The program moves
 //! the pointer and presses its buttons; the surface under it, the topmost
 //! window or panel whose input region holds it, gets `enter`, `motion`,
 //! `button` and `axis` events in its own coordinates, and `leave` when
@@ -9,8 +10,8 @@
 //! (MIKSPEC-0066.R28), for the serial of the last `enter` it got.
 
 use super::area::Area;
-use super::{ClientId, ProtocolError, Request, Resource, Role, Server, SurfaceId};
-use crate::wayland::protocols::{wl_pointer, wl_seat, wl_surface};
+use super::{ClientId, Imports, ProtocolError, Request, Resource, Role, Server, SurfaceId};
+use crate::wayland::protocols::{wl_keyboard, wl_pointer, wl_seat, wl_surface};
 use crate::wayland::wire::{Arg, Fixed, ObjectId};
 
 /// The version of `wl_seat` that the compositor offers, and the first
@@ -71,6 +72,7 @@ pub struct Pointer {
 impl Server {
     pub(super) fn seat_request(
         &mut self,
+        imports: &mut dyn Imports,
         request: Request,
         resource: Resource,
         args: Vec<Arg>,
@@ -98,13 +100,12 @@ impl Server {
                     }
                     Ok(())
                 }
-                wl_seat::Request::GetKeyboard { .. } | wl_seat::Request::GetTouch { .. } => {
-                    Err(ProtocolError::new(
-                        request.object,
-                        wl_seat::error::MISSING_CAPABILITY,
-                        "the seat has only a pointer",
-                    ))
-                }
+                wl_seat::Request::GetKeyboard { id } => self.get_keyboard(imports, request, id),
+                wl_seat::Request::GetTouch { .. } => Err(ProtocolError::new(
+                    request.object,
+                    wl_seat::error::MISSING_CAPABILITY,
+                    "the seat has no touch screen",
+                )),
                 wl_seat::Request::Release => {
                     self.client_mut(request).destroy(request.object);
                     Ok(())
@@ -124,17 +125,26 @@ impl Server {
                     }
                 }
             }
-            _ => unreachable!("seat_request handles the seat and pointers"),
+            Resource::Keyboard => {
+                match wl_keyboard::Request::decode(request.opcode, args).map_err(invalid)? {
+                    wl_keyboard::Request::Release => {
+                        self.client_mut(request).destroy(request.object);
+                        Ok(())
+                    }
+                }
+            }
+            _ => unreachable!("seat_request handles the seat, pointers and keyboards"),
         }
     }
 
     /// Sends a new seat object `seat` of `version` its capabilities and
     /// name.
     pub(super) fn describe_seat(&mut self, client: ClientId, seat: ObjectId, version: u32) {
+        let capabilities = self.capabilities();
         let Some(c) = self.clients.get_mut(&client) else {
             return;
         };
-        wl_seat::send_capabilities(&mut c.out, seat, wl_seat::capability::POINTER);
+        wl_seat::send_capabilities(&mut c.out, seat, capabilities);
         if version >= 2 {
             wl_seat::send_name(&mut c.out, seat, "seat0");
         }
@@ -230,10 +240,15 @@ impl Server {
 
     /// The objects of `client`'s pointers, with their versions.
     fn pointers_of(&self, client: ClientId) -> Vec<(ObjectId, u32)> {
+        self.objects_of(client, Resource::Pointer)
+    }
+
+    /// The objects of `client` that are `resource`, with their versions.
+    pub(super) fn objects_of(&self, client: ClientId, resource: Resource) -> Vec<(ObjectId, u32)> {
         self.clients.get(&client).map_or_else(Vec::new, |c| {
             c.objects
                 .iter()
-                .filter(|(_, o)| o.resource == Resource::Pointer)
+                .filter(|(_, o)| o.resource == resource)
                 .map(|(&id, o)| (id, o.version))
                 .collect()
         })
@@ -259,6 +274,7 @@ impl Server {
     /// or the surface under it has it already. A surface that is gone
     /// loses it without `leave`.
     pub fn refocus(&mut self) {
+        self.keep_keyboard_focus();
         if let Some(focus) = self.pointer.focus
             && !self.surfaces.contains_key(&focus.surface)
         {
@@ -323,6 +339,11 @@ impl Server {
         let Some(focus) = self.pointer.focus else {
             return;
         };
+        // A press on a window gives it the keyboard.
+        let window = self.surfaces.get(&focus.surface).map(|s| s.role) == Some(Role::Toplevel);
+        if pressed && window {
+            self.focus_keyboard(Some(focus.surface));
+        }
         let serial = self.next_serial();
         let state = match pressed {
             true => wl_pointer::button_state::PRESSED,

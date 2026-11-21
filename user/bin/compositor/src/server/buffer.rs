@@ -55,6 +55,9 @@ pub trait Imports {
     /// Copies the pixels of `buffer` as the output's wallpaper, or returns
     /// false when they cannot be copied.
     fn set_wallpaper(&mut self, buffer: BufferId) -> bool;
+    /// A memory object of its own that holds `bytes`, for a client to
+    /// map, or None when none can be made.
+    fn memory(&mut self, bytes: &[u8]) -> Option<Fd>;
 }
 
 impl Server {
