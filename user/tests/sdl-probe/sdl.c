@@ -10,13 +10,10 @@
  * shared memory, so SDL has no input and no cursors here. The channel is
  * connected to here, as the other parts do, and SDL is given the display.
  *
- * It prints nothing, because a part has no standard streams: the
- * compositor gives it only its Wayland channel, so descriptor 1 is not
- * its standard output, and a write to it lands in whatever descriptor has
- * that number, which once was the memory of the window itself. It exits
- * with the number of the step that failed, which the compositor logs: 10
- * the channel, 20 SDL's start, 21 the window, 22 SDL's Vulkan extensions,
- * 30 to 39 Vulkan up to the swapchain, 50 to 56 the frame.
+ * It prints nothing. It exits with the number of the step that failed,
+ * which the compositor logs: 10 the channel, 20 SDL's start, 21 the
+ * window, 22 SDL's Vulkan extensions, 30 to 39 Vulkan up to the
+ * swapchain, 50 to 56 the frame.
  */
 
 #include <mikros/startup.h>
