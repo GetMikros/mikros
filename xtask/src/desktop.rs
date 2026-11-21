@@ -14,8 +14,11 @@
 //! desktop, whose shell is the shell probe: the run waits until the
 //! wallpaper that its desktop part hands the compositor covers the
 //! screen, until the haze of that wallpaper shows under its taskbar
-//! part's transparent panel with the pointer's arrow in the middle of
-//! the screen, and until its start-menu part connected to the service
+//! part's transparent panel, until its switcher part's SDL window fills
+//! the corner at the top left, with the pointer's arrow in the middle
+//! of the screen, until the arrow follows QEMU's mouse onto the
+//! wallpaper and turns into the hand that the panel asks for on the
+//! panel, and until its start-menu part connected to the service
 //! manager's `Control`, whose question the compositor cancels, and was
 //! refused. It then presses Ctrl, Alt and F2 until the wallpaper has
 //! left the screen, and ends the session with `exit`, which ends the
@@ -59,6 +62,15 @@ const HAZE_PART: f64 = 0.05;
 /// screen until it reads pointer devices: 2 right of the hotspot and 7
 /// below it.
 const ARROW_PIXEL: (usize, usize) = (642, 407);
+/// The moves of the pointer through QEMU's mouse, from the middle onto
+/// the wallpaper and then onto the taskbar's panel, and pixels that the
+/// cursor makes black after each: the arrow's fill, 2 right of and 7
+/// below its hotspot, and the palm of the hand that the panel asks for,
+/// 14 below its hotspot, where the arrow has its white outline.
+const MOVE_TO_WALLPAPER: &str = "mouse_move 100 100";
+const MOVED_ARROW_PIXEL: (usize, usize) = (742, 507);
+const MOVE_TO_PANEL: &str = "mouse_move 0 270";
+const HAND_PIXEL: (usize, usize) = (740, 784);
 /// The colour of the window that the shell probe's SDL part shows, which
 /// the compositor puts at the top left corner of the screen, and its size,
 /// and what the compositor logs when that part ends, which it must not do
@@ -177,6 +189,30 @@ impl Screen<'_> {
 }
 
 impl Screen<'_> {
+    /// Dumps the screen until the pixel at `at` is black, which `what`
+    /// names, while `qemu` runs.
+    fn until_black(
+        &mut self,
+        qemu: &mut std::process::Child,
+        at: (usize, usize),
+        what: &str,
+    ) -> Result<()> {
+        loop {
+            let ppm = scenario::screen_dump(self.socket, self.dump)?;
+            let shown = pixel(&ppm, at);
+            if shown == Some([0, 0, 0]) {
+                return Ok(());
+            }
+            if qemu.try_wait()?.is_some() {
+                bail!("QEMU exited before {what}");
+            }
+            if Instant::now() > self.deadline {
+                bail!("timed out before {what}, with {shown:?} at {at:?}");
+            }
+            std::thread::sleep(DUMP_EVERY);
+        }
+    }
+
     /// Dumps the screen until the `window` corner at its top left shows
     /// `colour` all over, which `what` names, while `qemu` runs,
     /// and fails at once if `log` says that the part that shows it ended,
@@ -261,6 +297,12 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         if shown != Some([0, 0, 0]) {
             bail!("the pointer's arrow is not in the middle of the screen: {shown:?}");
         }
+        scenario::monitor(&socket, MOVE_TO_WALLPAPER)?;
+        let what = "the arrow followed the mouse";
+        screen.until_black(&mut qemu, MOVED_ARROW_PIXEL, what)?;
+        scenario::monitor(&socket, MOVE_TO_PANEL)?;
+        let what = "the panel's hand showed";
+        screen.until_black(&mut qemu, HAND_PIXEL, what)?;
         scenario::wait_for_line(&log, CANCELLED, &mut qemu, deadline)?;
         let serial = scenario::wait_for_line(&log, SHELL_EXITED, &mut qemu, deadline)?;
         let exited = serial

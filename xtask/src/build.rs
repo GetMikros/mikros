@@ -2654,6 +2654,8 @@ fn greeter_probe(
     // names.
     let staged = crate::wayland::protocols()?;
     let own = crate::workspace_root().join("user/bin/compositor/protocols");
+    crate::wayland::install_protocols()?;
+    let tablet = crate::sysroot::dir().join("share/wayland-protocols/stable/tablet/tablet-v2.xml");
     let mut code = Vec::new();
     for (xml, stem) in [
         (staged.join("xdg-shell.xml"), "xdg-shell"),
@@ -2661,6 +2663,9 @@ fn greeter_probe(
         (staged.join("xdg-activation-v1.xml"), "xdg-activation-v1"),
         (own.join("mikros-shell-v1.xml"), "mikros-shell-v1"),
         (own.join("mikros-material-v1.xml"), "mikros-material-v1"),
+        (staged.join("cursor-shape-v1.xml"), "cursor-shape-v1"),
+        // Only for the tablet tool's interface, which cursor-shape names.
+        (tablet.clone(), "tablet-v2"),
     ] {
         let source = dir.join(format!("{stem}-protocol.c"));
         for (mode, out) in [

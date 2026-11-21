@@ -1,10 +1,11 @@
 /* The taskbar part of the shell probe (`--panel`): a panel along the
  * bottom edge of the output, 48 pixels thick, whose buffer is ARGB8888
  * and fully transparent and whose whole surface has the material haze,
- * so that the screen shows the compositor's haze there. Once the
- * compositor configured the panel and the buffer is committed, it serves
- * the connection until the compositor closes it. It exits with the
- * number of the step that failed, if one does. */
+ * so that the screen shows the compositor's haze there. Whenever the
+ * pointer enters the panel, it asks for the cursor shape `pointer`, a
+ * hand. Once the compositor configured the panel and the buffer is
+ * committed, it serves the connection until the compositor closes it.
+ * It exits with the number of the step that failed, if one does. */
 
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -18,6 +19,7 @@
 #include "mikros-material-v1-client-protocol.h"
 #include "xdg-activation-v1-client-protocol.h"
 #include "mikros-shell-v1-client-protocol.h"
+#include "cursor-shape-v1-client-protocol.h"
 
 enum {
 	ROLE_USER = 16,
@@ -35,6 +37,9 @@ struct bar {
 	struct mikros_buffer_v1 *buffers;
 	struct mikros_shell_v1 *shell;
 	struct mikros_material_v1 *materials;
+	struct wl_seat *seat;
+	struct wp_cursor_shape_manager_v1 *shapes;
+	struct wp_cursor_shape_device_v1 *shape;
 	uint32_t serial, width, height;
 	int configured;
 };
@@ -54,6 +59,10 @@ static void global(void *data, struct wl_registry *registry, uint32_t name,
 		b->shell = wl_registry_bind(registry, name, &mikros_shell_v1_interface, 1);
 	else if (strcmp(interface, mikros_material_v1_interface.name) == 0)
 		b->materials = wl_registry_bind(registry, name, &mikros_material_v1_interface, 1);
+	else if (strcmp(interface, wl_seat_interface.name) == 0 && !b->seat)
+		b->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
+	else if (strcmp(interface, wp_cursor_shape_manager_v1_interface.name) == 0)
+		b->shapes = wl_registry_bind(registry, name, &wp_cursor_shape_manager_v1_interface, 1);
 }
 
 static void global_remove(void *data, struct wl_registry *registry, uint32_t name)
@@ -87,6 +96,73 @@ static const struct mikros_panel_v1_listener panel_listener = {
 	.closed = closed,
 };
 
+/* The pointer entered the panel: the hand, for this enter's serial. */
+static void enter(void *data, struct wl_pointer *pointer, uint32_t serial,
+		  struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
+{
+	struct bar *b = data;
+	(void)pointer, (void)surface, (void)x, (void)y;
+	wp_cursor_shape_device_v1_set_shape(b->shape, serial,
+					    WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER);
+}
+
+static void leave(void *data, struct wl_pointer *pointer, uint32_t serial,
+		  struct wl_surface *surface)
+{
+	(void)data, (void)pointer, (void)serial, (void)surface;
+}
+
+static void motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fixed_t x,
+		   wl_fixed_t y)
+{
+	(void)data, (void)pointer, (void)time, (void)x, (void)y;
+}
+
+static void button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time,
+		   uint32_t button, uint32_t state)
+{
+	(void)data, (void)pointer, (void)serial, (void)time, (void)button, (void)state;
+}
+
+static void axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis,
+		 wl_fixed_t value)
+{
+	(void)data, (void)pointer, (void)time, (void)axis, (void)value;
+}
+
+static void frame(void *data, struct wl_pointer *pointer)
+{
+	(void)data, (void)pointer;
+}
+
+static void axis_source(void *data, struct wl_pointer *pointer, uint32_t source)
+{
+	(void)data, (void)pointer, (void)source;
+}
+
+static void axis_stop(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis)
+{
+	(void)data, (void)pointer, (void)time, (void)axis;
+}
+
+static void axis_discrete(void *data, struct wl_pointer *pointer, uint32_t axis,
+			  int32_t discrete)
+{
+	(void)data, (void)pointer, (void)axis, (void)discrete;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+	.enter = enter,
+	.leave = leave,
+	.motion = motion,
+	.button = button,
+	.axis = axis,
+	.frame = frame,
+	.axis_source = axis_source,
+	.axis_stop = axis_stop,
+	.axis_discrete = axis_discrete,
+};
+
 int panel(void)
 {
 	struct bar b = {0};
@@ -98,8 +174,11 @@ int panel(void)
 	struct wl_registry *registry = wl_display_get_registry(display);
 	wl_registry_add_listener(registry, &registry_listener, &b);
 	if (wl_display_roundtrip(display) < 0 || !b.compositor || !b.output || !b.buffers ||
-	    !b.shell || !b.materials)
+	    !b.shell || !b.materials || !b.seat || !b.shapes)
 		return 91;
+	struct wl_pointer *pointer = wl_seat_get_pointer(b.seat);
+	b.shape = wp_cursor_shape_manager_v1_get_pointer(b.shapes, pointer);
+	wl_pointer_add_listener(pointer, &pointer_listener, &b);
 
 	struct wl_surface *surface = wl_compositor_create_surface(b.compositor);
 	struct mikros_panel_v1 *panel =
