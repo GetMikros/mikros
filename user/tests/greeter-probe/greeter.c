@@ -471,9 +471,8 @@ int main(int argc, char **argv)
 	int failed = draw(display, surface, &s);
 	if (!failed && argc == 4 && strcmp(argv[1], "--login") == 0)
 		failed = log_in(argv[2], argv[3]);
-	/* No message: a part has no standard error (MIKSPEC-0058.R11), and
-	 * its descriptor 2 may be one of the swapchain's memory objects. The
-	 * exit code, which the compositor logs, names the step. */
+	/* The exit code, which the compositor logs, names the step that
+	 * failed. */
 	if (failed)
 		return failed;
 	while (wl_display_dispatch(display) >= 0) {

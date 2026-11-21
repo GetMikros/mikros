@@ -1267,6 +1267,46 @@ static int memory_is_reported(void)
 	       get_phys_pages() == pages && sysconf(_SC_PAGESIZE) == 4096;
 }
 
+/* Descriptor 0, which the launcher probe starts this program without, is
+   reserved: it fails as a closed descriptor does, and no call that picks
+   the lowest free descriptor returns it. dup2 places a descriptor on a
+   reserved one, here 2 when it is reserved too, and close releases one,
+   which is then allocated as any other. Started with descriptor 0 open,
+   there is nothing to check. */
+static int standard_descriptors_are_reserved(void)
+{
+	if (fcntl(0, F_GETFD) != -1)
+		return 1;
+	char c;
+	struct pollfd p = {.fd = 0, .events = POLLIN};
+	if (errno != EBADF || read(0, &c, 1) != -1 || errno != EBADF)
+		return 0;
+	if (poll(&p, 1, 0) != 1 || p.revents != POLLNVAL)
+		return 0;
+	if (dup2(0, 9) != -1 || errno != EBADF)
+		return 0;
+	int fd = open(GREETING, O_RDONLY), copy = dup(1), ends[2];
+	int piped = pipe(ends) == 0;
+	int lowest = fd > 0 && copy > 0 && piped && ends[0] > 0 && ends[1] > 0;
+	close(fd);
+	close(copy);
+	if (piped) {
+		close(ends[0]);
+		close(ends[1]);
+	}
+	if (!lowest)
+		return 0;
+	if (fcntl(2, F_GETFD) == -1 && (dup2(1, 2) != 2 || close(2) != 0))
+		return 0;
+	if (close(0) != -1 || errno != EBADF)
+		return 0;
+	fd = open(GREETING, O_RDONLY);
+	if (fd != 0)
+		return 0;
+	close(fd);
+	return 1;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -1348,6 +1388,8 @@ int main(int argc, char **argv)
 		return 39;
 	if (!memory_is_reported())
 		return 40;
+	if (!standard_descriptors_are_reserved())
+		return 41;
 	char *copy = malloc(64);
 	if (!copy)
 		return 34;

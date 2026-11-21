@@ -2,13 +2,17 @@
 //! description: a stream, a connection to a file or directory, a slave
 //! terminal, an epoll instance, a timer, a memory object, a channel or
 //! any other kernel object's handle, which `dup` shares between
-//! descriptors.
+//! descriptors. Descriptors 0, 1 and 2 that the process was started
+//! without are reserved (MIKSPEC-0058.R16): they hold nothing, no call that
+//! picks the lowest free descriptor returns them, and every other call
+//! fails on them as on a closed descriptor, until `dup2` or `dup3` places
+//! one there or `close` releases them.
 
 use crate::errno::{EBADF, EINVAL, EMFILE};
 use crate::lock::Lock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::fs::{NodeClient, NodeType};
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
@@ -84,6 +88,24 @@ struct Entry {
 
 /// The descriptors, by number.
 static TABLE: Lock<Vec<Option<Entry>>> = Lock::new(Vec::new());
+/// Which of descriptors 0, 1 and 2 are reserved, a bit each, which only
+/// change while `TABLE` is locked.
+static RESERVED: AtomicU8 = AtomicU8::new(0);
+
+/// Whether descriptor `fd` is reserved.
+fn reserved(fd: usize) -> bool {
+    fd < 3 && RESERVED.load(Ordering::Relaxed) & 1 << fd != 0
+}
+
+/// Ends the reservation of descriptor `fd`, if it has one, and says
+/// whether it had.
+fn release(fd: usize) -> bool {
+    let had = reserved(fd);
+    if had {
+        RESERVED.fetch_and(!(1 << fd), Ordering::Relaxed);
+    }
+    had
+}
 
 /// The open description of descriptor `fd`.
 pub fn get(fd: i64) -> Option<Arc<Description>> {
@@ -97,7 +119,7 @@ pub fn get(fd: i64) -> Option<Arc<Description>> {
 pub fn insert(description: Arc<Description>, close_on_exec: bool, from: usize) -> i64 {
     let mut table = TABLE.lock();
     let mut fd = from;
-    while table.get(fd).is_some_and(Option::is_some) {
+    while table.get(fd).is_some_and(Option::is_some) || reserved(fd) {
         fd += 1;
     }
     if fd >= FDS_MAX {
@@ -114,14 +136,18 @@ pub fn insert(description: Arc<Description>, close_on_exec: bool, from: usize) -
 }
 
 /// Closes descriptor `fd`. The description closes with its last
-/// descriptor.
+/// descriptor. A reserved descriptor is released, and fails as one that
+/// is not open.
 pub fn close(fd: i64) -> i64 {
     let removed = {
         let mut table = TABLE.lock();
-        usize::try_from(fd)
-            .ok()
-            .and_then(|fd| table.get_mut(fd))
-            .and_then(Option::take)
+        let Ok(fd) = usize::try_from(fd) else {
+            return -EBADF;
+        };
+        if release(fd) {
+            return -EBADF;
+        }
+        table.get_mut(fd).and_then(Option::take)
     };
     match removed {
         Some(_) => 0,
@@ -143,6 +169,7 @@ pub fn duplicate_to(from: i64, to: i64, close_on_exec: bool) -> i64 {
         if table.len() <= slot {
             table.resize_with(slot + 1, || None);
         }
+        release(slot);
         table[slot].replace(Entry {
             description,
             close_on_exec,
@@ -182,7 +209,8 @@ pub fn set_close_on_exec(fd: i64, value: bool) -> i64 {
 /// the `USER` handles whose `id` names a descriptor. Each is installed
 /// under the descriptor number and with the kind its `id` gives, when the
 /// handle has that kind's object type; any other is closed, and its
-/// descriptor stays closed. Other `USER` handles stay in `handles`.
+/// descriptor stays closed. Other `USER` handles stay in `handles`. Then
+/// descriptors 0, 1 and 2 that are not open are reserved.
 pub fn install(handles: &mut Vec<StartupHandle>) {
     let mut i = 0;
     while i < handles.len() {
@@ -218,6 +246,10 @@ pub fn install(handles: &mut Vec<StartupHandle>) {
             duplicate_into(fd as i64, Arc::new(description));
         }
     }
+    // The standard descriptors that are not open now are reserved.
+    let table = TABLE.lock();
+    let absent = (0..3).filter(|&fd| table.get(fd).is_none_or(Option::is_none));
+    RESERVED.store(absent.fold(0, |bits, fd| bits | 1 << fd), Ordering::Relaxed);
 }
 
 /// The description of a handle with descriptor kind `kind`, or none,
