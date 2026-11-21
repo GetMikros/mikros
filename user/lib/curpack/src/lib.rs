@@ -23,6 +23,8 @@
 //! the sources applied but the gradients' own. Colours are not
 //! premultiplied.
 
+mod read;
+
 use std::collections::BTreeSet;
 
 pub const MAGIC: &[u8; 8] = b"CURPACK\0";
