@@ -11,6 +11,7 @@ mod buffer;
 mod material;
 mod panel;
 mod scene;
+mod seat;
 mod shell;
 mod surface;
 mod theme;
@@ -23,7 +24,7 @@ pub use surface::{Rect, Role, Surface, SurfaceId};
 
 use crate::wayland::protocols::{
     mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, mikros_theme_v1, wl_callback,
-    wl_compositor, wl_display, wl_output, wl_registry, xdg_wm_base,
+    wl_compositor, wl_display, wl_output, wl_registry, wl_seat, xdg_wm_base,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -61,6 +62,8 @@ pub enum Resource {
     Material(SurfaceId),
     Theme,
     Panel(SurfaceId),
+    Seat,
+    Pointer,
 }
 
 /// An object of a client.
@@ -104,6 +107,8 @@ pub struct Client {
     /// The roles of a connection of a shell component, which the
     /// compositor created; None for any other client.
     roles: Option<Vec<String>>,
+    /// The cursor it chose for its surfaces.
+    pub cursor: seat::Cursor,
     /// The events to send to the client.
     pub out: Outgoing,
     /// The protocol error that ended the connection, once one did.
@@ -217,6 +222,10 @@ pub struct Server {
     /// The buffers and timelines that `Imports` imported and has not yet
     /// been told to forget.
     imported_buffers: BTreeSet<BufferId>,
+    /// The width and height of each imported buffer.
+    buffer_sizes: BTreeMap<BufferId, (u32, u32)>,
+    /// The seat's pointer.
+    pub pointer: seat::Pointer,
     imported_timelines: BTreeSet<TimelineId>,
     /// The release points of buffers that surfaces no longer show.
     releases: Vec<Point>,
@@ -239,6 +248,7 @@ impl Server {
         server.add_global(&mikros_shell_v1::INTERFACE, 1, Resource::Shell);
         server.add_global(&mikros_material_v1::INTERFACE, 1, Resource::Materials);
         server.add_global(&mikros_theme_v1::INTERFACE, 1, Resource::Theme);
+        server.add_global(&wl_seat::INTERFACE, seat::SEAT_VERSION, Resource::Seat);
         server
     }
 
@@ -410,6 +420,7 @@ impl Server {
                 self.material_request(request, resource, args)?
             }
             Resource::Panel(id) => self.panel_request(request, id, args)?,
+            Resource::Seat | Resource::Pointer => self.seat_request(request, resource, args)?,
             Resource::Theme => {
                 return Err(ProtocolError::invalid_method(
                     header.sender,
@@ -502,6 +513,9 @@ impl Server {
         }
         if resource == Resource::Output {
             self.describe_output(request.client, id.0, id_version);
+        }
+        if resource == Resource::Seat {
+            self.describe_seat(request.client, id.0, id_version);
         }
         if resource == Resource::Theme {
             self.send_theme(request.client, id.0);
@@ -683,7 +697,8 @@ pub(crate) mod tests {
                 &Arg::String(Some("mikros_buffer_v1".into())),
                 &Arg::String(Some("wl_output".into())),
                 &Arg::String(Some("mikros_material_v1".into())),
-                &Arg::String(Some("mikros_theme_v1".into()))
+                &Arg::String(Some("mikros_theme_v1".into())),
+                &Arg::String(Some("wl_seat".into()))
             ]
         );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);

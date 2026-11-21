@@ -204,6 +204,8 @@ impl Server {
             ));
         };
         self.imported_buffers.insert(buffer);
+        self.buffer_sizes
+            .insert(buffer, (layout.width, layout.height));
         self.client_mut(request)
             .create(id, &wl_buffer::INTERFACE, 1, Resource::Buffer(buffer))
     }
@@ -341,6 +343,7 @@ impl Server {
             }
             used
         });
+        self.buffer_sizes.retain(|b, _| buffers.contains(b));
         self.imported_timelines.retain(|t| {
             let used = timelines.contains(t);
             if !used {

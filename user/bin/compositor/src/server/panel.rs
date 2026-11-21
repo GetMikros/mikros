@@ -153,7 +153,7 @@ impl Server {
         let free = match s.role {
             Role::None => s.xdg.is_none(),
             Role::Panel => s.panel.is_none(),
-            Role::Toplevel => false,
+            Role::Toplevel | Role::Cursor => false,
         };
         if !free {
             let code = mikros_shell_v1::error::SURFACE_HAS_ROLE;

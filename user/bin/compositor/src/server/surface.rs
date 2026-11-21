@@ -23,6 +23,8 @@ pub enum Role {
     None,
     Toplevel,
     Panel,
+    /// The cursor of its client's pointer.
+    Cursor,
 }
 
 /// The state of a surface that its requests set and a commit applies.
