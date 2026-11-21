@@ -15,9 +15,9 @@
 # xkbcommon are linked, not loaded when they are first used.
 
 [source]
-url = "https://github.com/GetMikros/SDL/archive/eab5c87b6c7f7faa585d2f013b8c2d865b136498.tar.gz"
-sha256 = "8cd3f685a982cae250c9cf2057963976e3edf7b18b820b0ce17ed4b8d6d450e1"
-dir = "SDL-eab5c87b6c7f7faa585d2f013b8c2d865b136498"
+url = "https://github.com/GetMikros/SDL/archive/8c694bf30681a46e39e212d88fad4d9d362fc5b5.tar.gz"
+sha256 = "a9c103fee8950204baebdf1aa6e6f7f59bfcfdff9d515e229c0a0c4fbdb1e739"
+dir = "SDL-8c694bf30681a46e39e212d88fad4d9d362fc5b5"
 
 [build]
 options = [
