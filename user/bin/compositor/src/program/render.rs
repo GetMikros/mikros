@@ -199,6 +199,9 @@ struct LayerValues {
     _padding: u32,
 }
 
+// The shaders' `Layer` is 64 bytes, a multiple of its alignment.
+const _: () = assert!(std::mem::size_of::<LayerValues>() == 64);
+
 pub struct Renderer {
     _entry: ash::Entry,
     instance: ash::Instance,
@@ -438,7 +441,9 @@ impl Renderer {
         alpha: bool,
     ) -> Result<ClientBuffer, Error> {
         let handle_type = if token { TOKEN } else { MEMORY_OBJECT };
-        if stride < width * BYTES_PER_PIXEL
+        if width
+            .checked_mul(BYTES_PER_PIXEL)
+            .is_none_or(|row| stride < row)
             || stride % BYTES_PER_PIXEL != 0
             || offset % BYTES_PER_PIXEL != 0
         {
@@ -580,19 +585,16 @@ impl Renderer {
                 .bind_image_memory(image, memory, u64::from(shape.offset))
                 .and_then(|()| self.device.create_image_view(&info, None))
         };
-        let made = view
-            .map_err(Error::from)
-            .and_then(|view| self.make_general(image).map(|()| view));
-        let view = match made {
-            Ok(view) => view,
-            Err(e) => {
-                // SAFETY: nothing uses the image or its memory.
-                unsafe {
-                    self.device.destroy_image(image, None);
-                    self.device.free_memory(memory, None);
+        let view = match view {
+            Ok(view) => match self.make_general(image) {
+                Ok(()) => view,
+                Err(e) => {
+                    // SAFETY: nothing uses the view.
+                    unsafe { self.device.destroy_image_view(view, None) };
+                    return Err(self.forget_unused(image, memory, e));
                 }
-                return Err(e);
-            }
+            },
+            Err(e) => return Err(self.forget_unused(image, memory, e.into())),
         };
         Ok(ClientBuffer {
             buffer: vk::Buffer::null(),
@@ -609,6 +611,17 @@ impl Renderer {
             offset: shape.offset,
             alpha: shape.alpha,
         })
+    }
+
+    /// Destroys `image` and frees `memory`, which nothing uses, and
+    /// returns `error`.
+    fn forget_unused(&self, image: vk::Image, memory: vk::DeviceMemory, error: Error) -> Error {
+        // SAFETY: nothing uses the image or its memory.
+        unsafe {
+            self.device.destroy_image(image, None);
+            self.device.free_memory(memory, None);
+        }
+        error
     }
 
     /// Moves `image`, whose contents a client wrote, to the layout that
@@ -824,9 +837,16 @@ impl Renderer {
                 .filter_map(|area| {
                     let left = area.offset.x.max(x0);
                     let top = area.offset.y.max(y0);
-                    let right = (area.offset.x + area.extent.width as i32).min(x0 + p.width as i32);
-                    let bottom =
-                        (area.offset.y + area.extent.height as i32).min(y0 + p.height as i32);
+                    let right = area
+                        .offset
+                        .x
+                        .saturating_add(area.extent.width as i32)
+                        .min(x0.saturating_add(p.width as i32));
+                    let bottom = area
+                        .offset
+                        .y
+                        .saturating_add(area.extent.height as i32)
+                        .min(y0.saturating_add(p.height as i32));
                     (right > left && bottom > top).then(|| {
                         let (x, y) = ((left - x0) as u32, (top - y0) as u32);
                         let at = u64::from(source.first)
@@ -1207,13 +1227,13 @@ fn clip(rects: &[Rect], target: &Target) -> Vec<vk::Rect2D> {
 fn overlaps(layer: &Layer, area: &vk::Rect2D) -> bool {
     let (x0, y0) = (area.offset.x, area.offset.y);
     let (x1, y1) = (
-        x0 + area.extent.width as i32,
-        y0 + area.extent.height as i32,
+        x0.saturating_add(area.extent.width as i32),
+        y0.saturating_add(area.extent.height as i32),
     );
     layer.x < x1
         && layer.y < y1
-        && layer.x + layer.pixels.width as i32 > x0
-        && layer.y + layer.pixels.height as i32 > y0
+        && layer.x.saturating_add(layer.pixels.width as i32) > x0
+        && layer.y.saturating_add(layer.pixels.height as i32) > y0
 }
 
 impl Drop for Renderer {
