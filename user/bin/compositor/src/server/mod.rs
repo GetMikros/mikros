@@ -10,6 +10,7 @@ mod area;
 mod buffer;
 mod material;
 mod panel;
+mod scene;
 mod shell;
 mod surface;
 mod theme;

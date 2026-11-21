@@ -85,7 +85,7 @@ pub struct Surface {
     pub current: SurfaceState,
     /// The frame callbacks of the pending state, and those of the
     /// committed state, which the next frame answers.
-    pending_frames: Vec<ObjectId>,
+    pub(super) pending_frames: Vec<ObjectId>,
     pub frames: Vec<ObjectId>,
     /// The state of its xdg_surface, once it has one.
     pub xdg: Option<super::xdg::XdgState>,
