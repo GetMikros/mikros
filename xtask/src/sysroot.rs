@@ -1,5 +1,5 @@
 //! `cargo xtask sysroot`: the directory that C and C++ programs for
-//! Mikros are built against, laid out like `/usr`.
+//! Mikros are built against, laid out like `/system` (MIKSPEC-0062.R13).
 //!
 //! It holds the musl headers in `include/`, with the generated
 //! `<mikros/syscalls.h>`, `<mikros/abi.h>`, `<mikros/process.h>`,
@@ -10,8 +10,8 @@
 //! `libc.slib`, `libc.dlib`, the dynamic linker `ld-mikros.dlib`, which
 //! is the same file, `crt1.o`, `crti.o`, `crtn.o`, and LLVM's C++
 //! runtimes, libunwind, libc++abi and libc++, as `.dlib` and `.slib` in
-//! `lib/`, with their headers in `include/c++/v1`, with
-//! `lib/pkgconfig/`, and the Clang driver configuration file
+//! `libraries/`, with their headers in `include/c++/v1`, with
+//! `libraries/pkgconfig/`, and the Clang driver configuration file
 //! `x86_64-unknown-mikros.cfg`, which selects the target, its CPU level,
 //! this sysroot and the C++ headers. The Clang that `crate::llvm` builds, which knows the
 //! target, is used with it as
@@ -47,8 +47,8 @@ const DIRS: [&str; 6] = [
     "include",
     "include/mikros",
     "include/mikros/midl",
-    "lib",
-    "lib/pkgconfig",
+    "libraries",
+    "libraries/pkgconfig",
     "share/cmake/Platform",
 ];
 
@@ -86,6 +86,11 @@ fn make() -> Result<PathBuf> {
     check_llvm(&llvm::tool("ld.lld"))?;
     check_driver()?;
     let sysroot = dir();
+    // The libraries lay in lib/ before they moved to libraries/.
+    let old = sysroot.join("lib");
+    if old.is_dir() {
+        fs::remove_dir_all(&old).with_context(|| format!("removing {}", old.display()))?;
+    }
     for d in DIRS {
         let path = sysroot.join(d);
         fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
@@ -125,7 +130,7 @@ fn make() -> Result<PathBuf> {
     assemble(&cfg, "user/runtime/libc/crt/abi-note.S", &abi_note)?;
     let musl = crate::musl::build(&cfg, &[&shared_layer, &abi_note])?;
     forget_other_c_library(&sysroot)?;
-    let lib = sysroot.join("lib");
+    let lib = sysroot.join("libraries");
     combine(&lib.join("libc.slib"), &[&musl.libc, &layer])?;
     // The shared library is also the dynamic linker.
     copy(&musl.shared, &lib.join("libc.dlib"))?;
@@ -394,7 +399,7 @@ pkg-config = 'pkg-config'
 
 [properties]
 sys_root = '@DIRNAME@'
-pkg_config_libdir = ['@DIRNAME@/lib/pkgconfig', '@DIRNAME@/share/pkgconfig']
+pkg_config_libdir = ['@DIRNAME@/libraries/pkgconfig', '@DIRNAME@/share/pkgconfig']
 
 [host_machine]
 system = 'mikros'
@@ -462,6 +467,8 @@ set(CMAKE_EXE_EXPORTS_C_FLAG "-Wl,--export-dynamic")
 # The C library has the dynamic loading functions.
 set(CMAKE_DL_LIBS "")
 include(Platform/UnixPaths)
+# The libraries of the sysroot, and of /system, lie in libraries/.
+list(PREPEND CMAKE_SYSTEM_LIBRARY_PATH /libraries)
 "#;
 
 /// Fails unless `tool --version` reports the pinned LLVM release.

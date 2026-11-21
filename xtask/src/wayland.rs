@@ -75,7 +75,7 @@ fn install_client(built: &Built) -> Result<()> {
         write_if_changed(&sysroot.join("include").join(name), &fs::read(&path)?)?;
     }
     write_if_changed(
-        &sysroot.join("lib").join(LIBRARY),
+        &sysroot.join("libraries").join(LIBRARY),
         &fs::read(&built.library)?,
     )?;
     for name in ["wayland-client", "wayland-cursor", "wayland-egl"] {
@@ -84,10 +84,9 @@ fn install_client(built: &Built) -> Result<()> {
         let pc = fs::read_to_string(&pc).with_context(|| format!("reading {}", pc.display()))?;
         let pc = pc
             .replace("prefix=/system", "prefix=")
-            .replace("${prefix}/libraries", "${prefix}/lib")
             .replace(&flag, "-lwayland");
         write_if_changed(
-            &sysroot.join(format!("lib/pkgconfig/{name}.pc")),
+            &sysroot.join(format!("libraries/pkgconfig/{name}.pc")),
             pc.as_bytes(),
         )?;
     }

@@ -72,7 +72,7 @@ pub fn build() -> Result<PathBuf> {
     let headers = crate::vulkan::headers_source()?;
     options.push(format!("-DDAWN_VULKAN_HEADERS_DIR={}", headers.display()));
     let sysroot = crate::sysroot::dir();
-    let libdir = sysroot.join("lib/pkgconfig");
+    let libdir = sysroot.join("libraries/pkgconfig");
     let install = crate::build_systems::cmake_with_env(
         &port.name,
         &source,

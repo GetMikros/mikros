@@ -30,7 +30,7 @@ fn install_xkbcommon() -> Result<()> {
     let sysroot = crate::sysroot::dir();
     let library = built.install.join("libraries/libxkbcommon.dlib");
     write_if_changed(
-        &sysroot.join("lib/libxkbcommon.dlib"),
+        &sysroot.join("libraries/libxkbcommon.dlib"),
         &fs::read(&library).with_context(|| format!("reading {}", library.display()))?,
     )?;
     let headers = built.install.join("include/xkbcommon");
@@ -44,10 +44,11 @@ fn install_xkbcommon() -> Result<()> {
     }
     let pc = built.install.join("libraries/pkgconfig/xkbcommon.pc");
     let pc = fs::read_to_string(&pc).with_context(|| format!("reading {}", pc.display()))?;
-    let pc = pc
-        .replace("prefix=/system", "prefix=")
-        .replace("${prefix}/libraries", "${prefix}/lib");
-    write_if_changed(&sysroot.join("lib/pkgconfig/xkbcommon.pc"), pc.as_bytes())
+    let pc = pc.replace("prefix=/system", "prefix=");
+    write_if_changed(
+        &sysroot.join("libraries/pkgconfig/xkbcommon.pc"),
+        pc.as_bytes(),
+    )
 }
 
 /// Builds SDL3, and returns the directory its prefix, `/system`, was
@@ -65,7 +66,7 @@ pub fn build() -> Result<PathBuf> {
     ));
     // pkg-config finds the sysroot's libraries alone, with their paths
     // below it.
-    let libdir = sysroot.join("lib/pkgconfig");
+    let libdir = sysroot.join("libraries/pkgconfig");
     let install = crate::build_systems::cmake_with_env(
         &port.name,
         &source,

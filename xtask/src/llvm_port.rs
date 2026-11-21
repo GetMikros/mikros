@@ -123,7 +123,7 @@ const CXX_RUNTIME_OPTIONS: [&str; 36] = [
 /// `toolchain`, which names their shared libraries `libunwind.dlib`,
 /// `libc++abi.dlib` and `libc++.dlib` with those sonames, and installs
 /// them in the sysroot `sysroot`: the headers in `include/c++/v1` and the
-/// libraries, shared and static, in `lib`.
+/// libraries, shared and static, in `libraries`.
 pub fn build_cxx_runtimes(toolchain: &Path, sysroot: &Path) -> Result<()> {
     let source = source()?;
     let cmake = crate::cmake::build()?;
@@ -131,7 +131,10 @@ pub fn build_cxx_runtimes(toolchain: &Path, sysroot: &Path) -> Result<()> {
     let mut args: Vec<String> = CXX_RUNTIME_OPTIONS.iter().map(|s| s.to_string()).collect();
     args.push(format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()));
     args.push(format!("-DCMAKE_INSTALL_PREFIX={}", sysroot.display()));
-    args.push("-DCMAKE_INSTALL_LIBDIR=lib".to_owned());
+    // Each runtime has its own install directory, which defaults to lib.
+    for runtime in ["LIBUNWIND", "LIBCXXABI", "LIBCXX"] {
+        args.push(format!("-D{runtime}_INSTALL_LIBRARY_DIR=libraries"));
+    }
     // Configured again when the options, the toolchain, the CMake patches
     // or the C library's soname change.
     let stamp = format!(

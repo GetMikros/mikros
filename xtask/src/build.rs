@@ -432,7 +432,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", cxx_static.display());
-            let sysroot_lib = crate::sysroot::dir().join("lib");
+            let sysroot_lib = crate::sysroot::dir().join("libraries");
             let global_check = crate::rust_std::build("global-check", kind)?;
             let forge_probe = crate::rust_std::build("forge-probe", kind)?;
             let forge_manifest =
@@ -541,7 +541,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 programs.join("system.probe-command.yaml"),
                 programs.join("system.sessionmgr.yaml"),
             );
-            let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
+            let dynamic_linker = crate::sysroot::dir().join("libraries/ld-mikros.dlib");
             let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
             // The process manager tests serve this image, in which the
             // probe takes the service manager's place.
@@ -2182,7 +2182,7 @@ fn login_members(
     members.extend([
         (
             "system/libraries/ld-mikros.dlib".into(),
-            crate::sysroot::dir().join("lib/ld-mikros.dlib"),
+            crate::sysroot::dir().join("libraries/ld-mikros.dlib"),
         ),
         (
             "system/libraries/libfreetype.dlib".into(),
@@ -2198,7 +2198,7 @@ fn login_members(
         ),
     ]);
     // The C++ runtimes, shared.
-    let lib = crate::sysroot::dir().join("lib");
+    let lib = crate::sysroot::dir().join("libraries");
     members.extend([
         (
             "system/libraries/libc++.dlib".into(),

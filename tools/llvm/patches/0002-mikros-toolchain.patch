@@ -73,8 +73,8 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.h b/clang/lib/Driver/ToolChains/M
 +
 +namespace toolchains {
 +
-+/// Mikros. The sysroot has the layout of /usr: headers in include/, and
-+/// libraries, with the suffixes .dlib and .slib, in lib/.
++/// Mikros. The sysroot has the layout of /system: headers in include/,
++/// and libraries, with the suffixes .dlib and .slib, in libraries/.
 +class LLVM_LIBRARY_VISIBILITY Mikros final : public Generic_ELF {
 +public:
 +  Mikros(const Driver &D, const llvm::Triple &Triple,
@@ -286,7 +286,7 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.cpp b/clang/lib/Driver/ToolChains
 +Mikros::Mikros(const Driver &D, const llvm::Triple &Triple,
 +               const ArgList &Args)
 +    : Generic_ELF(D, Triple, Args) {
-+  getFilePaths().push_back(concat(getDriver().SysRoot, "/lib"));
++  getFilePaths().push_back(concat(getDriver().SysRoot, "/libraries"));
 +}
 +
 +std::string Mikros::findLibrary(const ArgList &Args, llvm::StringRef Name,
