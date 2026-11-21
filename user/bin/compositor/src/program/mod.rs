@@ -11,6 +11,7 @@
 mod host;
 mod imports;
 mod keys;
+mod mouse;
 mod output;
 mod parts;
 mod pipeline;
@@ -20,7 +21,7 @@ mod session;
 mod themes;
 
 use crate::haze;
-use crate::server::{ClientId, Server};
+use crate::server::{ClientId, Cursor, Server, shape_name};
 use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
 use imports::{Importer, Store};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
@@ -167,9 +168,10 @@ impl Compositor {
                     }
                 }
                 SeatRequest::AddInput(added) => {
-                    let (reactor, server) = (self.reactor.clone(), server.clone());
                     let (instance, device) = (added.instance, added.device);
-                    let reading = keys::read(reactor, server, instance, device, added.accepted);
+                    let reading =
+                        self.clone()
+                            .read_input(server.clone(), instance, device, added.accepted);
                     self.spawner.spawn(reading);
                 }
                 // The compositor shows only the desktop's screen.
@@ -281,11 +283,34 @@ impl Compositor {
             let Some(mut output) = self.output.borrow_mut().take() else {
                 continue;
             };
-            // What the frame shows, each buffer once its acquire point is
-            // reached.
+            // The pointer goes to what now lies under it.
+            {
+                let mut server = self.server.borrow_mut();
+                server.refocus();
+                server.pointer_frame();
+            }
+            // What the frame shows, and the cursor of the client under the
+            // pointer, each buffer once its acquire point is reached.
             let shown = self.server.borrow().shown();
-            for s in &shown {
-                let Some(point) = s.acquire else {
+            let (cursor, at) = {
+                let server = self.server.borrow();
+                (
+                    server.cursor(),
+                    (server.pointer.x as i32, server.pointer.y as i32),
+                )
+            };
+            let cursor_surface = match cursor {
+                Cursor::Surface { surface, hotspot } => self
+                    .server
+                    .borrow()
+                    .surfaces()
+                    .find(|(id, _)| **id == surface)
+                    .and_then(|(_, s)| Some((s.current.buffer?, s.current.acquire, hotspot))),
+                _ => None,
+            };
+            let acquires = shown.iter().map(|s| s.acquire);
+            for point in acquires.chain(cursor_surface.map(|c| c.1)) {
+                let Some(point) = point else {
                     continue;
                 };
                 let timeline = self.store.borrow().timeline(point.timeline);
@@ -335,21 +360,35 @@ impl Compositor {
                     })
                 });
                 let mut layers: Vec<Layer> = wallpaper.into_iter().chain(surfaces).collect();
-                // The pointer above everything (MIKSPEC-0066.R17).
+                // The pointer above everything (MIKSPEC-0066.R17): a shape
+                // of the cursor theme, or the client's own cursor surface
+                // (MIKSPEC-0066.R28).
                 let now_ms = milliseconds().into();
-                let screen = (target.width as i32, target.height as i32);
                 let mut next_cursor = None;
-                if let Some((cursor, (x, y), next)) = pointer.image(&self.renderer, now_ms, screen)
-                {
-                    next_cursor = next;
-                    layers.push(Layer {
-                        pixels: cursor.pixels(),
-                        x,
-                        y,
-                        under: Under::Flat,
-                        haze: &[],
-                        blur: &[],
-                    });
+                let cursor_layer = |pixels, (x, y): (i32, i32)| Layer {
+                    pixels,
+                    x,
+                    y,
+                    under: Under::Flat,
+                    haze: &[],
+                    blur: &[],
+                };
+                match (cursor, cursor_surface) {
+                    (Cursor::Shape(shape), _) => {
+                        let name = shape_name(shape);
+                        if let Some((image, corner, next)) =
+                            pointer.image(&self.renderer, now_ms, name, at)
+                        {
+                            next_cursor = next;
+                            layers.push(cursor_layer(image.pixels(), corner));
+                        }
+                    }
+                    (Cursor::Surface { .. }, Some((buffer, _, (hx, hy)))) => {
+                        if let Some(buffer) = store.buffers.get(&buffer) {
+                            layers.push(cursor_layer(buffer.pixels(), (at.0 - hx, at.1 - hy)));
+                        }
+                    }
+                    _ => {}
                 }
                 let look = Look {
                     flat: haze::flat(store.scheme),

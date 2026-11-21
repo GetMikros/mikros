@@ -4,8 +4,8 @@
 //! with its hotspot at the pointer's position, the top layer of every
 //! frame. A theme whose file is missing, has an unknown format version or
 //! is invalid is logged when the theme is chosen, and a built-in arrow is
-//! drawn instead. Until the compositor reads pointer devices, the pointer
-//! stays in the middle of the screen and shows `default`.
+//! drawn instead. The server says where the pointer is and which shape
+//! the client under it chose.
 
 use super::host::HostBuffer;
 use super::render::Renderer;
@@ -29,10 +29,6 @@ pub struct Pointer {
     theme: String,
     pack: cp::Pack,
     size: u32,
-    /// The shape that the client under the pointer chose.
-    pub shape: String,
-    /// The pointer's position on the output, once it moved.
-    pub position: Option<(i32, i32)>,
     /// The last frame rasterized, and its hotspot in pixels.
     image: Option<(Key, HostBuffer, (i32, i32))>,
 }
@@ -43,8 +39,6 @@ impl Pointer {
             theme: String::new(),
             pack: built_in(),
             size: POINTER_SIZE,
-            shape: "default".into(),
-            position: None,
             image: None,
         }
     }
@@ -76,16 +70,17 @@ impl Pointer {
         }
     }
 
-    /// The pointer at `now_ms` on a screen of `screen`: its pixels, where
-    /// their corner goes, and the milliseconds until its next frame when
-    /// it is animated.
+    /// The cursor `shape` at `now_ms` with its hotspot at `at`: its
+    /// pixels, where their corner goes, and the milliseconds until its
+    /// next frame when it is animated.
     pub fn image(
         &mut self,
         renderer: &Renderer,
         now_ms: u64,
-        screen: (i32, i32),
+        shape: &str,
+        at: (i32, i32),
     ) -> Option<(&HostBuffer, (i32, i32), Option<u64>)> {
-        let cursor = self.pack.cursor_or_default(&self.shape);
+        let cursor = self.pack.cursor_or_default(shape);
         let (frame, next) = frame_at(cursor, now_ms);
         let key = Key {
             theme: self.theme.clone(),
@@ -95,7 +90,7 @@ impl Pointer {
         };
         if self.image.as_ref().is_none_or(|(k, _, _)| *k != key) {
             self.forget(renderer);
-            let cursor = self.pack.cursor_or_default(&self.shape);
+            let cursor = self.pack.cursor_or_default(shape);
             let image = self.pack.rasterize(cursor, frame, self.size)?;
             let mut buffer = renderer
                 .host_pixels(&image.pixels, image.size, image.size)
@@ -104,8 +99,7 @@ impl Pointer {
             self.image = Some((key, buffer, image.hotspot));
         }
         let (_, buffer, (hx, hy)) = self.image.as_ref()?;
-        let (x, y) = self.position.unwrap_or((screen.0 / 2, screen.1 / 2));
-        Some((buffer, (x - hx, y - hy), next))
+        Some((buffer, (at.0 - hx, at.1 - hy), next))
     }
 }
 

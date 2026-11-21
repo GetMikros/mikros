@@ -221,6 +221,11 @@ impl Server {
         if self.screen == Some(screen) {
             return;
         }
+        // The pointer starts in the middle of the first screen.
+        if self.screen.is_none() {
+            self.pointer.x = f64::from(screen.0 / 2);
+            self.pointer.y = f64::from(screen.1 / 2);
+        }
         self.screen = Some(screen);
         let panels: Vec<SurfaceId> = self
             .surfaces

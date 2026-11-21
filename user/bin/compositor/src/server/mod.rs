@@ -21,6 +21,10 @@ mod xdg;
 pub use buffer::{BufferId, Imports, Point, TimelineId};
 #[cfg(target_os = "mikros")]
 pub use buffer::{Layout, Memory};
+#[cfg(target_os = "mikros")]
+pub use cursor_shape::shape_name;
+#[cfg(target_os = "mikros")]
+pub use seat::Cursor;
 pub use surface::{Rect, Role, Surface, SurfaceId};
 
 use crate::wayland::protocols::{
