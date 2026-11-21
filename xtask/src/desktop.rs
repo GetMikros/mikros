@@ -8,9 +8,10 @@
 //! until dee's session started on text console 1 and its screen shows,
 //! without the colour. Then it presses Ctrl, Alt and F1, which the
 //! console turns into a switch to the desktop, until the colour covers
-//! the screen, and Ctrl, Alt and F2, which the compositor turns into a
-//! switch back to the console, until the colour has left the screen
-//! again. In dee's session it then runs `desktop`, which starts dee's
+//! the screen, clicks the probe's toplevel, which gives it the keyboard,
+//! and types K, until the probe's second colour covers the screen, and
+//! presses Ctrl, Alt and F2, which the compositor turns into a switch
+//! back to the console, until that colour has left the screen again. In dee's session it then runs `desktop`, which starts dee's
 //! desktop, whose shell is the shell probe: the run waits until the
 //! wallpaper that its desktop part hands the compositor covers the
 //! screen, until the haze of that wallpaper shows under its taskbar
@@ -50,6 +51,7 @@ const SHELL_EXITED: &str = "compositor: the part start-menu of system.mikros.she
 /// wallpaper, in the bytes of the display, and how far a pixel may be
 /// from them.
 const COLOUR: [u8; 3] = [200, 40, 120];
+const TYPED: [u8; 3] = [40, 170, 90];
 const WALLPAPER: [u8; 3] = [40, 90, 160];
 /// The haze of that wallpaper in the light scheme, which the shell
 /// probe's transparent taskbar shows along the bottom edge, 48 rows of
@@ -283,8 +285,12 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         screen.until(&mut qemu, COLOUR, &gone, "the session's console showed")?;
         scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
         screen.until(&mut qemu, COLOUR, &covered, "the desktop showed")?;
+        scenario::monitor(&socket, "mouse_button 1")?;
+        scenario::monitor(&socket, "mouse_button 0")?;
+        scenario::monitor(&socket, "sendkey k")?;
+        screen.until(&mut qemu, TYPED, &covered, "the greeter took the key K")?;
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
-        screen.until(&mut qemu, COLOUR, &gone, "the console showed again")?;
+        screen.until(&mut qemu, TYPED, &gone, "the console showed again")?;
         crate::console::type_keys(&socket, "d e s k t o p ret")?;
         scenario::wait_for_line(&log, DESKTOP_STARTED, &mut qemu, deadline)?;
         let what = "dee's desktop showed";

@@ -6,6 +6,9 @@
  * the desktop run looks for on the screen. With the arguments
  * `--login <name> <password>`, it then logs that user in through
  * Login. Then it serves the connection until the compositor closes it.
+ * Once the seat has a keyboard, it takes the keyboard's keymap, and when
+ * the toplevel has the keyboard's focus and the key K is pressed, it
+ * presents a frame of a second colour.
  *
  * With the argument `--control`, as a part of the system app
  * system.mikros.shell_probe in a user session, it shows nothing and only
@@ -24,12 +27,13 @@
 #include <mikros/syscalls.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 #include <wayland-client.h>
 #define VK_USE_PLATFORM_WAYLAND_KHR
 #include <vulkan/vulkan.h>
 #include "xdg-shell-client-protocol.h"
 
-enum { ROLE_USER = 16, WAYLAND_ID = 1, LOGIN_ID = 3, KIND_CHANNEL = 9 };
+enum { ROLE_USER = 16, WAYLAND_ID = 1, LOGIN_ID = 3, KIND_CHANNEL = 9, KEY_K = 37 };
 
 /* The memory of the Login call's messages. */
 static uint8_t arena_memory[MIKROS_MIDL_CALL_ROOM + 4096];
@@ -37,12 +41,26 @@ static uint8_t arena_memory[MIKROS_MIDL_CALL_ROOM + 4096];
 /* The colour, in the bytes of a B8G8R8A8_UNORM image: red 200, green 40,
  * blue 120. */
 static const VkClearColorValue COLOUR = {.float32 = {200 / 255.0f, 40 / 255.0f, 120 / 255.0f, 1}};
+/* The colour once K was typed: red 40, green 170, blue 90. */
+static const VkClearColorValue TYPED = {.float32 = {40 / 255.0f, 170 / 255.0f, 90 / 255.0f, 1}};
 
 struct state {
 	struct wl_compositor *compositor;
 	struct xdg_wm_base *wm_base;
+	struct wl_seat *seat;
+	struct wl_keyboard *keyboard;
 	int32_t width, height;
 	int configured;
+	/* Whether the keyboard gave a keymap of xkb, whether the toplevel
+	 * has its focus, and whether K was typed: 1 until the frame of the
+	 * second colour is presented, then 2. */
+	int keymap, focused, typed;
+	/* What presents the toplevel's frames. */
+	VkDevice device;
+	VkQueue queue;
+	uint32_t family;
+	VkSwapchainKHR swapchain;
+	VkImage images[8];
 };
 
 static void global(void *data, struct wl_registry *registry, uint32_t name,
@@ -53,6 +71,8 @@ static void global(void *data, struct wl_registry *registry, uint32_t name,
 		s->compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
 	else if (strcmp(interface, xdg_wm_base_interface.name) == 0)
 		s->wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
+	else if (strcmp(interface, wl_seat_interface.name) == 0 && !s->seat)
+		s->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
 }
 
 static void global_remove(void *data, struct wl_registry *registry, uint32_t name)
@@ -101,11 +121,92 @@ static void surface_configure(void *data, struct xdg_surface *surface, uint32_t 
 
 static const struct xdg_surface_listener surface_listener = {.configure = surface_configure};
 
-/* Clears the image `image` of the swapchain and presents it: one command
- * buffer that waits for the acquisition and signals the presentation. */
-static int present(VkDevice device, VkQueue queue, uint32_t family, VkSwapchainKHR swapchain,
-		   const VkImage *images)
+static void keymap(void *data, struct wl_keyboard *keyboard, uint32_t format, int32_t fd,
+		   uint32_t size)
 {
+	struct state *s = data;
+	(void)keyboard;
+	s->keymap = format == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 && size > 0;
+	close(fd);
+}
+
+static void enter(void *data, struct wl_keyboard *keyboard, uint32_t serial,
+		  struct wl_surface *surface, struct wl_array *keys)
+{
+	struct state *s = data;
+	(void)keyboard, (void)serial, (void)surface, (void)keys;
+	s->focused = 1;
+}
+
+static void leave(void *data, struct wl_keyboard *keyboard, uint32_t serial,
+		  struct wl_surface *surface)
+{
+	struct state *s = data;
+	(void)keyboard, (void)serial, (void)surface;
+	s->focused = 0;
+}
+
+static void key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time,
+		uint32_t key, uint32_t state)
+{
+	struct state *s = data;
+	(void)keyboard, (void)serial, (void)time;
+	if (key == KEY_K && state == WL_KEYBOARD_KEY_STATE_PRESSED && s->keymap && s->focused &&
+	    !s->typed)
+		s->typed = 1;
+}
+
+static void modifiers(void *data, struct wl_keyboard *keyboard, uint32_t serial,
+		      uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group)
+{
+	(void)data, (void)keyboard, (void)serial, (void)depressed, (void)latched, (void)locked,
+		(void)group;
+}
+
+static void repeat_info(void *data, struct wl_keyboard *keyboard, int32_t rate, int32_t delay)
+{
+	(void)data, (void)keyboard, (void)rate, (void)delay;
+}
+
+static const struct wl_keyboard_listener keyboard_listener = {
+	.keymap = keymap,
+	.enter = enter,
+	.leave = leave,
+	.key = key,
+	.modifiers = modifiers,
+	.repeat_info = repeat_info,
+};
+
+/* The seat's keyboard, once it has one. */
+static void capabilities(void *data, struct wl_seat *seat, uint32_t capabilities)
+{
+	struct state *s = data;
+	if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !s->keyboard) {
+		s->keyboard = wl_seat_get_keyboard(seat);
+		wl_keyboard_add_listener(s->keyboard, &keyboard_listener, s);
+	}
+}
+
+static void seat_name(void *data, struct wl_seat *seat, const char *name)
+{
+	(void)data, (void)seat, (void)name;
+}
+
+static const struct wl_seat_listener seat_listener = {
+	.capabilities = capabilities,
+	.name = seat_name,
+};
+
+/* Clears the next image of the swapchain to `colour` and presents it:
+ * one command buffer that waits for the acquisition and signals the
+ * presentation. */
+static int present(struct state *s, const VkClearColorValue *colour)
+{
+	VkDevice device = s->device;
+	VkQueue queue = s->queue;
+	uint32_t family = s->family;
+	VkSwapchainKHR swapchain = s->swapchain;
+	const VkImage *images = s->images;
 	VkSemaphoreCreateInfo semaphore_info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 	VkSemaphore acquired, drawn;
 	if (vkCreateSemaphore(device, &semaphore_info, NULL, &acquired) != VK_SUCCESS ||
@@ -147,7 +248,7 @@ static int present(VkDevice device, VkQueue queue, uint32_t family, VkSwapchainK
 	vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
 			     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 	vkCmdClearColorImage(commands, images[index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			     &COLOUR, 1, &range);
+			     colour, 1, &range);
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = 0;
 	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -279,15 +380,16 @@ static int draw(struct wl_display *display, struct wl_surface *surface, struct s
 		.presentMode = VK_PRESENT_MODE_FIFO_KHR,
 		.clipped = VK_TRUE,
 	};
-	VkSwapchainKHR swapchain;
-	if (vkCreateSwapchainKHR(device, &swapchain_info, NULL, &swapchain) != VK_SUCCESS)
+	if (vkCreateSwapchainKHR(device, &swapchain_info, NULL, &s->swapchain) != VK_SUCCESS)
 		return 38;
-	VkImage images[8];
 	uint32_t image_count = 8;
-	got = vkGetSwapchainImagesKHR(device, swapchain, &image_count, images);
+	got = vkGetSwapchainImagesKHR(device, s->swapchain, &image_count, s->images);
 	if (got != VK_SUCCESS && got != VK_INCOMPLETE)
 		return 39;
-	return present(device, queue, family, swapchain, images);
+	s->device = device;
+	s->queue = queue;
+	s->family = family;
+	return present(s, &COLOUR);
 }
 
 /* Logs `name` in with `password` through the Login channel. */
@@ -343,6 +445,8 @@ int main(int argc, char **argv)
 	if (wl_display_roundtrip(display) < 0 || !s.compositor || !s.wm_base)
 		return 11;
 	xdg_wm_base_add_listener(s.wm_base, &wm_base_listener, &s);
+	if (s.seat)
+		wl_seat_add_listener(s.seat, &seat_listener, &s);
 
 	/* A fullscreen toplevel, which the compositor gives the screen's
 	 * size. */
@@ -367,7 +471,13 @@ int main(int argc, char **argv)
 	 * exit code, which the compositor logs, names the step. */
 	if (failed)
 		return failed;
-	while (wl_display_dispatch(display) >= 0)
-		;
+	while (wl_display_dispatch(display) >= 0) {
+		if (s.typed == 1) {
+			s.typed = 2;
+			failed = present(&s, &TYPED);
+			if (failed)
+				return failed;
+		}
+	}
 	return 0;
 }
