@@ -11,6 +11,7 @@ mod check;
 mod cmake;
 mod components;
 mod console;
+mod cursors;
 mod dawn;
 mod debug;
 mod debug_build;
@@ -82,6 +83,8 @@ enum Command {
     Casefold(casefold::Args),
     /// Check formatting, lints and the commits since the base branch.
     Check(check::Args),
+    /// Build a cursor theme and draw a preview of its cursors.
+    Cursors(cursors::Args),
     /// Build Dawn, the WebGPU library, for Mikros, as a static library.
     Dawn(dawn::Args),
     /// Boot the disk image in QEMU halted and attach GDB to the kernel.
@@ -119,6 +122,7 @@ fn main() -> ExitCode {
         Command::Build(args) => build::run(&args),
         Command::Casefold(args) => casefold::run(&args),
         Command::Check(args) => check::run(&args),
+        Command::Cursors(args) => cursors::run(&args),
         Command::Dawn(args) => dawn::run(&args),
         Command::Debug(args) => debug::run(&args),
         Command::Fuzz(args) => fuzz::run(&args),

@@ -10,6 +10,7 @@ mikrosboot = { path = "../boot/mikrosboot" }
 mikros-userdb = { path = "../user/lib/userdb" }
 mikros-mika = { path = "../user/lib/mika" }
 mikros-exfat = { path = "../user/lib/exfat" }
+mikros-curpack = { path = "../user/lib/curpack" }
 midlc = { path = "../tools/midlc" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -27,5 +28,6 @@ tar = "0.4.46"
 ureq = "3.5.0"
 serde_json = "1"
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+usvg = { version = "0.50", default-features = false }
 uuid = { version = "1.29.0", features = ["v4"] }
 addr2line = { version = "0.27.1", default-features = false, features = ["loader", "rustc-demangle", "std"] }

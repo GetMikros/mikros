@@ -30,6 +30,8 @@
 //!   subvolume `config`, which processes see as `/system/config`.
 //! - `share`: the paths, in its package, of data files that it installs
 //!   as `system/share/<path>`.
+//! - `cursors`: the folders, in its package, of cursor themes, each of
+//!   which `cursors::build` turns into `system/share/cursors/<folder>.curpack`.
 
 use crate::build::Kind;
 use anyhow::{Context, Result, bail};
@@ -82,6 +84,7 @@ pub struct Component {
     completions: Option<String>,
     config: Vec<String>,
     share: Vec<String>,
+    cursors: Vec<String>,
 }
 
 impl Component {
@@ -135,6 +138,12 @@ impl Component {
         }
         for path in &self.share {
             members.push((format!("system/share/{path}"), self.dir.join(path)));
+        }
+        for folder in &self.cursors {
+            let pack = crate::cursors::build(&self.dir.join(folder))?;
+            let name = pack.file_name().context("a cursor theme without a name")?;
+            let name = name.to_string_lossy();
+            members.push((format!("system/share/cursors/{name}"), pack));
         }
         Ok(members)
     }
@@ -266,6 +275,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
                 "completions",
                 "config",
                 "share",
+                "cursors",
             ];
             if !keys.contains(&key.as_str()) {
                 bail!("{name}: unknown key `{key}` in [package.metadata.mikros]");
@@ -313,7 +323,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
                 Some(_) => bail!("{name}: `{key}` is not a list"),
             }
         };
-        let (config, share) = (list("config")?, list("share")?);
+        let (config, share, cursors) = (list("config")?, list("share")?, list("cursors")?);
         let manifest_path = package["manifest_path"]
             .as_str()
             .context("a package without a manifest path")?;
@@ -332,6 +342,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             completions: text("completions")?,
             config,
             share,
+            cursors,
         });
     }
     Ok(components)
