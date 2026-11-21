@@ -73,12 +73,24 @@ pub struct ClientBuffer {
     buffer: vk::Buffer,
     pub(super) memory: vk::DeviceMemory,
     picture: Picture,
+    /// Whether the image is bound to the buffer's memory, in which case
+    /// there is no buffer of its own and nothing to copy.
+    direct: bool,
     pub width: u32,
     pub height: u32,
     pub(super) stride: u32,
     pub(super) offset: u32,
     /// Whether its fourth byte is alpha.
     pub(super) alpha: bool,
+}
+
+/// The layout of a client's buffer in memory.
+struct Shape {
+    width: u32,
+    height: u32,
+    stride: u32,
+    offset: u32,
+    alpha: bool,
 }
 
 /// An image that a layer samples, with the memory it owns.
@@ -103,7 +115,11 @@ pub(super) struct Source {
 pub struct Pixels {
     pub(super) image: vk::Image,
     pub(super) view: vk::ImageView,
-    pub(super) source: Source,
+    /// The layout that shaders sample the image in.
+    pub(super) layout: vk::ImageLayout,
+    /// What each frame copies from, unless the image is the buffer's
+    /// memory itself.
+    pub(super) source: Option<Source>,
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) alpha: bool,
@@ -114,11 +130,16 @@ impl ClientBuffer {
         Pixels {
             image: self.picture.image,
             view: self.picture.view,
-            source: Source {
+            layout: if self.direct {
+                vk::ImageLayout::GENERAL
+            } else {
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+            },
+            source: (!self.direct).then_some(Source {
                 buffer: self.buffer,
                 row: self.stride / BYTES_PER_PIXEL,
                 first: self.offset,
-            },
+            }),
             width: self.width,
             height: self.height,
             alpha: self.alpha,
@@ -405,7 +426,10 @@ impl Renderer {
     /// Imports `handle`, an export token when `token` and otherwise a
     /// memory object, as a buffer of `width` by `height` pixels with
     /// `stride` bytes a row from `offset`, whose fourth byte is alpha
-    /// when `alpha`. The import takes the handle; a failed one closes it.
+    /// when `alpha`. The memory is bound to a linear image that the shader
+    /// samples in place when the driver lays out its rows as the buffer
+    /// does, and otherwise to a buffer that each frame copies from. The
+    /// import takes the handle; a failed one closes it.
     pub fn import(
         &self,
         handle: OwnedHandle,
@@ -414,23 +438,89 @@ impl Renderer {
         alpha: bool,
     ) -> Result<ClientBuffer, Error> {
         let handle_type = if token { TOKEN } else { MEMORY_OBJECT };
-        let size = u64::from(offset) + u64::from(stride) * u64::from(height);
         if stride < width * BYTES_PER_PIXEL
             || stride % BYTES_PER_PIXEL != 0
             || offset % BYTES_PER_PIXEL != 0
         {
             return Err(Error::NoMemory);
         }
-        let mut external = vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle_type);
-        let info = vk::BufferCreateInfo::default()
-            .push_next(&mut external)
-            .size(size)
-            .usage(vk::BufferUsageFlags::TRANSFER_SRC);
-        // SAFETY: the create info and what it points to live for the call.
-        let buffer = unsafe { self.device.create_buffer(&info, None)? };
-        // SAFETY: the buffer belongs to the device.
-        let needs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let shape = Shape {
+            width,
+            height,
+            stride,
+            offset,
+            alpha,
+        };
         let raw = handle.into_raw_handle();
+        let linear = self.linear(handle_type, &shape);
+        mikros_rt::log!(
+            Info,
+            "compositor: a buffer of {width} by {height} pixels with {stride} bytes a row at {offset} is {}",
+            if linear.is_some() {
+                "sampled in place"
+            } else {
+                "copied for each frame"
+            }
+        );
+        match linear {
+            Some((image, needs)) => self.import_image(raw, handle_type, image, needs, shape),
+            None => self.import_buffer(raw, handle_type, shape),
+        }
+    }
+
+    /// A linear image of a buffer of `shape`, and what it needs, when its
+    /// rows lie where the buffer's do in memory that has room for it.
+    fn linear(
+        &self,
+        handle_type: vk::ExternalMemoryHandleTypeFlags,
+        shape: &Shape,
+    ) -> Option<(vk::Image, vk::MemoryRequirements)> {
+        let mut external = vk::ExternalMemoryImageCreateInfo::default().handle_types(handle_type);
+        let info = vk::ImageCreateInfo::default()
+            .push_next(&mut external)
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(FORMAT)
+            .extent(vk::Extent3D {
+                width: shape.width,
+                height: shape.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::LINEAR)
+            .usage(vk::ImageUsageFlags::SAMPLED)
+            .initial_layout(vk::ImageLayout::PREINITIALIZED);
+        // SAFETY: the create info and what it points to live for the call.
+        let image = unsafe { self.device.create_image(&info, None) }.ok()?;
+        let subresource = vk::ImageSubresource::default().aspect_mask(vk::ImageAspectFlags::COLOR);
+        // SAFETY: the image is linear and belongs to the device.
+        let layout = unsafe { self.device.get_image_subresource_layout(image, subresource) };
+        // SAFETY: as above.
+        let needs = unsafe { self.device.get_image_memory_requirements(image) };
+        let fits = layout.offset == 0
+            && layout.row_pitch == u64::from(shape.stride)
+            && needs.alignment != 0
+            && u64::from(shape.offset) % needs.alignment == 0
+            && needs.size <= u64::from(shape.stride) * u64::from(shape.height);
+        if fits {
+            Some((image, needs))
+        } else {
+            // SAFETY: the image is unused.
+            unsafe { self.device.destroy_image(image, None) };
+            None
+        }
+    }
+
+    /// Imports `raw` as memory of `handle_type` and `size` bytes, of a type
+    /// in `type_bits`; the memory takes the handle, and a failure closes it.
+    fn allocate(
+        &self,
+        raw: u32,
+        handle_type: vk::ExternalMemoryHandleTypeFlags,
+        size: u64,
+        type_bits: u32,
+    ) -> Result<vk::DeviceMemory, Error> {
         let import = ImportMemoryHandleInfo {
             s_type: IMPORT_MEMORY_HANDLE_INFO,
             p_next: std::ptr::null(),
@@ -438,34 +528,171 @@ impl Renderer {
             handle: raw,
         };
         let memory_type = self
-            .memory_type(
-                needs.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE,
-            )
-            .or_else(|_| {
-                self.memory_type(needs.memory_type_bits, vk::MemoryPropertyFlags::empty())
-            });
-        let mut info = vk::MemoryAllocateInfo::default()
-            .allocation_size(needs.size.max(size))
-            .memory_type_index(memory_type?);
-        info.p_next = (&raw const import).cast();
-        // SAFETY: the info and the import structure live for the call; on
-        // success the driver owns the handle.
-        let memory = match unsafe { self.device.allocate_memory(&info, None) } {
+            .memory_type(type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE)
+            .or_else(|_| self.memory_type(type_bits, vk::MemoryPropertyFlags::empty()));
+        let mut info = vk::MemoryAllocateInfo::default().allocation_size(size);
+        let result = memory_type.and_then(|index| {
+            info = info.memory_type_index(index);
+            info.p_next = (&raw const import).cast();
+            // SAFETY: the info and the import structure live for the call;
+            // on success the driver owns the handle.
+            Ok(unsafe { self.device.allocate_memory(&info, None)? })
+        });
+        if result.is_err() {
+            // SAFETY: a failed import leaves the handle with us.
+            drop(unsafe { OwnedHandle::from_raw_handle(raw) });
+        }
+        result
+    }
+
+    /// The image that `linear` made, bound to the imported memory at the
+    /// buffer's offset, for the shader to sample in place.
+    fn import_image(
+        &self,
+        raw: u32,
+        handle_type: vk::ExternalMemoryHandleTypeFlags,
+        image: vk::Image,
+        needs: vk::MemoryRequirements,
+        shape: Shape,
+    ) -> Result<ClientBuffer, Error> {
+        let size = u64::from(shape.offset) + needs.size;
+        let memory = match self.allocate(raw, handle_type, size, needs.memory_type_bits) {
             Ok(memory) => memory,
             Err(e) => {
-                // SAFETY: a failed import leaves the handle with us.
+                // SAFETY: the image is unused.
+                unsafe { self.device.destroy_image(image, None) };
+                return Err(e);
+            }
+        };
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        let info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(FORMAT)
+            .subresource_range(range);
+        // SAFETY: the memory has room for the image from the offset, which
+        // `linear` checked to suit its alignment.
+        let view = unsafe {
+            self.device
+                .bind_image_memory(image, memory, u64::from(shape.offset))
+                .and_then(|()| self.device.create_image_view(&info, None))
+        };
+        let made = view
+            .map_err(Error::from)
+            .and_then(|view| self.make_general(image).map(|()| view));
+        let view = match made {
+            Ok(view) => view,
+            Err(e) => {
+                // SAFETY: nothing uses the image or its memory.
+                unsafe {
+                    self.device.destroy_image(image, None);
+                    self.device.free_memory(memory, None);
+                }
+                return Err(e);
+            }
+        };
+        Ok(ClientBuffer {
+            buffer: vk::Buffer::null(),
+            memory,
+            picture: Picture {
+                image,
+                view,
+                memory: vk::DeviceMemory::null(),
+            },
+            direct: true,
+            width: shape.width,
+            height: shape.height,
+            stride: shape.stride,
+            offset: shape.offset,
+            alpha: shape.alpha,
+        })
+    }
+
+    /// Moves `image`, whose contents a client wrote, to the layout that
+    /// shaders sample it in, and waits for that.
+    fn make_general(&self, image: vk::Image) -> Result<(), Error> {
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        let barrier = vk::ImageMemoryBarrier::default()
+            .image(image)
+            .old_layout(vk::ImageLayout::PREINITIALIZED)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_access_mask(vk::AccessFlags::HOST_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .subresource_range(range);
+        let d = &self.device;
+        // SAFETY: the command buffer is not recording, no frame is being
+        // drawn, and the image belongs to the device.
+        unsafe {
+            d.reset_command_buffer(self.commands, vk::CommandBufferResetFlags::empty())?;
+            d.begin_command_buffer(self.commands, &vk::CommandBufferBeginInfo::default())?;
+            d.cmd_pipeline_barrier(
+                self.commands,
+                vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+            d.end_command_buffer(self.commands)?;
+            let commands = [self.commands];
+            let submit = vk::SubmitInfo::default().command_buffers(&commands);
+            d.queue_submit(self.queue, &[submit], self.fence)?;
+            d.wait_for_fences(&[self.fence], true, u64::MAX)?;
+            d.reset_fences(&[self.fence])?;
+        }
+        Ok(())
+    }
+
+    /// The buffer of `shape` as a Vulkan buffer of the imported memory,
+    /// with an image of its own for the shader.
+    fn import_buffer(
+        &self,
+        raw: u32,
+        handle_type: vk::ExternalMemoryHandleTypeFlags,
+        shape: Shape,
+    ) -> Result<ClientBuffer, Error> {
+        let size = u64::from(shape.offset) + u64::from(shape.stride) * u64::from(shape.height);
+        let mut external = vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle_type);
+        let info = vk::BufferCreateInfo::default()
+            .push_next(&mut external)
+            .size(size)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC);
+        // SAFETY: the create info and what it points to live for the call.
+        let buffer = match unsafe { self.device.create_buffer(&info, None) } {
+            Ok(buffer) => buffer,
+            Err(e) => {
+                // SAFETY: the import has not taken the handle.
                 drop(unsafe { OwnedHandle::from_raw_handle(raw) });
+                return Err(e.into());
+            }
+        };
+        // SAFETY: the buffer belongs to the device.
+        let needs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory = match self.allocate(
+            raw,
+            handle_type,
+            needs.size.max(size),
+            needs.memory_type_bits,
+        ) {
+            Ok(memory) => memory,
+            Err(e) => {
                 // SAFETY: the buffer is unused.
                 unsafe { self.device.destroy_buffer(buffer, None) };
-                return Err(e.into());
+                return Err(e);
             }
         };
         // SAFETY: the memory holds the buffer's size.
         let bound = unsafe { self.device.bind_buffer_memory(buffer, memory, 0) };
         let picture = bound
             .map_err(Error::from)
-            .and_then(|()| self.picture(width, height));
+            .and_then(|()| self.picture(shape.width, shape.height));
         let picture = match picture {
             Ok(picture) => picture,
             Err(e) => {
@@ -481,11 +708,12 @@ impl Renderer {
             buffer,
             memory,
             picture,
-            width,
-            height,
-            stride,
-            offset,
-            alpha,
+            direct: false,
+            width: shape.width,
+            height: shape.height,
+            stride: shape.stride,
+            offset: shape.offset,
+            alpha: shape.alpha,
         })
     }
 
@@ -587,6 +815,9 @@ impl Renderer {
         let mut copies: Vec<(Pixels, Vec<vk::BufferImageCopy>)> = Vec::new();
         for layer in layers {
             let p = layer.pixels;
+            let Some(source) = p.source else {
+                continue;
+            };
             let (x0, y0) = (layer.x, layer.y);
             let regions: Vec<vk::BufferImageCopy> = areas
                 .iter()
@@ -598,12 +829,12 @@ impl Renderer {
                         (area.offset.y + area.extent.height as i32).min(y0 + p.height as i32);
                     (right > left && bottom > top).then(|| {
                         let (x, y) = ((left - x0) as u32, (top - y0) as u32);
-                        let at = u64::from(p.source.first)
-                            + (u64::from(y) * u64::from(p.source.row) + u64::from(x))
+                        let at = u64::from(source.first)
+                            + (u64::from(y) * u64::from(source.row) + u64::from(x))
                                 * u64::from(BYTES_PER_PIXEL);
                         vk::BufferImageCopy::default()
                             .buffer_offset(at)
-                            .buffer_row_length(p.source.row)
+                            .buffer_row_length(source.row)
                             .image_subresource(
                                 vk::ImageSubresourceLayers::default()
                                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -681,9 +912,12 @@ impl Renderer {
                 &to_copy,
             );
             for (p, regions) in &copies {
+                let Some(source) = p.source else {
+                    continue;
+                };
                 self.device.cmd_copy_buffer_to_image(
                     self.commands,
-                    p.source.buffer,
+                    source.buffer,
                     p.image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     regions,
@@ -886,7 +1120,7 @@ impl Renderer {
                     }
                     let image = [vk::DescriptorImageInfo::default()
                         .image_view(layer.pixels.view)
-                        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                        .image_layout(layer.pixels.layout)];
                     let mut writes = vec![
                         vk::WriteDescriptorSet::default()
                             .dst_binding(0)

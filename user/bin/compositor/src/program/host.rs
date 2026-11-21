@@ -30,11 +30,12 @@ impl HostBuffer {
         Some(Pixels {
             image: picture.image,
             view: picture.view,
-            source: Source {
+            layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            source: Some(Source {
                 buffer: self.buffer,
                 row: self.width,
                 first: 0,
-            },
+            }),
             width: self.width,
             height: self.height,
             alpha: self.alpha,
