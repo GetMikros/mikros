@@ -17,9 +17,9 @@ install(TARGETS tally-cmake base-cmake count-cmake tally-cmake-user)
 find_library(MIKROS_LIBC c REQUIRED)
 find_library(MIKROS_UNWIND unwind REQUIRED)
 find_library(MIKROS_EXPERIMENTAL c++experimental REQUIRED)
-if(NOT MIKROS_LIBC MATCHES "/lib/libc[.]dlib$" OR
-   NOT MIKROS_UNWIND MATCHES "/lib/libunwind[.]dlib$" OR
-   NOT MIKROS_EXPERIMENTAL MATCHES "/lib/libc[+][+]experimental[.]slib$")
+if(NOT MIKROS_LIBC MATCHES "/libraries/libc[.]dlib$" OR
+   NOT MIKROS_UNWIND MATCHES "/libraries/libunwind[.]dlib$" OR
+   NOT MIKROS_EXPERIMENTAL MATCHES "/libraries/libc[+][+]experimental[.]slib$")
   message(FATAL_ERROR
     "found ${MIKROS_LIBC}, ${MIKROS_UNWIND} and ${MIKROS_EXPERIMENTAL}")
 endif()
