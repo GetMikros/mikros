@@ -1,18 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protocol name="mikros_material_v1">
-  <description summary="MIKSPEC-0076.R16"/>
+  <description summary="MIKSPEC-0076.R16, MIKSPEC-0076.R22"/>
 
   <interface name="mikros_material_v1" version="1">
-    <description summary="MIKSPEC-0076.R16"/>
+    <description summary="MIKSPEC-0076.R16, MIKSPEC-0076.R22"/>
 
     <request name="get_material">
       <arg name="id" type="new_id" interface="mikros_surface_material_v1"/>
       <arg name="surface" type="object" interface="wl_surface"/>
     </request>
+
+    <enum name="error">
+      <entry name="surface_exists" value="0"/>
+    </enum>
   </interface>
 
   <interface name="mikros_surface_material_v1" version="1">
-    <description summary="MIKSPEC-0076.R16"/>
+    <description summary="MIKSPEC-0076.R16, MIKSPEC-0076.R22"/>
 
     <request name="set_region">
       <arg name="material" type="uint"/>
@@ -20,5 +24,10 @@
     </request>
 
     <request name="destroy" type="destructor"/>
+
+    <enum name="error">
+      <entry name="invalid_material" value="0"/>
+      <entry name="no_surface" value="1"/>
+    </enum>
   </interface>
 </protocol>

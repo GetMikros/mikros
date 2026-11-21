@@ -1,5 +1,5 @@
 //! `mikros_buffer_v1`, `mikros_surface_sync_v1`, `mikros_timeline_v1` and
-//! `wl_buffer` (MIKSPEC-0076.R18): buffers of export tokens and memory
+//! `wl_buffer` (MIKSPEC-0076.R23): buffers of export tokens and memory
 //! objects, kernel timelines, and the acquire and release points that each
 //! commit of a buffer sets. Importing is done by `Imports`, which the
 //! program implements with its render device and the kernel.
@@ -519,6 +519,11 @@ mod tests {
             client.error(&mut server),
             Some(mikros_surface_sync_v1::error::NO_SURFACE)
         );
+        // But destroying the sync object after its surface is not one.
+        let client = with_sync(&mut server);
+        client.send(&mut server, 4, 0, vec![]);
+        client.send(&mut server, 8, 2, vec![]);
+        assert_eq!(client.error(&mut server), None);
         let _ = wl_display::EVENTS;
     }
 }

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protocol name="mikros_buffer_v1">
-  <description summary="MIKSPEC-0076.R18"/>
+  <description summary="MIKSPEC-0076.R23"/>
 
   <interface name="mikros_buffer_v1" version="1">
-    <description summary="MIKSPEC-0076.R18"/>
+    <description summary="MIKSPEC-0076.R23"/>
 
     <request name="create_from_token">
       <arg name="id" type="new_id" interface="wl_buffer"/>
@@ -57,7 +57,7 @@
   </interface>
 
   <interface name="mikros_surface_sync_v1" version="1">
-    <description summary="MIKSPEC-0076.R18"/>
+    <description summary="MIKSPEC-0076.R23"/>
 
     <request name="set_acquire_point">
       <arg name="timeline" type="object" interface="mikros_timeline_v1"/>
@@ -81,7 +81,7 @@
   </interface>
 
   <interface name="mikros_timeline_v1" version="1">
-    <description summary="MIKSPEC-0076.R18"/>
+    <description summary="MIKSPEC-0076.R23"/>
 
     <request name="destroy" type="destructor"/>
   </interface>

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <protocol name="mikros_shell_v1">
-  <description summary="MIKSPEC-0076.R3, MIKSPEC-0076.R4, MIKSPEC-0076.R5, MIKSPEC-0076.R6, MIKSPEC-0076.R8, MIKSPEC-0076.R11, MIKSPEC-0076.R12, MIKSPEC-0076.R13, MIKSPEC-0076.R14"/>
+  <description summary="MIKSPEC-0076.R3, MIKSPEC-0076.R4, MIKSPEC-0076.R5, MIKSPEC-0076.R6, MIKSPEC-0076.R8, MIKSPEC-0076.R11, MIKSPEC-0076.R12, MIKSPEC-0076.R13, MIKSPEC-0076.R14, MIKSPEC-0076.R19, MIKSPEC-0076.R20"/>
 
   <interface name="mikros_panel_v1" version="1">
-    <description summary="MIKSPEC-0076.R3"/>
+    <description summary="MIKSPEC-0076.R3, MIKSPEC-0076.R20"/>
 
     <request name="set_thickness">
       <arg name="thickness" type="uint"/>
@@ -26,10 +26,16 @@
     </event>
 
     <event name="closed"/>
+
+    <enum name="error">
+      <entry name="invalid_serial" value="0"/>
+      <entry name="unconfigured_buffer" value="1"/>
+      <entry name="no_surface" value="2"/>
+    </enum>
   </interface>
 
   <interface name="mikros_overlay_v1" version="1">
-    <description summary="MIKSPEC-0076.R4"/>
+    <description summary="MIKSPEC-0076.R4, MIKSPEC-0076.R20"/>
 
     <request name="set_position">
       <arg name="x" type="int"/>
@@ -39,6 +45,10 @@
     <request name="destroy" type="destructor"/>
 
     <event name="dismissed"/>
+
+    <enum name="error">
+      <entry name="no_surface" value="0"/>
+    </enum>
   </interface>
 
   <interface name="mikros_toplevel_list_v1" version="1">
@@ -157,7 +167,7 @@
   </interface>
 
   <interface name="mikros_shell_v1" version="1">
-    <description summary="MIKSPEC-0076.R12, MIKSPEC-0076.R14"/>
+    <description summary="MIKSPEC-0076.R12, MIKSPEC-0076.R14, MIKSPEC-0076.R19"/>
 
     <request name="get_panel">
       <arg name="id" type="new_id" interface="mikros_panel_v1"/>
@@ -326,10 +336,22 @@
       <description summary="MIKSPEC-0076.R14"/>
       <arg name="request" type="uint"/>
     </request>
+
+    <enum name="error">
+      <entry name="forbidden" value="0"/>
+      <entry name="invalid_edge" value="1"/>
+      <entry name="surface_has_role" value="2"/>
+      <entry name="invalid_shutdown_kind" value="3"/>
+      <entry name="invalid_dialog" value="4"/>
+      <entry name="not_shown" value="5"/>
+      <entry name="invalid_index" value="6"/>
+      <entry name="unknown_request" value="7"/>
+      <entry name="invalid_choice" value="8"/>
+    </enum>
   </interface>
 
   <interface name="mikros_background_v1" version="1">
-    <description summary="MIKSPEC-0076.R13"/>
+    <description summary="MIKSPEC-0076.R13, MIKSPEC-0076.R20"/>
 
     <request name="ack_configure">
       <arg name="serial" type="uint"/>
@@ -344,10 +366,16 @@
     </event>
 
     <event name="closed"/>
+
+    <enum name="error">
+      <entry name="invalid_serial" value="0"/>
+      <entry name="unconfigured_buffer" value="1"/>
+      <entry name="no_surface" value="2"/>
+    </enum>
   </interface>
 
   <interface name="mikros_secure_surface_v1" version="1">
-    <description summary="MIKSPEC-0076.R14"/>
+    <description summary="MIKSPEC-0076.R14, MIKSPEC-0076.R20"/>
 
     <request name="ack_configure">
       <arg name="serial" type="uint"/>
@@ -362,5 +390,11 @@
     </event>
 
     <event name="closed"/>
+
+    <enum name="error">
+      <entry name="invalid_serial" value="0"/>
+      <entry name="unconfigured_buffer" value="1"/>
+      <entry name="no_surface" value="2"/>
+    </enum>
   </interface>
 </protocol>
