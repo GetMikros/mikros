@@ -1,5 +1,7 @@
 //! `cargo xtask sysroot`: the directory that C and C++ programs for
 //! Mikros are built against, laid out like `/system` (MIKSPEC-0062.R13).
+//! `cargo xtask sysroot` also installs the system libraries that
+//! `crate::system_libraries` builds.
 //!
 //! It holds the musl headers in `include/`, with the generated
 //! `<mikros/syscalls.h>`, `<mikros/abi.h>`, `<mikros/process.h>`,
@@ -57,6 +59,7 @@ pub struct Args {}
 
 pub fn run(_args: &Args) -> Result<()> {
     let sysroot = build()?;
+    crate::system_libraries::install()?;
     println!("built    {}", sysroot.display());
     Ok(())
 }

@@ -3,59 +3,20 @@
 //! package. It is built from the fork's commit that the port pins,
 //! against the libraries of the sysroot, which gets the libraries of the
 //! ports that SDL links: libwayland, which `crate::wayland::build`
-//! installs there, and xkbcommon, installed here.
+//! installs there, and xkbcommon, which `crate::system_libraries`
+//! installs.
 
-use anyhow::{Context, Result};
-use std::fs;
-use std::path::{Path, PathBuf};
+use anyhow::Result;
+use std::path::PathBuf;
 
 /// The library's file name in the install directory's `libraries`.
 pub const LIBRARY: &str = "libSDL3.slib";
-
-/// Writes `contents` to `path`, creating its directory, unless it holds
-/// them already.
-fn write_if_changed(path: &Path, contents: &[u8]) -> Result<()> {
-    if fs::read(path).ok().as_deref() == Some(contents) {
-        return Ok(());
-    }
-    fs::create_dir_all(path.parent().context("a path without a directory")?)?;
-    fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
-}
-
-/// Installs the xkbcommon library, its headers and a pkg-config file that
-/// links it in the sysroot, which is where the ports that link it find it.
-fn install_xkbcommon() -> Result<()> {
-    let port = crate::ports::load("xkbcommon")?;
-    let built = crate::ports::build(&port)?;
-    let sysroot = crate::sysroot::dir();
-    let library = built.install.join("libraries/libxkbcommon.dlib");
-    write_if_changed(
-        &sysroot.join("libraries/libxkbcommon.dlib"),
-        &fs::read(&library).with_context(|| format!("reading {}", library.display()))?,
-    )?;
-    let headers = built.install.join("include/xkbcommon");
-    for entry in fs::read_dir(&headers).with_context(|| format!("reading {}", headers.display()))? {
-        let path = entry?.path();
-        let name = path.file_name().context("a header without a name")?;
-        write_if_changed(
-            &sysroot.join("include/xkbcommon").join(name),
-            &fs::read(&path)?,
-        )?;
-    }
-    let pc = built.install.join("libraries/pkgconfig/xkbcommon.pc");
-    let pc = fs::read_to_string(&pc).with_context(|| format!("reading {}", pc.display()))?;
-    let pc = pc.replace("prefix=/system", "prefix=");
-    write_if_changed(
-        &sysroot.join("libraries/pkgconfig/xkbcommon.pc"),
-        pc.as_bytes(),
-    )
-}
 
 /// Builds SDL3, and returns the directory its prefix, `/system`, was
 /// installed in.
 pub fn build() -> Result<PathBuf> {
     let wayland = crate::wayland::build()?;
-    install_xkbcommon()?;
+    crate::system_libraries::xkbcommon()?;
     let port = crate::ports::load("sdl3")?;
     let source = crate::ports::source(&port)?;
     let sysroot = crate::sysroot::dir();
