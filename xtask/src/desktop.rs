@@ -59,6 +59,14 @@ const HAZE_PART: f64 = 0.05;
 /// screen until it reads pointer devices: 2 right of the hotspot and 7
 /// below it.
 const ARROW_PIXEL: (usize, usize) = (642, 407);
+/// The colour of the window that the shell probe's SDL part shows, which
+/// the compositor puts at the top left corner of the screen, and its size,
+/// and what the compositor logs when that part ends, which it must not do
+/// before its window showed, with its failed step's number after it if it
+/// failed.
+const SDL_COLOUR: [u8; 3] = [230, 150, 20];
+const SDL_WINDOW: (usize, usize) = (128, 96);
+const SDL_EXITED: &str = "compositor: the part switcher of system.mikros.shell_probe exited";
 const TOLERANCE: u8 = 2;
 /// The share of the screen that the colour must cover, and the share
 /// that it may still cover on a text console's screen.
@@ -83,6 +91,29 @@ fn colour_share(ppm: &[u8], colour: [u8; 3], part: f64) -> Option<f64> {
     };
     let shown = pixels.iter().filter(|p| near(p)).count();
     Some(shown as f64 / pixels.len() as f64)
+}
+
+/// The share of the pixels of the `width` by `height` corner at the top
+/// left of the screen dump `ppm` that show `colour`, or None when it is
+/// not a PPM image or has no such corner.
+fn corner_share(ppm: &[u8], colour: [u8; 3], (width, height): (usize, usize)) -> Option<f64> {
+    let head = &ppm[..ppm.len().min(32)];
+    let text = String::from_utf8_lossy(head);
+    let screen_width: usize = text.split_ascii_whitespace().nth(1)?.parse().ok()?;
+    let all = scenario::ppm_pixels(ppm)?;
+    if width == 0 || height == 0 || width > screen_width || all.len() < height * screen_width {
+        return None;
+    }
+    let near = |p: &[u8; 3]| {
+        p.iter()
+            .zip(colour)
+            .all(|(&a, b)| a.abs_diff(b) <= TOLERANCE)
+    };
+    let shown = (0..height)
+        .flat_map(|row| &all[row * screen_width..row * screen_width + width])
+        .filter(|p| near(p))
+        .count();
+    Some(shown as f64 / (width * height) as f64)
 }
 
 /// The pixel at `(x, y)` of the screen dump `ppm`.
@@ -145,6 +176,47 @@ impl Screen<'_> {
     }
 }
 
+impl Screen<'_> {
+    /// Dumps the screen until the `window` corner at its top left shows
+    /// `colour` all over, which `what` names, while `qemu` runs,
+    /// and fails at once if `log` says that the part that shows it ended,
+    /// which `ended` is the line of.
+    fn until_corner(
+        &mut self,
+        qemu: &mut std::process::Child,
+        log: &Path,
+        ended: &str,
+        colour: [u8; 3],
+        window: (usize, usize),
+        what: &str,
+    ) -> Result<()> {
+        loop {
+            let ppm = scenario::screen_dump(self.socket, self.dump)?;
+            let share = corner_share(&ppm, colour, window)
+                .context("the screen dump is not a PPM image with that corner")?;
+            // The whole corner: the client clears all of its window, so a
+            // pixel of another colour is a fault and no slack.
+            if share >= 1.0 {
+                return Ok(());
+            }
+            let serial = fs::read_to_string(log).unwrap_or_default();
+            if let Some(line) = serial.lines().find(|l| l.contains(ended)) {
+                bail!("before {what}: {}", line.trim_end());
+            }
+            if qemu.try_wait()?.is_some() {
+                bail!("QEMU exited before {what}");
+            }
+            if Instant::now() > self.deadline {
+                bail!(
+                    "timed out before {what}, with the colour on {:.0}% of the corner",
+                    share * 100.0
+                );
+            }
+            std::thread::sleep(DUMP_EVERY);
+        }
+    }
+}
+
 /// Boots the desktop run of the build kind `kind` in `dir`, and fails
 /// unless the probe's colour covers the screen before `timeout`.
 pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> Result<()> {
@@ -183,6 +255,8 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         screen.until(&mut qemu, WALLPAPER, &covered, what)?;
         let what = "the taskbar's haze showed";
         screen.until_below(&mut qemu, HAZE, HAZE_PART, &covered, what)?;
+        let what = "the SDL window showed";
+        screen.until_corner(&mut qemu, &log, SDL_EXITED, SDL_COLOUR, SDL_WINDOW, what)?;
         let shown = pixel(&fs::read(&dump)?, ARROW_PIXEL);
         if shown != Some([0, 0, 0]) {
             bail!("the pointer's arrow is not in the middle of the screen: {shown:?}");
@@ -238,5 +312,23 @@ mod tests {
         assert_eq!(colour_share(&screen, COLOUR, 0.5), Some(0.5));
         assert_eq!(pixel(&screen, (2, 0)), Some([40, 90, 160]));
         assert_eq!(pixel(&screen, (4, 0)), None);
+    }
+
+    #[test]
+    fn counts_the_pixels_of_the_corner() {
+        let (c, w) = (SDL_COLOUR, WALLPAPER);
+        // A screen of 4 by 3 pixels, whose 2 by 2 corner has one pixel of
+        // the wrong colour, and a window colour elsewhere that does not
+        // count.
+        let rows = [[c, c, c, c], [c, w, w, w], [c, c, c, c]];
+        let mut screen = b"P6\n4 3\n255\n".to_vec();
+        screen.extend(rows.iter().flatten().flatten());
+        assert_eq!(corner_share(&screen, SDL_COLOUR, (2, 2)), Some(0.75));
+        assert_eq!(corner_share(&screen, SDL_COLOUR, (1, 3)), Some(1.0));
+        assert_eq!(corner_share(&screen, WALLPAPER, (2, 2)), Some(0.25));
+        assert_eq!(corner_share(&screen, SDL_COLOUR, (5, 1)), None);
+        assert_eq!(corner_share(&screen, SDL_COLOUR, (2, 4)), None);
+        assert_eq!(corner_share(&screen, SDL_COLOUR, (0, 2)), None);
+        assert_eq!(corner_share(b"not a picture", SDL_COLOUR, (1, 1)), None);
     }
 }

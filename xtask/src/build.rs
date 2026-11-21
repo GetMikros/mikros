@@ -315,7 +315,9 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Resu
                 )?;
                 println!("built    {}", program.display());
                 only_tests.push(("system/bin/tests/vulkan-c".to_owned(), program));
-                only_tests.extend(greeter_probe(&wayland, &vulkan, &headers)?);
+                only_tests.extend(greeter_probe(
+                    &wayland, &vulkan, &headers, &sdl, &xkbcommon,
+                )?);
             }
             // The system fonts and the fontconfig configuration that names
             // them as the defaults.
@@ -2641,6 +2643,8 @@ fn greeter_probe(
     wayland: &crate::wayland::Built,
     vulkan: &Path,
     headers: &Path,
+    sdl: &Path,
+    xkbcommon: &crate::ports::Built,
 ) -> Result<Vec<(String, PathBuf)>> {
     let name = "greeter-probe";
     let dir = c_dir(name);
@@ -2697,6 +2701,7 @@ fn greeter_probe(
     sources.extend(code.iter().map(String::as_str));
     let program = c_build(name, &sources, Linking::Dynamic, &args)?;
     println!("built    {}", program.display());
+    let sdl_program = sdl_probe(wayland, vulkan, headers, sdl, xkbcommon)?;
     let greeter = crate::system_apps::SystemApp {
         id: "system.mikros.greeter_probe",
         version: "1.0.0",
@@ -2709,8 +2714,9 @@ fn greeter_probe(
     };
     // The shell of the desktop run's user session: its desktop part hands
     // the compositor a wallpaper of a test colour, its taskbar part shows
-    // a panel of haze, and its start-menu part connects to the service
-    // manager's Control and so asks a question.
+    // a panel of haze, its start-menu part connects to the service
+    // manager's Control and so asks a question, and its switcher part is a
+    // window of SDL's, which only has to show.
     let shell = crate::system_apps::SystemApp {
         id: "system.mikros.shell_probe",
         version: "1.0.0",
@@ -2722,12 +2728,60 @@ fn greeter_probe(
                       - roles: [taskbar]\n    executable: greeter-probe\n    \
                       arguments: [\"--panel\"]\n  \
                       - roles: [start-menu]\n    executable: greeter-probe\n    \
-                      arguments: [\"--control\"]\n",
-        files: vec![(name.to_owned(), program, true)],
+                      arguments: [\"--control\"]\n  \
+                      - roles: [switcher]\n    executable: sdl-probe\n    \
+                      arguments: []\n",
+        files: vec![
+            (name.to_owned(), program, true),
+            ("sdl-probe".to_owned(), sdl_program, true),
+        ],
     };
     let mut members = crate::system_apps::members(&greeter, &dir.join("app"))?;
     members.extend(crate::system_apps::members(&shell, &dir.join("app"))?);
     Ok(members)
+}
+
+/// Builds the SDL part of the desktop run, `user/tests/sdl-probe`: a
+/// window of SDL's Wayland driver that Vulkan clears and presents. SDL3 is
+/// linked statically, from `sdl`'s install, and the libraries that it
+/// needs, Wayland and xkbcommon, and the Vulkan loader dynamically.
+fn sdl_probe(
+    wayland: &crate::wayland::Built,
+    vulkan: &Path,
+    headers: &Path,
+    sdl: &Path,
+    xkbcommon: &crate::ports::Built,
+) -> Result<PathBuf> {
+    let args = [
+        "-Wall".to_string(),
+        "-Wextra".into(),
+        "-Werror".into(),
+        format!("-I{}", headers.display()),
+        format!("-I{}", sdl.join("include").display()),
+        sdl.join("libraries")
+            .join(crate::sdl::LIBRARY)
+            .display()
+            .to_string(),
+        wayland.library.display().to_string(),
+        xkbcommon
+            .install
+            .join("libraries/libxkbcommon.dlib")
+            .display()
+            .to_string(),
+        vulkan
+            .join("libraries")
+            .join(crate::vulkan::LOADER)
+            .display()
+            .to_string(),
+    ];
+    let program = c_build(
+        "sdl-probe",
+        &["user/tests/sdl-probe/sdl.c"],
+        Linking::Dynamic,
+        &args,
+    )?;
+    println!("built    {}", program.display());
+    Ok(program)
 }
 
 /// The directory that `c_build` builds `name` in.
