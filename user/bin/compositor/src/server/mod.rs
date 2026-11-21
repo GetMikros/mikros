@@ -26,6 +26,8 @@ pub use buffer::{Layout, Memory};
 #[cfg(target_os = "mikros")]
 pub use cursor_shape::shape_name;
 #[cfg(target_os = "mikros")]
+pub use keyboard::Modifiers;
+#[cfg(target_os = "mikros")]
 pub use seat::Cursor;
 pub use surface::{Rect, Role, Surface, SurfaceId};
 

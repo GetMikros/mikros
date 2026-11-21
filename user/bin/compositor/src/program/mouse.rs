@@ -63,7 +63,7 @@ impl Compositor {
         if !accepted {
             return;
         }
-        let mut keys = Keys::new(&info, &instance, seat);
+        let mut keys = Keys::new(&self, &info, &instance, seat);
         let relative =
             info.relative_axes & (1 << REL_X) != 0 && info.relative_axes & (1 << REL_Y) != 0;
         let axis = |code| info.absolute_axes.iter().find(|a| a.code == code).cloned();
@@ -75,8 +75,11 @@ impl Compositor {
             return;
         }
         let mut report = Report::default();
+        let mut time = 0;
         while let Ok(DeviceEvent::OnEvents(batch)) = device.next_event().await {
+            let mut keyed = false;
             for event in &batch.events {
+                time = (event.timestamp / 1_000_000) as u32;
                 match (event.r#type, event.code) {
                     (EV_REL, REL_X) => report.dx += event.value,
                     (EV_REL, REL_Y) => report.dy += event.value,
@@ -99,16 +102,23 @@ impl Compositor {
                     }
                     (EV_KEY, code) => {
                         if let Some(keys) = &mut keys {
-                            keys.key(code, event.value);
+                            keys.key(&self, code, event.value, time);
+                            keyed = true;
                         }
                     }
                     (EV_SYN, SYN_REPORT) if pointer => {
-                        let time = (event.timestamp / 1_000_000) as u32;
                         self.apply(std::mem::take(&mut report), time);
                     }
                     _ => {}
                 }
             }
+            if keyed {
+                self.flush_all();
+            }
+        }
+        if let Some(keys) = &mut keys {
+            keys.release_all(&self, time);
+            self.flush_all();
         }
     }
 

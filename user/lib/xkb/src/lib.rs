@@ -1,6 +1,7 @@
 //! xkbcommon, which `cargo xtask` builds as a port: compiling a keymap
 //! from the keymap data and turning key presses into keysyms and text,
-//! for the text console and the compositor.
+//! for the text console and the compositor, and giving the keymap as
+//! text and its modifiers as Wayland clients take them.
 
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr;
@@ -16,7 +17,12 @@ struct RuleNames {
 
 const XKB_KEY_UP: c_int = 0;
 const XKB_KEY_DOWN: c_int = 1;
+const XKB_STATE_MODS_DEPRESSED: c_int = 1 << 0;
+const XKB_STATE_MODS_LATCHED: c_int = 1 << 1;
+const XKB_STATE_MODS_LOCKED: c_int = 1 << 2;
 const XKB_STATE_MODS_EFFECTIVE: c_int = 1 << 3;
+const XKB_STATE_LAYOUT_EFFECTIVE: c_int = 1 << 7;
+const XKB_KEYMAP_FORMAT_TEXT_V1: c_int = 1;
 /// evdev key codes are xkb key codes less 8.
 const EVDEV_OFFSET: u32 = 8;
 
@@ -42,6 +48,23 @@ unsafe extern "C" {
         size: usize,
     ) -> c_int;
     fn xkb_state_mod_name_is_active(state: *mut c_void, name: *const c_char, kind: c_int) -> c_int;
+    fn xkb_state_serialize_mods(state: *mut c_void, components: c_int) -> u32;
+    fn xkb_state_serialize_layout(state: *mut c_void, components: c_int) -> u32;
+    fn xkb_keymap_get_as_string(keymap: *mut c_void, format: c_int) -> *mut c_char;
+}
+
+unsafe extern "C" {
+    fn free(pointer: *mut c_void);
+}
+
+/// The modifiers of a keymap's state as `wl_keyboard.modifiers` gives
+/// them: those held, latched and locked, and the layout in effect.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub depressed: u32,
+    pub latched: u32,
+    pub locked: u32,
+    pub group: u32,
 }
 
 /// The layout to compile: the keys of `/system/config/keyboard.yaml`.
@@ -105,11 +128,43 @@ impl Keymap {
         }
     }
 
-    /// Takes in a press or release of evdev key `code`.
-    pub fn update(&mut self, code: u16, pressed: bool) {
+    /// Takes in a press or release of evdev key `code`, and says whether
+    /// it changed the modifiers or the layout.
+    pub fn update(&mut self, code: u16, pressed: bool) -> bool {
         let direction = if pressed { XKB_KEY_DOWN } else { XKB_KEY_UP };
         // SAFETY: the state is valid while `self` lives.
-        unsafe { xkb_state_update_key(self.state, u32::from(code) + EVDEV_OFFSET, direction) };
+        let changed =
+            unsafe { xkb_state_update_key(self.state, u32::from(code) + EVDEV_OFFSET, direction) };
+        changed != 0
+    }
+
+    /// The modifiers and the layout in effect.
+    pub fn modifiers(&self) -> Modifiers {
+        // SAFETY: as for `update`.
+        unsafe {
+            Modifiers {
+                depressed: xkb_state_serialize_mods(self.state, XKB_STATE_MODS_DEPRESSED),
+                latched: xkb_state_serialize_mods(self.state, XKB_STATE_MODS_LATCHED),
+                locked: xkb_state_serialize_mods(self.state, XKB_STATE_MODS_LOCKED),
+                group: xkb_state_serialize_layout(self.state, XKB_STATE_LAYOUT_EFFECTIVE),
+            }
+        }
+    }
+
+    /// The keymap in the text format of xkb's version 1, ending with a
+    /// zero byte, or None when xkbcommon cannot write it.
+    pub fn text_v1(&self) -> Option<Vec<u8>> {
+        // SAFETY: the keymap is valid while `self` lives; xkbcommon
+        // returns a string that the caller frees, which is copied first.
+        unsafe {
+            let text = xkb_keymap_get_as_string(self.keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+            if text.is_null() {
+                return None;
+            }
+            let bytes = std::ffi::CStr::from_ptr(text).to_bytes_with_nul().to_vec();
+            free(text.cast());
+            Some(bytes)
+        }
     }
 
     /// The keysym of evdev key `code` with the current modifiers.
