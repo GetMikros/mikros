@@ -950,6 +950,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-curpack"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-display"
 version = "0.0.0"
 
