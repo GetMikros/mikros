@@ -46,6 +46,9 @@ const SERVER_IDS: u32 = 0xff00_0000;
 
 /// The ID of the display object of every client.
 const DISPLAY: ObjectId = 1;
+/// The most objects that a client may have, from their creation until
+/// the compositor deletes their IDs (MIKSPEC-0074.R26).
+const OBJECTS_MAX: usize = 16384;
 
 pub type ClientId = u64;
 
@@ -120,6 +123,8 @@ pub struct Client {
     /// The roles of a connection of a shell component, which the
     /// compositor created; None for any other client.
     roles: Option<Vec<String>>,
+    /// The app ID of the client's identity, once the compositor knows it.
+    pub app_id: Option<String>,
     /// The cursor it chose for its surfaces.
     pub cursor: seat::Cursor,
     /// The events to send to the client.
@@ -167,6 +172,13 @@ impl Client {
                 "invalid new ID {} for {}",
                 id.0, interface.name
             )));
+        }
+        if self.objects.len() >= OBJECTS_MAX {
+            return Err(ProtocolError::new(
+                DISPLAY,
+                wl_display::error::NO_MEMORY,
+                format!("more than {OBJECTS_MAX} objects"),
+            ));
         }
         let object = Object {
             interface,
@@ -299,12 +311,13 @@ impl Server {
         self.next_client
     }
 
-    /// Adds the connection of a shell component of `roles`, which the
-    /// compositor created, and returns its ID.
-    pub fn connect_component(&mut self, roles: Vec<String>) -> ClientId {
+    /// Adds the connection of a shell component of `roles` and `app_id`,
+    /// which the compositor created, and returns its ID.
+    pub fn connect_component(&mut self, roles: Vec<String>, app_id: String) -> ClientId {
         let id = self.connect();
         if let Some(c) = self.clients.get_mut(&id) {
             c.roles = Some(roles);
+            c.app_id = Some(app_id);
         }
         id
     }

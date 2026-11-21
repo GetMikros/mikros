@@ -34,6 +34,8 @@ const FOREVER: i64 = i64::MAX;
 /// A part of the shell: what to start, for which roles.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Part {
+    /// The app ID of its package, which is its process's.
+    pub app_id: String,
     pub executable: PathBuf,
     pub arguments: Vec<String>,
     pub roles: Vec<String>,
@@ -136,6 +138,7 @@ pub fn parts_of(package: &str) -> Result<Vec<Part>, Missing> {
             None => Vec::new(),
         };
         found.push(Part {
+            app_id: package.into(),
             executable: root.join(executable),
             arguments,
             roles,

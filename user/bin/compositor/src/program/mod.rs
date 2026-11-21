@@ -132,6 +132,10 @@ fn take(id: u32) -> Option<OwnedHandle> {
     Some(unsafe { OwnedHandle::from_raw(handle.into_raw_handle()) })
 }
 
+/// The most bytes and handles of events that a client may leave unread
+/// (MIKSPEC-0074.R26).
+const UNREAD_BYTES_MAX: usize = 4 << 20;
+const UNREAD_FDS_MAX: usize = 1024;
 /// The signals of a channel that it takes more, and that its peer closed.
 const WRITABLE: u32 = 1 << 1;
 const PEER_CLOSED: u32 = 1 << 2;
@@ -217,10 +221,15 @@ impl Compositor {
         self.serve(client, channel).await;
     }
 
-    /// Serves the Wayland channel of a shell component of `roles`, which
-    /// the compositor created.
-    async fn serve_component(self: Rc<Self>, channel: OwnedHandle, roles: Vec<String>) {
-        let client = self.server.borrow_mut().connect_component(roles);
+    /// Serves the Wayland channel of a shell component of `roles` and
+    /// `app_id`, which the compositor created.
+    async fn serve_component(
+        self: Rc<Self>,
+        channel: OwnedHandle,
+        roles: Vec<String>,
+        app_id: String,
+    ) {
+        let client = self.server.borrow_mut().connect_component(roles, app_id);
         self.serve(client, channel).await;
     }
 
@@ -281,7 +290,9 @@ impl Compositor {
 
     /// Sends a client the events it has, whole messages in each channel
     /// message. Those that its full channel does not take wait, and are
-    /// sent once it can take more.
+    /// sent once it can take more; a client that leaves more of them than
+    /// it may is disconnected, by closing its channel, which ends its
+    /// serve loop (MIKSPEC-0074.R26).
     fn flush(&self, client: ClientId) {
         let Some(channel) = self.channels.borrow().get(&client).map(|c| c.raw()) else {
             return;
@@ -305,9 +316,23 @@ impl Compositor {
                 Err(_) => return,
             }
         }
-        let waiting = !c.out.is_empty();
+        let (bytes, fds) = c.out.queued();
+        let app_id = c.app_id.clone().unwrap_or_default();
         drop(server);
-        if !waiting {
+        if bytes == 0 {
+            return;
+        }
+        let exceeded = match (bytes > UNREAD_BYTES_MAX, fds > UNREAD_FDS_MAX) {
+            (true, _) => Some("4 MiB of unread events"),
+            (_, true) => Some("1024 handles of unread events"),
+            _ => None,
+        };
+        if let Some(limit) = exceeded {
+            mikros_rt::log!(
+                Error,
+                "compositor: closed the connection of {app_id}, past {limit}"
+            );
+            self.channels.borrow_mut().remove(&client);
             return;
         }
         if !self.flushing.borrow_mut().insert(client) {
@@ -666,7 +691,7 @@ impl Compositor {
                 Err(e) => mikros_rt::log!(Error, "compositor: waiting for {name}: {e}"),
             }
         });
-        Some(self.serve_component(ours, part.roles))
+        Some(self.serve_component(ours, part.roles, part.app_id))
     }
 }
 

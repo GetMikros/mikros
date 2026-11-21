@@ -3,8 +3,10 @@
 //! opaque and input areas, and the frame callbacks that the compositor
 //! answers once it has drawn a frame.
 
-use super::{BufferId, Imports, Point, ProtocolError, Request, Resource, Server};
-use crate::wayland::protocols::{wl_buffer, wl_callback, wl_compositor, wl_region, wl_surface};
+use super::{BufferId, DISPLAY, Imports, Point, ProtocolError, Request, Resource, Server};
+use crate::wayland::protocols::{
+    wl_buffer, wl_callback, wl_compositor, wl_display, wl_region, wl_surface,
+};
 use crate::wayland::wire::{Arg, DecodeError, ObjectId};
 
 pub type SurfaceId = u64;
@@ -116,6 +118,49 @@ pub(super) struct Waiting {
 /// The most buffers that wait for their acquire points on a surface; a
 /// commit past them gives up the oldest, whose damage the next keeps.
 const WAITING_MAX: usize = 16;
+/// The most `add` and `subtract` requests of a region, and the most
+/// damage rectangles of a surface between commits, past which they
+/// become the one rectangle that holds them (MIKSPEC-0074.R26).
+const REGION_RECTS_MAX: usize = 1024;
+const DAMAGE_MAX: usize = 256;
+
+/// The smallest rectangle that holds `rects`.
+fn bounds(rects: impl IntoIterator<Item = Rect>) -> Option<Rect> {
+    rects
+        .into_iter()
+        .map(|r| {
+            (
+                r.x,
+                r.y,
+                r.x.saturating_add(r.width),
+                r.y.saturating_add(r.height),
+            )
+        })
+        .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))
+        .map(|(x0, y0, x1, y1)| Rect {
+            x: x0,
+            y: y0,
+            width: x1.saturating_sub(x0),
+            height: y1.saturating_sub(y0),
+        })
+}
+
+impl SurfaceState {
+    /// Makes the damage, past its most rectangles, the one rectangle that
+    /// holds them all. Damage and buffer damage count together, as the
+    /// compositor takes both in the same coordinates.
+    fn limit_damage(&mut self) {
+        if self.damage.len() + self.buffer_damage.len() <= DAMAGE_MAX {
+            return;
+        }
+        let all: Vec<Rect> = self
+            .damage
+            .drain(..)
+            .chain(self.buffer_damage.drain(..))
+            .collect();
+        self.damage.extend(bounds(all));
+    }
+}
 
 impl Surface {
     /// The release points of the buffers that it shows and that wait.
@@ -146,13 +191,10 @@ impl Server {
                 id,
                 wl_surface::Request::decode(request.opcode, args).map_err(decoded)?,
             ),
-            Resource::Region => {
-                self.region(
-                    request,
-                    wl_region::Request::decode(request.opcode, args).map_err(decoded)?,
-                );
-                Ok(())
-            }
+            Resource::Region => self.region(
+                request,
+                wl_region::Request::decode(request.opcode, args).map_err(decoded)?,
+            ),
             _ => unreachable!("surface_request handles surfaces"),
         }
     }
@@ -203,7 +245,11 @@ impl Server {
         Ok(())
     }
 
-    fn region(&mut self, request: Request, decoded: wl_region::Request) {
+    fn region(
+        &mut self,
+        request: Request,
+        decoded: wl_region::Request,
+    ) -> Result<(), ProtocolError> {
         let key = (request.client, request.object);
         let (add, rect) = match decoded {
             wl_region::Request::Destroy => {
@@ -213,7 +259,7 @@ impl Server {
                     .get_mut(&request.client)
                     .expect("a dispatched client");
                 c.destroy(request.object);
-                return;
+                return Ok(());
             }
             wl_region::Request::Add {
                 x,
@@ -244,7 +290,16 @@ impl Server {
                 },
             ),
         };
-        self.regions.entry(key).or_default().push((add, rect));
+        let rects = self.regions.entry(key).or_default();
+        if rects.len() >= REGION_RECTS_MAX {
+            return Err(ProtocolError::new(
+                DISPLAY,
+                wl_display::error::NO_MEMORY,
+                format!("more than {REGION_RECTS_MAX} rectangles in a region"),
+            ));
+        }
+        rects.push((add, rect));
+        Ok(())
     }
 
     /// The rectangles of the region `region` of a request of `request`.
@@ -314,12 +369,14 @@ impl Server {
                 width,
                 height,
             } => {
-                self.surface_mut(id)?.pending.damage.push(Rect {
+                let pending = &mut self.surface_mut(id)?.pending;
+                pending.damage.push(Rect {
                     x,
                     y,
                     width,
                     height,
                 });
+                pending.limit_damage();
             }
             wl_surface::Request::DamageBuffer {
                 x,
@@ -327,12 +384,14 @@ impl Server {
                 width,
                 height,
             } => {
-                self.surface_mut(id)?.pending.buffer_damage.push(Rect {
+                let pending = &mut self.surface_mut(id)?.pending;
+                pending.buffer_damage.push(Rect {
                     x,
                     y,
                     width,
                     height,
                 });
+                pending.limit_damage();
             }
             wl_surface::Request::Frame { callback } => {
                 let c = self
@@ -504,8 +563,9 @@ impl Server {
 pub(super) mod tests {
     use super::super::tests::TestClient;
     use super::*;
-    use crate::wayland::protocols::wl_display;
     use crate::wayland::wire::NewId;
+
+    const OBJECTS_LIMIT: u32 = super::super::OBJECTS_MAX as u32;
 
     /// A client with the compositor bound as object 3 and a surface as 4.
     pub(crate) fn with_surface(server: &mut Server) -> TestClient {
@@ -519,6 +579,73 @@ pub(super) mod tests {
 
     fn surface(server: &Server) -> &Surface {
         server.surfaces().next().unwrap().1
+    }
+
+    fn rect_args(x: i32, y: i32, width: i32, height: i32) -> Vec<Arg> {
+        Vec::from([x, y, width, height].map(Arg::Int))
+    }
+
+    #[test]
+    fn refuses_objects_past_the_limit() {
+        let mut server = Server::new();
+        let client = with_surface(&mut server);
+        // The display, the registry, the compositor and the surface, and
+        // then regions up to the limit.
+        for id in 5..=OBJECTS_LIMIT {
+            client.send(&mut server, 3, 1, vec![Arg::NewId(NewId(id))]);
+        }
+        assert_eq!(client.error(&mut server), None);
+        client.send(
+            &mut server,
+            3,
+            1,
+            vec![Arg::NewId(NewId(OBJECTS_LIMIT + 1))],
+        );
+        assert_eq!(
+            client.error(&mut server),
+            Some(wl_display::error::NO_MEMORY)
+        );
+    }
+
+    #[test]
+    fn refuses_regions_of_too_many_rectangles() {
+        let mut server = Server::new();
+        let client = with_surface(&mut server);
+        client.send(&mut server, 3, 1, vec![Arg::NewId(NewId(5))]);
+        for i in 0..REGION_RECTS_MAX as i32 {
+            let opcode = if i % 2 == 0 { 1 } else { 2 };
+            client.send(&mut server, 5, opcode, rect_args(i, 0, 1, 1));
+        }
+        assert_eq!(client.error(&mut server), None);
+        client.send(&mut server, 5, 1, rect_args(0, 0, 1, 1));
+        assert_eq!(
+            client.error(&mut server),
+            Some(wl_display::error::NO_MEMORY)
+        );
+    }
+
+    #[test]
+    fn merges_damage_past_the_limit() {
+        let mut server = Server::new();
+        let client = with_surface(&mut server);
+        for i in 0..DAMAGE_MAX as i32 / 2 {
+            client.send(&mut server, 4, 2, rect_args(i, 10, 1, 1));
+            client.send(&mut server, 4, 9, rect_args(5, i, 1, 1));
+        }
+        assert_eq!(surface(&server).pending.damage.len(), DAMAGE_MAX / 2);
+        client.send(&mut server, 4, 2, rect_args(300, 300, 10, 10));
+        assert_eq!(client.error(&mut server), None);
+        let pending = &surface(&server).pending;
+        assert_eq!(
+            pending.damage,
+            [Rect {
+                x: 0,
+                y: 0,
+                width: 310,
+                height: 310
+            }]
+        );
+        assert!(pending.buffer_damage.is_empty());
     }
 
     #[test]

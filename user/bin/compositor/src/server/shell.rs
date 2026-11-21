@@ -134,7 +134,7 @@ mod tests {
     fn component(server: &mut Server, roles: &[&str]) -> TestClient {
         let roles = roles.iter().map(|r| r.to_string()).collect();
         TestClient {
-            id: server.connect_component(roles),
+            id: server.connect_component(roles, "test.component".into()),
             imports: Default::default(),
         }
     }

@@ -253,7 +253,7 @@ mod tests {
     fn panel(server: &mut Server, roles: &[&str], edge: u32) -> TestClient {
         let roles = roles.iter().map(|r| r.to_string()).collect();
         let client = TestClient {
-            id: server.connect_component(roles),
+            id: server.connect_component(roles, "test.component".into()),
             imports: Default::default(),
         };
         client.send(server, 1, 1, vec![Arg::NewId(NewId(2))]);
