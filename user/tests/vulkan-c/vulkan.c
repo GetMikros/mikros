@@ -11,10 +11,16 @@
  * signals an exportable timeline semaphore, a kernel timeline, which the
  * test then signals and reads through the kernel and through semaphores
  * imported from it. It exits with 0 when every check passed, and
- * otherwise with the number of the first check that failed. */
+ * otherwise with the number of the first check that failed.
+ *
+ * Last, the test checks the linear images that the compositor samples
+ * its clients' buffers through: an image bound to a memory object that
+ * another image uses shows its pixels, and a buffer copies into one
+ * whatever its row length and offset. */
 
 #define VK_USE_PLATFORM_MIKROS
 #include <mikros/startup.h>
+#include <stdio.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
 /* After the headers that declare its types. */
@@ -313,6 +319,336 @@ static int share_timeline(VkDevice device, VkQueue queue, VkSemaphore semaphore)
     vkDestroySemaphore(device, third, NULL);
     vkDestroySemaphore(device, second, NULL);
     mikros_handle_close(kernel);
+    return 0;
+}
+
+/* The linear image of the compositor's sampled client buffers: a 2D image
+ * of IMAGE_FORMAT, IMAGE_WIDTH by IMAGE_HEIGHT pixels, whose rows are not
+ * a multiple of the cache line in length. */
+enum { IMAGE_WIDTH = 100, IMAGE_HEIGHT = 8 };
+static const VkFormat IMAGE_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
+static const VkImageUsageFlags IMAGE_USAGE = VK_IMAGE_USAGE_SAMPLED_BIT |
+                                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                             VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+/* The value of the pixel at `column` of `row` in the images' test pattern. */
+static uint32_t pattern(uint32_t row, uint32_t column)
+{
+    return 0xff000000u | (row << 12) | column;
+}
+
+/* The index of a memory type of `bits` that the host maps without flushes,
+ * or UINT32_MAX. */
+static uint32_t visible_type(VkPhysicalDevice physical, uint32_t bits)
+{
+    VkPhysicalDeviceMemoryProperties properties;
+    vkGetPhysicalDeviceMemoryProperties(physical, &properties);
+    const VkMemoryPropertyFlags visible =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < properties.memoryTypeCount; i++)
+        if ((bits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & visible) == visible)
+            return i;
+    return UINT32_MAX;
+}
+
+/* Creates a linear image of the pattern's size that `handles` export and
+ * import, and returns it, or VK_NULL_HANDLE. */
+static VkImage linear_image(VkDevice device, VkExternalMemoryHandleTypeFlags handles)
+{
+    VkExternalMemoryImageCreateInfo external = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .handleTypes = handles,
+    };
+    VkImageCreateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = handles != 0 ? &external : NULL,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = IMAGE_FORMAT,
+        .extent = {IMAGE_WIDTH, IMAGE_HEIGHT, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_LINEAR,
+        .usage = IMAGE_USAGE,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED,
+    };
+    VkImage image;
+    if (vkCreateImage(device, &info, NULL, &image) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    return image;
+}
+
+/* Records `record` into a new command buffer of `pool`, submits it to
+ * `queue` and waits for it. */
+static int run_commands(VkDevice device, VkQueue queue, VkCommandPool pool,
+                        void (*record)(VkCommandBuffer, const void *), const void *what)
+{
+    VkCommandBufferAllocateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer commands;
+    if (vkAllocateCommandBuffers(device, &info, &commands) != VK_SUCCESS)
+        return -1;
+    VkCommandBufferBeginInfo begin = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (vkBeginCommandBuffer(commands, &begin) != VK_SUCCESS)
+        return -1;
+    record(commands, what);
+    if (vkEndCommandBuffer(commands) != VK_SUCCESS)
+        return -1;
+    VkSubmitInfo submit = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commands,
+    };
+    if (vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS ||
+        vkQueueWaitIdle(queue) != VK_SUCCESS)
+        return -1;
+    vkFreeCommandBuffers(device, pool, 1, &commands);
+    return 0;
+}
+
+/* A copy between a buffer and a linear image. */
+struct copy {
+    VkBuffer buffer;
+    VkImage image;
+    VkDeviceSize offset;
+    uint32_t row_length;
+    int to_image;
+};
+
+static void record_copy(VkCommandBuffer commands, const void *what)
+{
+    const struct copy *copy = what;
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_HOST_WRITE_BIT,
+        .dstAccessMask = copy->to_image ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED,
+        .newLayout = copy->to_image ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                                    : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = copy->image,
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+    };
+    vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                         NULL, 0, NULL, 1, &barrier);
+    VkBufferImageCopy region = {
+        .bufferOffset = copy->offset,
+        .bufferRowLength = copy->row_length,
+        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .imageExtent = {IMAGE_WIDTH, IMAGE_HEIGHT, 1},
+    };
+    if (copy->to_image)
+        vkCmdCopyBufferToImage(commands, copy->buffer, copy->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    else
+        vkCmdCopyImageToBuffer(commands, copy->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               copy->buffer, 1, &region);
+}
+
+/* A buffer of `size` bytes with host-visible memory, mapped at `*mapped`.
+ * Returns 0 or `check` or the number after it. */
+static int mapped_buffer(VkPhysicalDevice physical, VkDevice device, VkDeviceSize size,
+                         VkBuffer *buffer, VkDeviceMemory *memory, uint8_t **mapped, int check)
+{
+    VkBufferCreateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    };
+    if (vkCreateBuffer(device, &info, NULL, buffer) != VK_SUCCESS)
+        return check;
+    VkMemoryRequirements needs;
+    vkGetBufferMemoryRequirements(device, *buffer, &needs);
+    VkMemoryAllocateInfo allocate = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = needs.size,
+        .memoryTypeIndex = visible_type(physical, needs.memoryTypeBits),
+    };
+    if (allocate.memoryTypeIndex == UINT32_MAX ||
+        vkAllocateMemory(device, &allocate, NULL, memory) != VK_SUCCESS ||
+        vkBindBufferMemory(device, *buffer, *memory, 0) != VK_SUCCESS ||
+        vkMapMemory(device, *memory, 0, VK_WHOLE_SIZE, 0, (void **)mapped) != VK_SUCCESS)
+        return check + 1;
+    return 0;
+}
+
+/* Checks what the compositor's sampled client buffers rely on: a linear
+ * image takes the memory object of another image, at an offset, and
+ * shows its pixels, and a buffer of another row length and offset copies
+ * into one. Reports the row pitch that the driver gives the images, as
+ * the client's row length must equal it for an import without a copy.
+ * Returns 0 or the number of the check that failed. */
+static int linear_images(VkPhysicalDevice physical, VkDevice device, VkQueue queue,
+                         uint32_t family)
+{
+    const VkExternalMemoryHandleTypeFlags handle = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS;
+
+    /* The driver offers the format as a sampled, shareable linear image. */
+    VkFormatProperties format;
+    vkGetPhysicalDeviceFormatProperties(physical, IMAGE_FORMAT, &format);
+    if (!(format.linearTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+        return 120;
+    VkPhysicalDeviceExternalImageFormatInfo external_info = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+        .handleType = handle,
+    };
+    VkPhysicalDeviceImageFormatInfo2 image_info = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+        .pNext = &external_info,
+        .format = IMAGE_FORMAT,
+        .type = VK_IMAGE_TYPE_2D,
+        .tiling = VK_IMAGE_TILING_LINEAR,
+        .usage = IMAGE_USAGE,
+    };
+    VkExternalImageFormatProperties external = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+    };
+    VkImageFormatProperties2 properties = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+        .pNext = &external,
+    };
+    const VkExternalMemoryFeatureFlags shared =
+        VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+    if (vkGetPhysicalDeviceImageFormatProperties2(physical, &image_info, &properties) !=
+            VK_SUCCESS ||
+        (external.externalMemoryProperties.externalMemoryFeatures & shared) != shared)
+        return 121;
+
+    /* The first image, in memory that has room for an offset. */
+    VkImage first = linear_image(device, handle);
+    if (first == VK_NULL_HANDLE)
+        return 122;
+    VkMemoryRequirements needs;
+    vkGetImageMemoryRequirements(device, first, &needs);
+    const VkDeviceSize offset = needs.alignment;
+    VkExportMemoryAllocateInfo export_info = {
+        .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+        .handleTypes = handle,
+    };
+    VkMemoryAllocateInfo allocate = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &export_info,
+        .allocationSize = offset + needs.size,
+        .memoryTypeIndex = visible_type(physical, needs.memoryTypeBits),
+    };
+    VkDeviceMemory memory;
+    if (allocate.memoryTypeIndex == UINT32_MAX ||
+        vkAllocateMemory(device, &allocate, NULL, &memory) != VK_SUCCESS)
+        return 123;
+    if (vkBindImageMemory(device, first, memory, offset) != VK_SUCCESS)
+        return 124;
+    VkImageSubresource colour = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+    VkSubresourceLayout layout;
+    vkGetImageSubresourceLayout(device, first, &colour, &layout);
+    const uint32_t tight = IMAGE_WIDTH * 4;
+    printf("vulkan-c: a linear image of %u bytes a row has a pitch of %llu, and starts at %llu\n",
+           tight, (unsigned long long)layout.rowPitch, (unsigned long long)layout.offset);
+    if (layout.rowPitch < tight || layout.rowPitch % 4 != 0)
+        return 125;
+
+    /* Its pixels, written by the host through the memory. */
+    uint8_t *pixels;
+    if (vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, (void **)&pixels) != VK_SUCCESS)
+        return 126;
+    for (uint32_t row = 0; row < IMAGE_HEIGHT; row++)
+        for (uint32_t column = 0; column < IMAGE_WIDTH; column++)
+            ((uint32_t *)(pixels + offset + layout.offset + row * layout.rowPitch))[column] =
+                pattern(row, column);
+
+    /* The same memory imported, with a second image bound to it at the
+     * same offset, which a copy reads back. */
+    VkMemoryGetHandleInfoMIKROS get = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_GET_HANDLE_INFO_MIKROS,
+        .memory = memory,
+        .handleType = handle,
+    };
+    VkImportMemoryHandleInfoMIKROS import = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HANDLE_INFO_MIKROS,
+        .handleType = handle,
+    };
+    if (get_memory_handle(device, &get, &import.handle) != VK_SUCCESS || import.handle == 0)
+        return 127;
+    allocate.pNext = &import;
+    VkDeviceMemory imported_memory;
+    if (vkAllocateMemory(device, &allocate, NULL, &imported_memory) != VK_SUCCESS)
+        return 128;
+    VkImage second = linear_image(device, handle);
+    if (second == VK_NULL_HANDLE || vkBindImageMemory(device, second, imported_memory, offset) != VK_SUCCESS)
+        return 129;
+    VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .queueFamilyIndex = family,
+    };
+    VkCommandPool pool;
+    if (vkCreateCommandPool(device, &pool_info, NULL, &pool) != VK_SUCCESS)
+        return 130;
+    VkBuffer readback;
+    VkDeviceMemory readback_memory;
+    uint8_t *read;
+    int failed = mapped_buffer(physical, device, tight * IMAGE_HEIGHT, &readback, &readback_memory,
+                               &read, 131);
+    if (failed != 0)
+        return failed;
+    struct copy from_image = {.buffer = readback, .image = second};
+    if (run_commands(device, queue, pool, record_copy, &from_image) != 0)
+        return 133;
+    for (uint32_t row = 0; row < IMAGE_HEIGHT; row++)
+        for (uint32_t column = 0; column < IMAGE_WIDTH; column++)
+            if (((uint32_t *)(read + row * tight))[column] != pattern(row, column))
+                return 134;
+
+    /* A client buffer whose rows are longer than the image's and that
+     * starts after eight bytes, copied into a new image, which the host
+     * reads through the image's own row pitch. */
+    const uint32_t stride = tight + 12;
+    const VkDeviceSize start = 8;
+    VkBuffer client;
+    VkDeviceMemory client_memory;
+    uint8_t *client_pixels;
+    failed = mapped_buffer(physical, device, start + (VkDeviceSize)stride * IMAGE_HEIGHT, &client,
+                           &client_memory, &client_pixels, 135);
+    if (failed != 0)
+        return failed;
+    for (uint32_t row = 0; row < IMAGE_HEIGHT; row++)
+        for (uint32_t column = 0; column < IMAGE_WIDTH; column++)
+            ((uint32_t *)(client_pixels + start + row * stride))[column] = pattern(row, column);
+    VkImage target = linear_image(device, 0);
+    if (target == VK_NULL_HANDLE)
+        return 137;
+    vkGetImageMemoryRequirements(device, target, &needs);
+    allocate.pNext = NULL;
+    allocate.allocationSize = needs.size;
+    allocate.memoryTypeIndex = visible_type(physical, needs.memoryTypeBits);
+    VkDeviceMemory target_memory;
+    if (allocate.memoryTypeIndex == UINT32_MAX ||
+        vkAllocateMemory(device, &allocate, NULL, &target_memory) != VK_SUCCESS ||
+        vkBindImageMemory(device, target, target_memory, 0) != VK_SUCCESS)
+        return 138;
+    struct copy to_image = {
+        .buffer = client, .image = target, .offset = start, .row_length = stride / 4, .to_image = 1,
+    };
+    if (run_commands(device, queue, pool, record_copy, &to_image) != 0)
+        return 139;
+    vkGetImageSubresourceLayout(device, target, &colour, &layout);
+    uint8_t *target_pixels;
+    if (vkMapMemory(device, target_memory, 0, VK_WHOLE_SIZE, 0, (void **)&target_pixels) != VK_SUCCESS)
+        return 140;
+    for (uint32_t row = 0; row < IMAGE_HEIGHT; row++)
+        for (uint32_t column = 0; column < IMAGE_WIDTH; column++)
+            if (((uint32_t *)(target_pixels + layout.offset + row * layout.rowPitch))[column] !=
+                pattern(row, column))
+                return 141;
+
+    vkDestroyCommandPool(device, pool, NULL);
     return 0;
 }
 
@@ -627,6 +963,9 @@ int main(void)
         return failed;
     if (vkQueueWaitIdle(queue) != VK_SUCCESS)
         return 56;
+    failed = linear_images(physical, device, queue, family);
+    if (failed != 0)
+        return failed;
 
     vkDestroySemaphore(device, semaphore, NULL);
     vkDestroyCommandPool(device, command_pool, NULL);
