@@ -43,8 +43,30 @@ pub fn run(
     timeout: Duration,
 ) -> Result<usize> {
     let built = build::build_tests(kind)?;
+    run_with(
+        &built,
+        &built.system_image,
+        machine,
+        processor,
+        kind,
+        dir,
+        timeout,
+    )
+}
+
+/// Does what `run` does with the build `built` and the system image
+/// `system`, which it has already built.
+pub fn run_with(
+    built: &build::Built,
+    system: &Path,
+    machine: &MachineArgs,
+    processor: Processor,
+    kind: Kind,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<usize> {
     fs::create_dir_all(dir)?;
-    image::create_with(kind, &built, &dir.join("disk.img"), "selftest", &[])?;
+    image::create_with_system(kind, built, system, &dir.join("disk.img"), "selftest")?;
     let log = dir.join("serial.log");
     let mut qemu = scenario::start_on(machine, processor, dir, false, &|_| Ok(()), &[], false)?;
     let (mut lines, mut progress) = (0, Instant::now());

@@ -1,6 +1,6 @@
 //! `cargo xtask build`: builds the system components.
 
-use crate::components::{Component, Image, Runtime};
+use crate::components::{Component, Image, Role, Runtime};
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use std::collections::BTreeSet;
@@ -93,6 +93,10 @@ pub struct Built {
     /// For the build with the system tests, the system of the desktop
     /// run: the system image without the session settings.
     pub desktop_image: Option<PathBuf>,
+    /// For the build with the system tests and a Dawn test program, the
+    /// system of the Dawn run: the system without the system tests, with
+    /// selftest, and with the program as its only test.
+    pub dawn_image: Option<PathBuf>,
     /// Where xkbcommon was built.
     pub xkbcommon: crate::ports::Built,
 }
@@ -129,9 +133,23 @@ pub fn build_tests(kind: Kind) -> Result<Built> {
     build_for(kind, BootImage::SystemTests)
 }
 
+/// Builds every component of the build kind `kind`, and a test image's
+/// system as its system image, and the Dawn run's system, whose only system
+/// test is the program `program`.
+pub fn build_dawn_test(kind: Kind, program: &Path) -> Result<Built> {
+    build_for_with(kind, BootImage::SystemTests, Some(program))
+}
+
 /// Builds every component of the build kind `kind`, with `boot` as the
 /// boot image.
 pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
+    build_for_with(kind, boot, None)
+}
+
+/// Builds every component of the build kind `kind`, with `boot` as the
+/// boot image, and with the test image with system tests also a Dawn run's
+/// system image when there is a Dawn test program `dawn_test`.
+fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Result<Built> {
     // The compositor's build script reads them.
     crate::wayland::protocols()?;
     let bootmenu = cargo_build("bootmenu", "bootmenu", "x86_64-unknown-uefi", kind)?;
@@ -212,6 +230,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     let mut first_boot_image = None;
     let mut takeover_image = None;
     let mut desktop_image = None;
+    let mut dawn_image = None;
     let (boot_image, system_image) = match boot {
         BootImage::System | BootImage::SystemTests => {
             let tests = boot == BootImage::SystemTests;
@@ -233,6 +252,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // from the boot image only until then.
             let mut early = Vec::new();
             let mut only_tests = Vec::new();
+            // What only the test images hold, besides the system tests,
+            // selftest for one: the Dawn run's system has these.
+            let mut test_support = Vec::new();
             for component in components.iter().filter(|c| c.in_kind(kind)) {
                 let members = match component.image {
                     Image::Boot => &mut early,
@@ -240,7 +262,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     _ => continue,
                 };
                 let program = component_build(component, kind)?;
-                members.extend(component.members(kind, &program)?);
+                let own = component.members(kind, &program)?;
+                if component.image == Image::Tests && component.role != Role::Test {
+                    test_support.extend(own.iter().cloned());
+                }
+                members.extend(own);
             }
             if tests {
                 // Two system tests in C, which selftest runs as it runs
@@ -354,6 +380,32 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 let desktop = boot_image(kind, "desktop.img", &desktop)?;
                 println!("built    {}", desktop.display());
                 desktop_image = Some(desktop);
+                if let Some(program) = dawn_test {
+                    // The Dawn run's system: the system with selftest
+                    // and what it needs of the test images, and the
+                    // Dawn test program as the only test.
+                    let at = "system/bin/tests/webgpu";
+                    let dawn: Vec<(&str, &Path)> = early
+                        .iter()
+                        .chain(&login)
+                        .chain(&test_support)
+                        .map(|(at, path)| (at.as_str(), path.as_path()))
+                        .chain([(at, program)])
+                        .collect();
+                    let loader = format!("system/libraries/{}", crate::vulkan::LOADER);
+                    for needed in [
+                        "system/bin/selftest",
+                        "system/libraries/libc++.dlib",
+                        loader.as_str(),
+                    ] {
+                        if !dawn.iter().any(|(at, _)| *at == needed) {
+                            bail!("the Dawn run's system has no {needed}");
+                        }
+                    }
+                    let image = boot_image(kind, "dawn-tests.img", &dawn)?;
+                    println!("built    {}", image.display());
+                    dawn_image = Some(image);
+                }
             }
             let early: Vec<(&str, &Path)> = early
                 .iter()
@@ -2075,6 +2127,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         first_boot_image,
         takeover_image,
         desktop_image,
+        dawn_image,
         xkbcommon,
     })
 }
@@ -2525,7 +2578,7 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
 
 /// How a C program is linked with the C library.
 #[derive(Clone, Copy, PartialEq)]
-enum Linking {
+pub(crate) enum Linking {
     Static,
     Dynamic,
     /// A shared library `<name>.dlib` with this `DT_SONAME`.
@@ -2535,7 +2588,12 @@ enum Linking {
 /// Builds the C program or library `name` from `sources`, paths relative
 /// to the repository, against the sysroot, with the further arguments
 /// `args`, and returns its path, in `target/c/<name>/`.
-fn c_build(name: &str, sources: &[&str], linking: Linking, args: &[String]) -> Result<PathBuf> {
+pub(crate) fn c_build(
+    name: &str,
+    sources: &[&str],
+    linking: Linking,
+    args: &[String],
+) -> Result<PathBuf> {
     let root = crate::workspace_root();
     let sysroot = crate::sysroot::build()?;
     let dir = c_dir(name);
