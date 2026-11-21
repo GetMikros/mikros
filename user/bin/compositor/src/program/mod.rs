@@ -21,7 +21,7 @@ mod session;
 mod themes;
 
 use crate::haze;
-use crate::server::{ClientId, Cursor, Server, shape_name};
+use crate::server::{ClientId, Cursor, Rect, Server, shape_name};
 use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
 use imports::{Importer, Store};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
@@ -105,6 +105,10 @@ pub struct Compositor {
     changed: Notify,
     /// The pointer and its cursor (MIKSPEC-0066.R28).
     pointer: RefCell<pointer::Pointer>,
+    /// Whether the next frame changes all of the output, and the cursor
+    /// that the last frame drew, with where (MIKSPEC-0066.R17).
+    damaged_all: Cell<bool>,
+    drawn_cursor: Cell<Option<(Cursor, Rect)>>,
 }
 
 /// The startup handle `id` of the `USER` role, as mikros-rt's handle.
@@ -318,9 +322,56 @@ impl Compositor {
                     let _ = self.reactor.timeline(timeline, point.value).await;
                 }
             }
-            let (drawn, fading, next_cursor) = {
+            // What changed: the server's damage, the cursor's old and new
+            // area when it moved, changed or is animated, or everything
+            // (MIKSPEC-0066.R17).
+            let mut damage = self.server.borrow_mut().take_damage();
+            let cursor_committed = match cursor {
+                Cursor::Surface { surface, .. } => {
+                    self.server.borrow_mut().take_cursor_damage(surface)
+                }
+                _ => false,
+            };
+            let (drawn, fading, next_cursor, changed) = {
+                let mut store = self.store.borrow_mut();
+                let whole = std::mem::take(&mut store.damaged_all);
+                drop(store);
                 let store = self.store.borrow();
                 let mut pointer = self.pointer.borrow_mut();
+                // The pointer above everything (MIKSPEC-0066.R17): a shape
+                // of the cursor theme, or the client's own cursor surface
+                // (MIKSPEC-0066.R28).
+                let now_ms = milliseconds().into();
+                let mut next_cursor = None;
+                let cursor_part = match (cursor, cursor_surface) {
+                    (Cursor::Shape(shape), _) => pointer
+                        .image(&self.renderer, now_ms, shape_name(shape), at)
+                        .map(|(image, corner, next)| {
+                            next_cursor = next;
+                            (image.pixels(), corner, (image.width, image.height))
+                        }),
+                    (Cursor::Surface { .. }, Some((buffer, _, (hx, hy)))) => store
+                        .buffers
+                        .get(&buffer)
+                        .map(|b| (b.pixels(), (at.0 - hx, at.1 - hy), (b.width, b.height))),
+                    _ => None,
+                };
+                let cursor_rect = cursor_part.map(|(_, (x, y), (width, height))| Rect {
+                    x,
+                    y,
+                    width: width as i32,
+                    height: height as i32,
+                });
+                let drawn_now = cursor_rect.map(|r| (cursor, r));
+                let last = self.drawn_cursor.replace(drawn_now);
+                if last != drawn_now || next_cursor.is_some() || cursor_committed {
+                    damage.extend(last.map(|l| l.1));
+                    damage.extend(cursor_rect);
+                }
+                let fading_now = store.haze.as_ref().is_some_and(|h| h.old.is_some());
+                let whole = whole || fading_now || self.damaged_all.take();
+                output.add_damage(&damage, whole);
+                let target_damage = output.back_damage();
                 let target = output.back();
                 // The haze of the output's size, fading in for 250 ms
                 // after it was made (MIKSPEC-0066.R18).
@@ -360,45 +411,41 @@ impl Compositor {
                     })
                 });
                 let mut layers: Vec<Layer> = wallpaper.into_iter().chain(surfaces).collect();
-                // The pointer above everything (MIKSPEC-0066.R17): a shape
-                // of the cursor theme, or the client's own cursor surface
-                // (MIKSPEC-0066.R28).
-                let now_ms = milliseconds().into();
-                let mut next_cursor = None;
-                let cursor_layer = |pixels, (x, y): (i32, i32)| Layer {
-                    pixels,
-                    x,
-                    y,
-                    under: Under::Flat,
-                    haze: &[],
-                    blur: &[],
-                };
-                match (cursor, cursor_surface) {
-                    (Cursor::Shape(shape), _) => {
-                        let name = shape_name(shape);
-                        if let Some((image, corner, next)) =
-                            pointer.image(&self.renderer, now_ms, name, at)
-                        {
-                            next_cursor = next;
-                            layers.push(cursor_layer(image.pixels(), corner));
-                        }
-                    }
-                    (Cursor::Surface { .. }, Some((buffer, _, (hx, hy)))) => {
-                        if let Some(buffer) = store.buffers.get(&buffer) {
-                            layers.push(cursor_layer(buffer.pixels(), (at.0 - hx, at.1 - hy)));
-                        }
-                    }
-                    _ => {}
+                if let Some((pixels, (x, y), _)) = cursor_part {
+                    layers.push(Layer {
+                        pixels,
+                        x,
+                        y,
+                        under: Under::Flat,
+                        haze: &[],
+                        blur: &[],
+                    });
                 }
                 let look = Look {
                     flat: haze::flat(store.scheme),
                     translucent: haze::translucent(store.scheme),
                 };
                 let fading = haze.as_ref().is_some_and(|h| h.fade < 1.0);
-                let drawn = self
-                    .renderer
-                    .draw(target, BACKGROUND, &layers, haze.as_ref(), &look);
-                (drawn, fading, next_cursor)
+                // The image is drawn and shown where it lacks something,
+                // which a new output lacks all of; an image that lacks
+                // nothing is neither.
+                let changed = match target_damage {
+                    None => Some(None),
+                    Some(rects) if rects.is_empty() => None,
+                    Some(rects) => Some(Some(rects)),
+                };
+                let drawn = match &changed {
+                    None => Ok(()),
+                    Some(rects) => self.renderer.draw(
+                        target,
+                        BACKGROUND,
+                        &layers,
+                        haze.as_ref(),
+                        &look,
+                        rects.as_deref(),
+                    ),
+                };
+                (drawn, fading, next_cursor, changed)
             };
             if let Err(e) = drawn {
                 mikros_rt::log!(Error, "compositor: drawing a frame: {e:?}");
@@ -411,7 +458,9 @@ impl Compositor {
             for point in releases {
                 self.store.borrow().reach(point);
             }
-            if let Err(e) = output.show().await {
+            if let Some(changed) = &changed
+                && let Err(e) = output.show(changed.as_deref()).await
+            {
                 mikros_rt::log!(Error, "compositor: showing a frame: {e:?}");
             }
             // Unless the display was given again meanwhile.
@@ -598,6 +647,8 @@ pub fn main() {
         channels: RefCell::default(),
         changed: Notify::default(),
         pointer: RefCell::new(pointer::Pointer::new()),
+        damaged_all: Cell::new(false),
+        drawn_cursor: Cell::new(None),
     });
     let c = compositor.clone();
     executor.block_on(async move {

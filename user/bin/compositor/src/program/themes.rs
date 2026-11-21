@@ -67,6 +67,7 @@ impl Compositor {
                 let mut pointer = self.pointer.borrow_mut();
                 let themed = pointer.set_theme(&theme.cursor, &self.renderer);
                 if pointer.set_size(size, &self.renderer) || themed {
+                    self.damaged_all.set(true);
                     self.changed.notify();
                 }
             }

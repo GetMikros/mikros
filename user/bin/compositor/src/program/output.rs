@@ -2,7 +2,8 @@
 //! connected connector in its preferred mode, on the first CRTC with its
 //! primary plane, and two output images of that size, which the display
 //! imports from their memory objects and which frames are drawn into and
-//! shown in turn.
+//! shown in turn. Each image keeps the damage of the frames since it was
+//! last drawn (MIKSPEC-0066.R17), all of it until it was drawn once.
 
 use super::render::{Renderer, Target};
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -25,6 +26,9 @@ pub struct Output {
     targets: Vec<(Target, u32)>,
     /// The image the next frame is drawn into.
     back: usize,
+    /// What each image lacks of the frames since it was drawn: rectangles,
+    /// or None for all of it.
+    damage: Vec<Option<Vec<crate::server::Rect>>>,
 }
 
 impl Output {
@@ -92,6 +96,7 @@ impl Output {
             crtc: *crtc,
             plane,
             mode,
+            damage: vec![None; targets.len()],
             targets,
             back: 0,
         })
@@ -106,9 +111,28 @@ impl Output {
         &self.targets[self.back].0
     }
 
-    /// Shows the image that the last frame was drawn into, and returns
-    /// once the display shows it.
-    pub async fn show(&mut self) -> Result<(), Status> {
+    /// Adds a frame's damage, `rects` or all of the output when `whole`,
+    /// to that of each image.
+    pub fn add_damage(&mut self, rects: &[crate::server::Rect], whole: bool) {
+        for damage in &mut self.damage {
+            match (damage, whole) {
+                (d, true) => *d = None,
+                (Some(d), false) => d.extend_from_slice(rects),
+                (None, false) => {}
+            }
+        }
+    }
+
+    /// What the image to draw the next frame into lacks: rectangles, or
+    /// None for all of it.
+    pub fn back_damage(&self) -> Option<Vec<crate::server::Rect>> {
+        self.damage[self.back].clone()
+    }
+
+    /// Shows the image that the last frame was drawn into, which then
+    /// lacks nothing, and returns once the display shows it. `changed` is
+    /// what the frame changed, or None for all of the output.
+    pub async fn show(&mut self, changed: Option<&[crate::server::Rect]>) -> Result<(), Status> {
         let (width, height) = self.size();
         let whole = Rect {
             x: 0,
@@ -116,6 +140,24 @@ impl Output {
             width,
             height,
         };
+        let damage = match changed {
+            None => vec![Rect { ..whole }],
+            Some(rects) => rects
+                .iter()
+                .filter_map(|r| {
+                    let (x0, y0) = (r.x.max(0) as u32, r.y.max(0) as u32);
+                    let x1 = (r.x.saturating_add(r.width).max(0) as u32).min(width);
+                    let y1 = (r.y.saturating_add(r.height).max(0) as u32).min(height);
+                    (x1 > x0 && y1 > y0).then_some(Rect {
+                        x: x0 as i32,
+                        y: y0 as i32,
+                        width: x1 - x0,
+                        height: y1 - y0,
+                    })
+                })
+                .collect(),
+        };
+        self.damage[self.back] = Some(Vec::new());
         let commit = Commit {
             flags: CommitFlags(0),
             crtcs: vec![CrtcState {
@@ -134,7 +176,7 @@ impl Output {
                 buffer: self.targets[self.back].1,
                 src: Rect { ..whole },
                 dst: Rect { ..whole },
-                damage: vec![whole],
+                damage,
                 acquire_sync: 0,
                 acquire_value: 0,
             }],

@@ -31,6 +31,8 @@ pub struct Store {
     pub haze: Option<Haze>,
     /// The theme's scheme, which tints the haze.
     pub scheme: Scheme,
+    /// Whether the haze changed, which changes all of the output.
+    pub damaged_all: bool,
     timelines: BTreeMap<TimelineId, Fd>,
     next: u64,
 }
@@ -86,6 +88,7 @@ impl Store {
             None => None,
         };
         self.haze = Some(Haze { new, old, made });
+        self.damaged_all = true;
     }
 
     /// Forgets the haze before the new one once that one has faded in.

@@ -300,6 +300,11 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         scenario::monitor(&socket, MOVE_TO_WALLPAPER)?;
         let what = "the arrow followed the mouse";
         screen.until_black(&mut qemu, MOVED_ARROW_PIXEL, what)?;
+        // Where the arrow was, the frame drew the wallpaper again.
+        let left = pixel(&fs::read(&dump)?, ARROW_PIXEL);
+        if left == Some([0, 0, 0]) {
+            bail!("the arrow stayed where it was before it moved");
+        }
         scenario::monitor(&socket, MOVE_TO_PANEL)?;
         let what = "the panel's hand showed";
         screen.until_black(&mut qemu, HAND_PIXEL, what)?;

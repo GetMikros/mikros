@@ -2,14 +2,16 @@
 //! whose memory the compositor exports as a memory object, which the
 //! display imports, so that nothing copies a frame before the display
 //! driver. A client's buffer is imported, through the export token or
-//! memory object that the client gave, as a Vulkan buffer of its memory.
-//! A frame clears the output to the background colour and draws a quad
-//! for each layer, whose fragment shader (shaders/compose.wgsl) reads the
-//! layer's pixels from its buffer and puts them, by their alpha, over the
-//! haze or a colour inside the layer's material areas and over the frame
-//! elsewhere. The values of the layers and the rectangles of their areas
-//! go to the shaders in buffers of host memory, and the buffers that each
-//! layer reads are pushed as its descriptors.
+//! memory object that the client gave, as a Vulkan buffer of its memory. A
+//! frame clears the output, or only the rectangles of its damage on an
+//! image that keeps the rest, to the background colour and draws a quad for
+//! each layer that touches them, whose fragment shader
+//! (shaders/compose.wgsl) reads the layer's pixels from its buffer and puts
+//! them, by their alpha, over the haze or a colour inside the layer's
+//! material areas and over the frame elsewhere. The values of the layers
+//! and the rectangles of their areas go to the shaders in buffers of host
+//! memory, and the buffers that each layer reads are pushed as its
+//! descriptors.
 
 use super::host::HostBuffer;
 use crate::server::Rect;
@@ -495,6 +497,7 @@ impl Renderer {
         layers: &[Layer],
         haze: Option<&Haze>,
         look: &Look,
+        damage: Option<&[Rect]>,
     ) -> Result<(), Error> {
         let mut values = Vec::with_capacity(layers.len());
         let mut rects: Vec<[i32; 4]> = Vec::new();
@@ -576,8 +579,14 @@ impl Renderer {
         unsafe {
             d.reset_command_buffer(self.commands, vk::CommandBufferResetFlags::empty())?;
             d.begin_command_buffer(self.commands, &vk::CommandBufferBeginInfo::default())?;
+            // A frame of the whole output need not keep what the image
+            // holds; one of its damage draws over it.
+            let old = match damage {
+                None => vk::ImageLayout::UNDEFINED,
+                Some(_) => vk::ImageLayout::GENERAL,
+            };
             let to_draw = barrier(
-                vk::ImageLayout::UNDEFINED,
+                old,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::AccessFlags::empty(),
                 vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
@@ -594,7 +603,10 @@ impl Renderer {
             let attachments = [vk::RenderingAttachmentInfo::default()
                 .image_view(target.view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .load_op(match damage {
+                    None => vk::AttachmentLoadOp::CLEAR,
+                    Some(_) => vk::AttachmentLoadOp::LOAD,
+                })
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue { float32: colour },
@@ -614,28 +626,48 @@ impl Renderer {
                 .height(target.height as f32)
                 .max_depth(1.0);
             d.cmd_set_viewport(self.commands, 0, &[viewport]);
-            d.cmd_set_scissor(self.commands, 0, &[extent.into()]);
-            for (index, layer) in layers.iter().enumerate() {
-                let pixels = whole(layer.pixels.buffer);
-                let infos = [&pixels, &shared[0], &shared[1], &shared[2], &shared[3]];
-                let writes: Vec<vk::WriteDescriptorSet> = infos
-                    .iter()
-                    .enumerate()
-                    .map(|(binding, info)| {
-                        vk::WriteDescriptorSet::default()
-                            .dst_binding(binding as u32)
-                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                            .buffer_info(&info[..])
-                    })
-                    .collect();
-                self.push.cmd_push_descriptor_set(
-                    self.commands,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.layout,
-                    0,
-                    &writes,
-                );
-                d.cmd_draw(self.commands, 4, 1, 0, index as u32);
+            let whole_area = vk::Rect2D::from(extent);
+            let areas: Vec<vk::Rect2D> = match damage {
+                None => vec![whole_area],
+                Some(rects) => clip(rects, target),
+            };
+            for area in &areas {
+                d.cmd_set_scissor(self.commands, 0, std::slice::from_ref(area));
+                if damage.is_some() {
+                    let clear = vk::ClearAttachment::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .color_attachment(0)
+                        .clear_value(vk::ClearValue {
+                            color: vk::ClearColorValue { float32: colour },
+                        });
+                    let rect = vk::ClearRect::default().rect(*area).layer_count(1);
+                    d.cmd_clear_attachments(self.commands, &[clear], &[rect]);
+                }
+                for (index, layer) in layers.iter().enumerate() {
+                    if !overlaps(layer, area) {
+                        continue;
+                    }
+                    let pixels = whole(layer.pixels.buffer);
+                    let infos = [&pixels, &shared[0], &shared[1], &shared[2], &shared[3]];
+                    let writes: Vec<vk::WriteDescriptorSet> = infos
+                        .iter()
+                        .enumerate()
+                        .map(|(binding, info)| {
+                            vk::WriteDescriptorSet::default()
+                                .dst_binding(binding as u32)
+                                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                                .buffer_info(&info[..])
+                        })
+                        .collect();
+                    self.push.cmd_push_descriptor_set(
+                        self.commands,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        self.layout,
+                        0,
+                        &writes,
+                    );
+                    d.cmd_draw(self.commands, 4, 1, 0, index as u32);
+                }
             }
             d.cmd_end_rendering(self.commands);
             let to_show = barrier(
@@ -662,6 +694,50 @@ impl Renderer {
         }
         Ok(())
     }
+}
+
+/// The rectangles of `rects` within `target`, as Vulkan's, without the
+/// empty ones; more than eight become the one rectangle that covers them.
+fn clip(rects: &[Rect], target: &Target) -> Vec<vk::Rect2D> {
+    let (width, height) = (target.width as i32, target.height as i32);
+    let mut areas: Vec<(i32, i32, i32, i32)> = rects
+        .iter()
+        .filter_map(|r| {
+            let (x0, y0) = (r.x.max(0), r.y.max(0));
+            let x1 = r.x.saturating_add(r.width).min(width);
+            let y1 = r.y.saturating_add(r.height).min(height);
+            (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+        })
+        .collect();
+    if areas.len() > 8 {
+        let cover = areas.iter().fold(areas[0], |a, b| {
+            (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+        });
+        areas = vec![cover];
+    }
+    areas
+        .into_iter()
+        .map(|(x0, y0, x1, y1)| vk::Rect2D {
+            offset: vk::Offset2D { x: x0, y: y0 },
+            extent: vk::Extent2D {
+                width: (x1 - x0) as u32,
+                height: (y1 - y0) as u32,
+            },
+        })
+        .collect()
+}
+
+/// Whether `layer` covers any of `area`.
+fn overlaps(layer: &Layer, area: &vk::Rect2D) -> bool {
+    let (x0, y0) = (area.offset.x, area.offset.y);
+    let (x1, y1) = (
+        x0 + area.extent.width as i32,
+        y0 + area.extent.height as i32,
+    );
+    layer.x < x1
+        && layer.y < y1
+        && layer.x + layer.pixels.width as i32 > x0
+        && layer.y + layer.pixels.height as i32 > y0
 }
 
 impl Drop for Renderer {
