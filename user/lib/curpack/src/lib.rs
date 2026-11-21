@@ -1,6 +1,7 @@
 //! Cursor themes as `.curpack` files (MIKSPEC-0066.R26): the cursors of a
 //! theme, each with its name, its hotspot and its frames of vector paths,
-//! which xtask writes from SVG sources and the compositor reads.
+//! which xtask writes from SVG sources and the compositor reads and
+//! rasterizes with `Pack::rasterize`.
 //!
 //! The file is little-endian and read front to back:
 //!
@@ -24,6 +25,9 @@
 //! premultiplied.
 
 mod read;
+mod render;
+
+pub use render::Image;
 
 use std::collections::BTreeSet;
 
