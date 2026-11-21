@@ -1,0 +1,160 @@
+# The placeholder cursor theme (MIKSPEC-0066.R26), which
+# `cargo xtask` turns into system/share/cursors/default.curpack: for each
+# shape name of cursor-shape, its drawing, its hotspot in the drawings'
+# units, a rotation in degrees around the centre where one drawing serves
+# several shapes, and the frames and period of the animated ones, whose
+# group `spin` turns. xtask/src/cursors.rs describes the keys.
+size = 24
+
+[cursors.default]
+svg = "arrow.svg"
+hotspot = [4, 3]
+
+[cursors.context_menu]
+svg = "context-menu.svg"
+hotspot = [4, 3]
+
+[cursors.help]
+svg = "help.svg"
+hotspot = [4, 3]
+
+[cursors.pointer]
+svg = "hand.svg"
+hotspot = [10.8, 3]
+
+[cursors.progress]
+svg = "progress.svg"
+hotspot = [4, 3]
+frames = 12
+period_ms = 960
+spin_centre = [17.5, 17.5]
+
+[cursors.wait]
+svg = "spinner.svg"
+hotspot = [12, 12]
+frames = 12
+period_ms = 960
+
+[cursors.cell]
+svg = "cell.svg"
+hotspot = [12, 12]
+
+[cursors.crosshair]
+svg = "crosshair.svg"
+hotspot = [12, 12]
+
+[cursors.text]
+svg = "ibeam.svg"
+hotspot = [12, 12]
+
+[cursors.vertical_text]
+svg = "ibeam.svg"
+hotspot = [12, 12]
+rotate = 90
+
+[cursors.alias]
+svg = "alias.svg"
+hotspot = [4, 3]
+
+[cursors.copy]
+svg = "copy.svg"
+hotspot = [4, 3]
+
+[cursors.move]
+svg = "move.svg"
+hotspot = [12, 12]
+
+[cursors.no_drop]
+svg = "not-allowed.svg"
+hotspot = [12, 12]
+
+[cursors.not_allowed]
+svg = "not-allowed.svg"
+hotspot = [12, 12]
+
+[cursors.grab]
+svg = "grab.svg"
+hotspot = [12, 12]
+
+[cursors.grabbing]
+svg = "grabbing.svg"
+hotspot = [12, 13]
+
+[cursors.n_resize]
+svg = "edge-arrow.svg"
+hotspot = [12, 3]
+
+[cursors.ne_resize]
+svg = "edge-arrow.svg"
+hotspot = [12, 3]
+rotate = 45
+
+[cursors.e_resize]
+svg = "edge-arrow.svg"
+hotspot = [12, 3]
+rotate = 90
+
+[cursors.se_resize]
+svg = "edge-arrow.svg"
+hotspot = [12, 3]
+rotate = 135
+
+[cursors.s_resize]
+svg = "edge-arrow.svg"
+hotspot = [12, 3]
+rotate = 180
+
+[cursors.sw_resize]
+svg = "edge-arrow.svg"
+hotspot = [12, 3]
+rotate = 225
+
+[cursors.w_resize]
+svg = "edge-arrow.svg"
+hotspot = [12, 3]
+rotate = 270
+
+[cursors.nw_resize]
+svg = "edge-arrow.svg"
+hotspot = [12, 3]
+rotate = 315
+
+[cursors.ns_resize]
+svg = "double-arrow.svg"
+hotspot = [12, 12]
+
+[cursors.ew_resize]
+svg = "double-arrow.svg"
+hotspot = [12, 12]
+rotate = 90
+
+[cursors.nesw_resize]
+svg = "double-arrow.svg"
+hotspot = [12, 12]
+rotate = 45
+
+[cursors.nwse_resize]
+svg = "double-arrow.svg"
+hotspot = [12, 12]
+rotate = 315
+
+[cursors.col_resize]
+svg = "split.svg"
+hotspot = [12, 12]
+
+[cursors.row_resize]
+svg = "split.svg"
+hotspot = [12, 12]
+rotate = 90
+
+[cursors.all_scroll]
+svg = "move.svg"
+hotspot = [12, 12]
+
+[cursors.zoom_in]
+svg = "zoom-in.svg"
+hotspot = [10, 10]
+
+[cursors.zoom_out]
+svg = "zoom-out.svg"
+hotspot = [10, 10]

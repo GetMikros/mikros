@@ -24,6 +24,7 @@ kind = "program"
 image = "system"
 manifest = "system.compositor.yaml"
 share = ["desktop/shell.yaml", "desktop/theme.yaml"]
+cursors = ["cursors/default"]
 
 # The parts that only run on Mikros are left out of the host's tests.
 [lints.rust]

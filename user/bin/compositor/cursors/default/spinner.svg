@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<defs><linearGradient id="turn"><stop offset="0" stop-color="#0066ff"/><stop offset="1" stop-color="#0066ff" stop-opacity="0"/></linearGradient></defs>
+<circle cx="12" cy="12" r="7" fill="none" stroke="#000" stroke-opacity="0.3" stroke-width="3"/>
+<g id="spin"><circle cx="12" cy="12" r="7" fill="none" stroke="url(#turn)" stroke-width="3"/></g>
+</svg>
