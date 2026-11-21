@@ -4,7 +4,7 @@
 //! in protocols/. Each interface becomes a module with its `Request`s,
 //! decoded from the arguments that `wayland::wire::decode` reads, a
 //! `send_` function for each event, and a module of constants for each
-//! enum.
+//! enum. It also compiles the renderer's shaders to SPIR-V.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,42 @@ fn main() {
     }
     let path = PathBuf::from(env::var("OUT_DIR").expect("cargo sets it")).join("protocols.rs");
     fs::write(path, out).expect("a writable output directory");
+    shaders(&manifest);
     link_vulkan(&manifest);
+}
+
+/// Compiles the entry points of `shaders/compose.wgsl` to SPIR-V for the
+/// renderer: `compose.vert.spv` and `compose.frag.spv` in the output
+/// directory.
+fn shaders(manifest: &Path) {
+    let file = manifest.join("shaders/compose.wgsl");
+    println!("cargo:rerun-if-changed={}", file.display());
+    let source = fs::read_to_string(&file).expect("a readable shader");
+    let shown = file.display().to_string();
+    let module = naga::front::wgsl::parse_str(&source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string_with_path(&source, &shown)));
+    let flags = naga::valid::ValidationFlags::all();
+    let info = naga::valid::Validator::new(flags, naga::valid::Capabilities::empty())
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string_with_path(&source, &shown)));
+    let options = naga::back::spv::Options {
+        lang_version: (1, 3),
+        ..Default::default()
+    };
+    let out = PathBuf::from(env::var("OUT_DIR").expect("cargo sets it"));
+    for (stage, entry, name) in [
+        (naga::ShaderStage::Vertex, "vertex", "compose.vert.spv"),
+        (naga::ShaderStage::Fragment, "fragment", "compose.frag.spv"),
+    ] {
+        let pipeline = naga::back::spv::PipelineOptions {
+            shader_stage: stage,
+            entry_point: entry.into(),
+        };
+        let words = naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        fs::write(out.join(name), bytes).expect("a writable output directory");
+    }
 }
 
 /// Links the Vulkan loader, which `cargo xtask` builds as a port before

@@ -12,6 +12,7 @@ mod imports;
 mod keys;
 mod output;
 mod parts;
+mod pipeline;
 mod render;
 mod session;
 mod themes;
