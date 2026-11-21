@@ -1,7 +1,9 @@
 //! `cargo xtask sysroot`: the directory that C and C++ programs for
 //! Mikros are built against, laid out like `/system` (MIKSPEC-0062.R13).
 //! `cargo xtask sysroot` also installs the system libraries that
-//! `crate::system_libraries` builds.
+//! `crate::system_libraries` builds. A library package lies in
+//! `libraries/<id>/` as it is in the package, and the build system files
+//! below let pkg-config find its `pkgconfig/` (MIKSPEC-0062.R15).
 //!
 //! It holds the musl headers in `include/`, with the generated
 //! `<mikros/syscalls.h>`, `<mikros/abi.h>`, `<mikros/process.h>`,
@@ -101,12 +103,13 @@ fn make() -> Result<PathBuf> {
     let cfg = config(&sysroot);
     write(&cfg, driver_config().as_bytes())?;
     let llvm = llvm_from_sysroot()?;
+    let packages = library_packages(&sysroot);
     for (file, contents) in [
         (
             meson_cross_file(),
-            meson_cross(&llvm, &from_sysroot(&crate::cmake::program())?),
+            meson_cross(&llvm, &from_sysroot(&crate::cmake::program())?, &packages),
         ),
-        (cmake_toolchain_file(), cmake_toolchain(&llvm)),
+        (cmake_toolchain_file(), cmake_toolchain(&llvm, &packages)),
         (
             sysroot.join("share/cmake/Platform/Mikros.cmake"),
             CMAKE_PLATFORM.to_owned(),
@@ -383,8 +386,45 @@ fn from_sysroot(path: &Path) -> Result<String> {
 /// that `crate::cmake` builds at `cmake`, both relative to the sysroot,
 /// for the dependencies that Meson finds through their CMake packages.
 /// Meson replaces `@DIRNAME@` with the file's directory, the sysroot.
-fn meson_cross(llvm: &str, cmake: &str) -> String {
+/// The IDs of the library packages that the sysroot holds in
+/// `libraries/<id>/` with pkg-config files in their `pkgconfig/`
+/// (MIKSPEC-0062.R15), in order.
+fn library_packages(sysroot: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(sysroot.join("libraries")) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("pkgconfig").is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|id| mikros_mika::id::is_valid(id))
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// The folders, below the sysroot, in which pkg-config finds files: those
+/// of the system libraries, of wayland-protocols, and of each library
+/// package of `packages` (MIKSPEC-0062.R15).
+fn pkg_config_dirs(packages: &[String]) -> Vec<String> {
+    let mut dirs = vec![
+        "libraries/pkgconfig".to_owned(),
+        "share/pkgconfig".to_owned(),
+    ];
+    dirs.extend(
+        packages
+            .iter()
+            .map(|id| format!("libraries/{id}/pkgconfig")),
+    );
+    dirs
+}
+
+fn meson_cross(llvm: &str, cmake: &str, packages: &[String]) -> String {
     let tool = |name: &str| format!("'@DIRNAME@/{llvm}/{name}'");
+    let libdir: Vec<String> = pkg_config_dirs(packages)
+        .iter()
+        .map(|d| format!("'@DIRNAME@/{d}'"))
+        .collect();
     let compiler = |name: &str| format!("[{}, '--config=@DIRNAME@/{TRIPLE}.cfg']", tool(name));
     format!(
         "# The Mikros target for Meson, written by cargo xtask sysroot, for the
@@ -402,7 +442,7 @@ pkg-config = 'pkg-config'
 
 [properties]
 sys_root = '@DIRNAME@'
-pkg_config_libdir = ['@DIRNAME@/libraries/pkgconfig', '@DIRNAME@/share/pkgconfig']
+pkg_config_libdir = [{}]
 
 [host_machine]
 system = 'mikros'
@@ -414,12 +454,18 @@ endian = 'little'
         compiler("clang++"),
         tool("llvm-ar"),
         tool("llvm-ranlib"),
+        libdir.join(", "),
     )
 }
 
 /// The CMake toolchain file, with the LLVM programs in `llvm`, relative
 /// to the sysroot.
-fn cmake_toolchain(llvm: &str) -> String {
+fn cmake_toolchain(llvm: &str, packages: &[String]) -> String {
+    let libdir: Vec<String> = pkg_config_dirs(packages)
+        .iter()
+        .map(|d| format!("${{CMAKE_CURRENT_LIST_DIR}}/{d}"))
+        .collect();
+    let libdir = libdir.join(":");
     format!(
         "# The Mikros target for CMake, written by cargo xtask sysroot, for the
 # CMake with the Mikros patches that cargo xtask builds:
@@ -436,6 +482,10 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+# pkg-config finds the files of the sysroot alone, with their paths below
+# it.
+set(ENV{{PKG_CONFIG_LIBDIR}} \"{libdir}\")
+set(ENV{{PKG_CONFIG_SYSROOT_DIR}} \"${{CMAKE_CURRENT_LIST_DIR}}\")
 # find_package finds the packages of share/cmake by itself, but not those
 # of libraries/cmake, so each of these is named, by its folder.
 file(GLOB _MIKROS_PACKAGES LIST_DIRECTORIES true \"${{CMAKE_CURRENT_LIST_DIR}}/libraries/cmake/*\")
@@ -566,20 +616,26 @@ mod tests {
 
     #[test]
     fn build_system_files_select_mikros_and_the_compilers() {
-        let cross = meson_cross("../llvm/bin", "../cmake/install/bin/cmake");
+        let packages = ["org.glfw.dev".to_owned()];
+        let cross = meson_cross("../llvm/bin", "../cmake/install/bin/cmake", &packages);
         for line in [
             "c = ['@DIRNAME@/../llvm/bin/clang', '--config=@DIRNAME@/x86_64-unknown-mikros.cfg']",
             "sys_root = '@DIRNAME@'",
             "system = 'mikros'",
             "cmake = '@DIRNAME@/../cmake/install/bin/cmake'",
+            "pkg_config_libdir = ['@DIRNAME@/libraries/pkgconfig', '@DIRNAME@/share/pkgconfig', \
+             '@DIRNAME@/libraries/org.glfw.dev/pkgconfig']",
         ] {
             assert!(cross.lines().any(|l| l == line), "{line}");
         }
-        let toolchain = cmake_toolchain("../llvm/bin");
+        let toolchain = cmake_toolchain("../llvm/bin", &packages);
         for line in [
             "set(CMAKE_SYSTEM_NAME Mikros)",
             "set(CMAKE_SYSROOT \"${CMAKE_CURRENT_LIST_DIR}\")",
             "set(CMAKE_C_COMPILER \"${_MIKROS_LLVM}/clang\" \"${_MIKROS_CONFIG}\")",
+            "set(ENV{PKG_CONFIG_LIBDIR} \"${CMAKE_CURRENT_LIST_DIR}/libraries/pkgconfig:\
+             ${CMAKE_CURRENT_LIST_DIR}/share/pkgconfig:\
+             ${CMAKE_CURRENT_LIST_DIR}/libraries/org.glfw.dev/pkgconfig\")",
         ] {
             assert!(toolchain.lines().any(|l| l == line), "{line}");
         }
@@ -590,5 +646,23 @@ mod tests {
         ] {
             assert!(CMAKE_PLATFORM.lines().any(|l| l == line), "{line}");
         }
+    }
+
+    #[test]
+    fn finds_the_library_packages_with_pkg_config_files() {
+        let dir = std::env::temp_dir().join(format!("sysroot-packages-{}", std::process::id()));
+        for d in [
+            "libraries/pkgconfig",
+            "libraries/cmake/VulkanLoader",
+            "libraries/org.glfw.dev/pkgconfig",
+            "libraries/org.b.lib/pkgconfig",
+            "libraries/org.none.lib/include",
+        ] {
+            fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let found = library_packages(&dir);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found, ["org.b.lib", "org.glfw.dev"]);
+        assert!(library_packages(Path::new("/nonexistent")).is_empty());
     }
 }
