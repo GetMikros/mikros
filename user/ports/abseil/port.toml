@@ -1,13 +1,17 @@
-# Abseil, the C++ library that Dawn is written against, at the release
-# that Dawn's current source builds with. It is only unpacked here: Dawn's
-# own build files build it, as part of Dawn (user/ports/dawn), which is
-# why this port has no [build] table. Apache-2.0. The patch:
-# - 0001: Mikros is a platform with mmap, which abseil's low level
-#   allocator, thread identities, semaphores and so its mutexes need, and
-#   one whose raw logging writes with write(2), so that its fatal checks
-#   say what failed.
+# Abseil, the C++ library that Dawn is written against, from the Mikros
+# fork, GetMikros/abseil-cpp: its commit of the `mikros` branch, whose
+# commits stand on the 20260107.1 release of upstream (MIKSPEC-0062.R9),
+# the release that Elegance's build of Dawn uses. The branch's changes:
+# - Mikros is a platform with mmap, which abseil's low level allocator,
+#   thread identities and per-thread semaphores, and so its mutexes,
+#   need;
+# - Mikros is a platform whose raw logging writes with write(2), so that
+#   its fatal checks say what failed.
+# It is only unpacked here: Dawn's own build files build it, as part of
+# Dawn (user/ports/dawn), which is why this port has no [build] table.
+# Apache-2.0.
 
 [source]
-url = "https://github.com/abseil/abseil-cpp/archive/refs/tags/20260817.0.tar.gz"
-sha256 = "f7e05179df39c45434cad433f5783840bb3788ef322976f9138bc6b72b3a107d"
-dir = "abseil-cpp-20260817.0"
+url = "https://github.com/GetMikros/abseil-cpp/archive/247d315138f4991af2877e666a7580066608633d.tar.gz"
+sha256 = "25a352ba7f0d2d1e382dc21a7ee851ca3416d729de1847e36d555761b1811bd0"
+dir = "abseil-cpp-247d315138f4991af2877e666a7580066608633d"
