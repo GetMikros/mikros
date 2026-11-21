@@ -4,10 +4,11 @@
 //! Wayland channel: a channel message's requests go to the server, and the
 //! events they cause go back once they are handled. A frame is drawn
 //! whenever a surface commits: once each shown buffer's acquire point is
-//! reached, the buffers are copied into an output image, the release
-//! points of buffers that no surface shows any more are reached, and the
-//! image is shown.
+//! reached, the wallpaper and the buffers are drawn into an output image,
+//! the release points of buffers that no surface shows any more are
+//! reached, and the image is shown.
 
+mod host;
 mod imports;
 mod keys;
 mod output;
@@ -17,7 +18,8 @@ mod render;
 mod session;
 mod themes;
 
-use crate::server::{ClientId, Role, Server};
+use crate::haze;
+use crate::server::{ClientId, Server};
 use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
 use imports::{Importer, Store};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
@@ -29,7 +31,7 @@ use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::session::{SeatAsyncServer, SeatRequest};
 use output::Output;
-use render::{Layer, Renderer};
+use render::{Layer, Look, Renderer, Under};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::future::poll_fn;
@@ -272,17 +274,11 @@ impl Compositor {
             let Some(mut output) = self.output.borrow_mut().take() else {
                 continue;
             };
-            // The buffers of the toplevels, oldest surface first, each
-            // once its acquire point is reached.
-            let shown: Vec<_> = self
-                .server
-                .borrow()
-                .surfaces()
-                .filter(|(_, s)| s.role == Role::Toplevel)
-                .filter_map(|(_, s)| Some((s.current.buffer?, s.current.acquire)))
-                .collect();
-            for &(_, acquire) in &shown {
-                let Some(point) = acquire else {
+            // What the frame shows, each buffer once its acquire point is
+            // reached.
+            let shown = self.server.borrow().shown();
+            for s in &shown {
+                let Some(point) = s.acquire else {
                     continue;
                 };
                 let timeline = self.store.borrow().timeline(point.timeline);
@@ -290,23 +286,36 @@ impl Compositor {
                     let _ = self.reactor.timeline(timeline, point.value).await;
                 }
             }
+            // The theme's colours under the materials.
+            let scheme = self.server.borrow().theme().scheme;
             let drawn = {
                 let store = self.store.borrow();
                 // The wallpaper below every surface (MIKSPEC-0075.R22).
-                let wallpaper = store
-                    .wallpaper
-                    .as_ref()
-                    .map(|buffer| Layer { buffer, x: 0, y: 0 });
-                let layers: Vec<Layer> = wallpaper
-                    .into_iter()
-                    .chain(
-                        shown
-                            .iter()
-                            .filter_map(|(buffer, _)| store.buffers.get(buffer))
-                            .map(|buffer| Layer { buffer, x: 0, y: 0 }),
-                    )
-                    .collect();
-                self.renderer.draw(output.back(), BACKGROUND, &layers)
+                let wallpaper = store.wallpaper.as_ref().map(|w| Layer {
+                    pixels: w.pixels(),
+                    x: 0,
+                    y: 0,
+                    under: Under::Flat,
+                    haze: &[],
+                    blur: &[],
+                });
+                let surfaces = shown.iter().filter_map(|s| {
+                    Some(Layer {
+                        pixels: store.buffers.get(&s.buffer)?.pixels(),
+                        x: s.x,
+                        y: s.y,
+                        under: Under::Flat,
+                        haze: &s.haze,
+                        blur: &s.blur,
+                    })
+                });
+                let layers: Vec<Layer> = wallpaper.into_iter().chain(surfaces).collect();
+                let look = Look {
+                    flat: haze::flat(scheme),
+                    translucent: haze::translucent(scheme),
+                };
+                self.renderer
+                    .draw(output.back(), BACKGROUND, &layers, None, &look)
             };
             if let Err(e) = drawn {
                 mikros_rt::log!(Error, "compositor: drawing a frame: {e:?}");
@@ -444,6 +453,10 @@ pub fn main() {
     // standard error.
     let directory = ClientEnd::new(directory);
     mikros_rt::log::connect(&directory);
+    // A panic's message goes to the log too.
+    std::panic::set_hook(Box::new(|info| {
+        mikros_rt::log!(Error, "compositor: {info}");
+    }));
     let Some(seat) = take(SEAT_ID) else {
         mikros_rt::log!(Error, "compositor: the Seat channel is missing");
         std::process::exit(1);

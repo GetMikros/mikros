@@ -7,7 +7,7 @@ use crate::server::{BufferId, Imports, Layout, Memory, Point, TimelineId};
 use crate::wayland::wire::Fd;
 use std::collections::BTreeMap;
 
-/// The DRM formats of the buffers that the renderer copies, and the
+/// The DRM formats of the buffers that the renderer draws, and the
 /// linear modifier, which is the only one.
 pub const FORMATS: [(u32, u64); 2] = [(XRGB8888, LINEAR), (ARGB8888, LINEAR)];
 const XRGB8888: u32 = 0x3432_5258;
@@ -61,9 +61,10 @@ impl Imports for Importer<'_> {
             return None;
         }
         let shape = (layout.width, layout.height, layout.stride, layout.offset);
+        let alpha = layout.format == ARGB8888;
         let buffer = self
             .renderer
-            .import(handle, memory == Memory::Token, shape)
+            .import(handle, memory == Memory::Token, shape, alpha)
             .ok()?;
         let id = self.store.id();
         self.store.buffers.insert(id, buffer);
