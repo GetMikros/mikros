@@ -1,16 +1,20 @@
-//! Buffers of the compositor's own in host memory, which stay mapped and
-//! which the shaders read: the pixels of the wallpaper and of its haze,
-//! and the values of each frame. The wallpaper's pixels are read from the
-//! client's buffer, whose memory the renderer imports as host-visible.
+//! Buffers of the compositor's own in host memory, which stay mapped: the
+//! pixels of the wallpaper and of its haze, which the shaders read, and
+//! the values of each frame. The pixels that a layer shows come with an
+//! image that each frame fills from the buffer. The wallpaper's pixels
+//! are read from the client's buffer, whose memory the renderer imports
+//! as host-visible.
 
-use super::render::{ClientBuffer, Error, Pixels, Renderer};
+use super::render::{ClientBuffer, Error, Picture, Pixels, Renderer, Source};
 use ash::vk;
 
 /// A buffer of the compositor's own in host memory, mapped: the pixels of
-/// a wallpaper or a haze, or the values of a frame.
+/// a wallpaper, a cursor or a haze, or the values of a frame.
 pub struct HostBuffer {
     pub(super) buffer: vk::Buffer,
     memory: vk::DeviceMemory,
+    /// The image that shows the pixels of a wallpaper or a cursor.
+    picture: Option<Picture>,
     pub(super) size: u64,
     mapped: *mut u8,
     pub width: u32,
@@ -20,16 +24,21 @@ pub struct HostBuffer {
 }
 
 impl HostBuffer {
-    /// Its pixels, opaque rows of its width.
-    pub fn pixels(&self) -> Pixels {
-        Pixels {
-            buffer: self.buffer,
+    /// Its pixels, rows of its width, when it has an image to show them.
+    pub fn pixels(&self) -> Option<Pixels> {
+        let picture = self.picture.as_ref()?;
+        Some(Pixels {
+            image: picture.image,
+            view: picture.view,
+            source: Source {
+                buffer: self.buffer,
+                row: self.width,
+                first: 0,
+            },
             width: self.width,
             height: self.height,
-            row: self.width,
-            first: 0,
             alpha: self.alpha,
-        }
+        })
     }
 }
 
@@ -81,7 +90,7 @@ impl Renderer {
         let size = size.max(16);
         let info = vk::BufferCreateInfo::default()
             .size(size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC);
         // SAFETY: the create info lives for the call.
         let buffer = unsafe { d.create_buffer(&info, None)? };
         // SAFETY: the buffer belongs to the device.
@@ -114,6 +123,7 @@ impl Renderer {
             Ok(mapped) => Ok(HostBuffer {
                 buffer,
                 memory,
+                picture: None,
                 size,
                 mapped: mapped.cast(),
                 width: 0,
@@ -146,7 +156,31 @@ impl Renderer {
         Ok(buffer)
     }
 
-    pub fn forget_host(&self, buffer: HostBuffer) {
+    /// A buffer of host memory that holds `pixels`, rows of `width` by
+    /// `height` pixels that a layer shows, with an image for them.
+    pub fn host_picture(
+        &self,
+        pixels: &[u32],
+        width: u32,
+        height: u32,
+        alpha: bool,
+    ) -> Result<HostBuffer, Error> {
+        let mut buffer = self.host_pixels(pixels, width, height)?;
+        match self.picture(width, height) {
+            Ok(picture) => buffer.picture = Some(picture),
+            Err(e) => {
+                self.forget_host(buffer);
+                return Err(e);
+            }
+        }
+        buffer.alpha = alpha;
+        Ok(buffer)
+    }
+
+    pub fn forget_host(&self, mut buffer: HostBuffer) {
+        if let Some(picture) = buffer.picture.take() {
+            self.forget_picture(picture);
+        }
         // SAFETY: no frame being drawn uses the buffer, and its memory is
         // mapped.
         unsafe {

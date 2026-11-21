@@ -1,7 +1,7 @@
 // Composing a frame: one quad for each layer, the wallpaper, a client's
 // buffer or a panel's, drawn in order with premultiplied alpha blending.
-// The fragment shader reads the layer's pixels from its buffer, XRGB8888
-// or ARGB8888 rows, and, inside the layer's haze area, puts them over the
+// The fragment shader reads the layer's pixels from its image, XRGB8888
+// or ARGB8888, and, inside the layer's haze area, puts them over the
 // output's haze, or a flat colour, in the same draw (MIKSPEC-0066.R18);
 // inside its blur area, over a translucent colour.
 
@@ -10,9 +10,6 @@ struct Layer {
     rect: vec4<i32>,
     // The output's width and height.
     output: vec2<u32>,
-    // The layer's first pixel in its buffer, and the pixels in a row.
-    first: u32,
-    row: u32,
     // 1 when the buffer's fourth byte is alpha.
     alpha: u32,
     // Under the haze area: 0 nothing, 1 the haze, 2 the flat colour.
@@ -30,7 +27,7 @@ struct Layer {
     blur_count: u32,
 }
 
-@group(0) @binding(0) var<storage, read> pixels: array<u32>;
+@group(0) @binding(0) var pixels: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read> haze_new: array<u32>;
 @group(0) @binding(2) var<storage, read> haze_old: array<u32>;
 @group(0) @binding(3) var<storage, read> areas: array<vec4<i32>>;
@@ -52,7 +49,8 @@ fn vertex(@builtin(vertex_index) i: u32, @builtin(instance_index) layer: u32) ->
     return Corner(vec4<f32>(at.x, -at.y, 0.0, 1.0), layer);
 }
 
-// The red, green, blue and fourth byte of a pixel, blue first in memory.
+// The red, green, blue and fourth byte of a pixel of a buffer of host
+// memory, blue first in memory.
 fn colour(pixel: u32) -> vec4<f32> {
     let c = unpack4x8unorm(pixel);
     return vec4<f32>(c.z, c.y, c.x, c.w);
@@ -75,7 +73,7 @@ fn fragment(corner: Corner) -> @location(0) vec4<f32> {
     // haze.
     let on_output = clamp(vec2<i32>(corner.at.xy), vec2<i32>(0), vec2<i32>(l.output) - 1);
     let at = clamp(on_output - l.rect.xy, vec2<i32>(0), l.rect.zw - 1);
-    var c = colour(pixels[l.first + u32(at.y) * l.row + u32(at.x)]);
+    var c = textureLoad(pixels, at, 0);
     if l.alpha == 0u {
         c.w = 1.0;
     }

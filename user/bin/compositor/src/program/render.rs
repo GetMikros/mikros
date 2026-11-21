@@ -2,16 +2,18 @@
 //! whose memory the compositor exports as a memory object, which the
 //! display imports, so that nothing copies a frame before the display
 //! driver. A client's buffer is imported, through the export token or
-//! memory object that the client gave, as a Vulkan buffer of its memory. A
-//! frame clears the output, or only the rectangles of its damage on an
-//! image that keeps the rest, to the background colour and draws a quad for
-//! each layer that touches them, whose fragment shader
-//! (shaders/compose.wgsl) reads the layer's pixels from its buffer and puts
+//! memory object that the client gave, as a Vulkan buffer of its memory,
+//! and every layer's pixels are an image that the shader samples: a frame
+//! first copies the part of each layer's buffer that it draws into the
+//! layer's image. A frame clears the output, or only the rectangles of its
+//! damage on an image that keeps the rest, to the background colour and
+//! draws a quad for each layer that touches them, whose fragment shader
+//! (shaders/compose.wgsl) reads the layer's pixels from its image and puts
 //! them, by their alpha, over the haze or a colour inside the layer's
 //! material areas and over the frame elsewhere. The values of the layers
 //! and the rectangles of their areas go to the shaders in buffers of host
-//! memory, and the buffers that each layer reads are pushed as its
-//! descriptors.
+//! memory, and the image that each layer reads is pushed as its
+//! descriptor.
 
 use super::host::HostBuffer;
 use crate::server::Rect;
@@ -66,10 +68,11 @@ pub struct Target {
     pub offset: u64,
 }
 
-/// A client's buffer, imported.
+/// A client's buffer, imported, and the image that shows it.
 pub struct ClientBuffer {
     buffer: vk::Buffer,
     pub(super) memory: vk::DeviceMemory,
+    picture: Picture,
     pub width: u32,
     pub height: u32,
     pub(super) stride: u32,
@@ -78,26 +81,46 @@ pub struct ClientBuffer {
     pub(super) alpha: bool,
 }
 
-/// Pixels that a layer shows: a buffer, the size of the pixels, the
-/// pixels of a row and the first pixel, and whether they have alpha.
+/// An image that a layer samples, with the memory it owns.
+pub(super) struct Picture {
+    pub(super) image: vk::Image,
+    pub(super) view: vk::ImageView,
+    pub(super) memory: vk::DeviceMemory,
+}
+
+/// Where the pixels of a layer's image come from: a buffer, the pixels of
+/// its rows and the byte of its first row.
 #[derive(Clone, Copy)]
-pub struct Pixels {
+pub(super) struct Source {
     pub(super) buffer: vk::Buffer,
-    pub(super) width: u32,
-    pub(super) height: u32,
     pub(super) row: u32,
     pub(super) first: u32,
+}
+
+/// Pixels that a layer shows: an image, its size, the buffer that each
+/// frame copies the drawn part of it from, and whether they have alpha.
+#[derive(Clone, Copy)]
+pub struct Pixels {
+    pub(super) image: vk::Image,
+    pub(super) view: vk::ImageView,
+    pub(super) source: Source,
+    pub(super) width: u32,
+    pub(super) height: u32,
     pub(super) alpha: bool,
 }
 
 impl ClientBuffer {
     pub fn pixels(&self) -> Pixels {
         Pixels {
-            buffer: self.buffer,
+            image: self.picture.image,
+            view: self.picture.view,
+            source: Source {
+                buffer: self.buffer,
+                row: self.stride / BYTES_PER_PIXEL,
+                first: self.offset,
+            },
             width: self.width,
             height: self.height,
-            row: self.stride / BYTES_PER_PIXEL,
-            first: self.offset / BYTES_PER_PIXEL,
             alpha: self.alpha,
         }
     }
@@ -143,8 +166,6 @@ pub struct Look {
 struct LayerValues {
     rect: [i32; 4],
     output: [u32; 2],
-    first: u32,
-    row: u32,
     alpha: u32,
     haze: u32,
     flat: u32,
@@ -154,7 +175,7 @@ struct LayerValues {
     haze_count: u32,
     blur_first: u32,
     blur_count: u32,
-    _padding: [u32; 3],
+    _padding: u32,
 }
 
 pub struct Renderer {
@@ -404,7 +425,7 @@ impl Renderer {
         let info = vk::BufferCreateInfo::default()
             .push_next(&mut external)
             .size(size)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER);
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC);
         // SAFETY: the create info and what it points to live for the call.
         let buffer = unsafe { self.device.create_buffer(&info, None)? };
         // SAFETY: the buffer belongs to the device.
@@ -441,10 +462,25 @@ impl Renderer {
             }
         };
         // SAFETY: the memory holds the buffer's size.
-        unsafe { self.device.bind_buffer_memory(buffer, memory, 0)? };
+        let bound = unsafe { self.device.bind_buffer_memory(buffer, memory, 0) };
+        let picture = bound
+            .map_err(Error::from)
+            .and_then(|()| self.picture(width, height));
+        let picture = match picture {
+            Ok(picture) => picture,
+            Err(e) => {
+                // SAFETY: nothing uses the buffer or its memory.
+                unsafe {
+                    self.device.destroy_buffer(buffer, None);
+                    self.device.free_memory(memory, None);
+                }
+                return Err(e);
+            }
+        };
         Ok(ClientBuffer {
             buffer,
             memory,
+            picture,
             width,
             height,
             stride,
@@ -454,11 +490,214 @@ impl Renderer {
     }
 
     pub fn forget(&self, buffer: ClientBuffer) {
+        self.forget_picture(buffer.picture);
         // SAFETY: no frame being drawn uses the buffer: frames are drawn
         // to completion.
         unsafe {
             self.device.destroy_buffer(buffer.buffer, None);
             self.device.free_memory(buffer.memory, None);
+        }
+    }
+
+    /// An image of `width` by `height` pixels in memory of its own, which
+    /// shaders sample and copies fill.
+    pub(super) fn picture(&self, width: u32, height: u32) -> Result<Picture, Error> {
+        let info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(FORMAT)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        // SAFETY: the create info lives for the call.
+        let image = unsafe { self.device.create_image(&info, None)? };
+        // SAFETY: the image belongs to the device.
+        let needs = unsafe { self.device.get_image_memory_requirements(image) };
+        let made = self
+            .memory_type(needs.memory_type_bits, vk::MemoryPropertyFlags::empty())
+            .and_then(|index| {
+                let info = vk::MemoryAllocateInfo::default()
+                    .allocation_size(needs.size)
+                    .memory_type_index(index);
+                // SAFETY: the info lives for the call.
+                Ok(unsafe { self.device.allocate_memory(&info, None)? })
+            });
+        let memory = match made {
+            Ok(memory) => memory,
+            Err(e) => {
+                // SAFETY: the image is unused.
+                unsafe { self.device.destroy_image(image, None) };
+                return Err(e);
+            }
+        };
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        let info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(FORMAT)
+            .subresource_range(range);
+        // SAFETY: the memory was made for the image.
+        let view = unsafe {
+            self.device
+                .bind_image_memory(image, memory, 0)
+                .and_then(|()| self.device.create_image_view(&info, None))
+        };
+        match view {
+            Ok(view) => Ok(Picture {
+                image,
+                view,
+                memory,
+            }),
+            Err(e) => {
+                // SAFETY: the image and its memory are unused.
+                unsafe {
+                    self.device.destroy_image(image, None);
+                    self.device.free_memory(memory, None);
+                }
+                Err(e.into())
+            }
+        }
+    }
+
+    pub(super) fn forget_picture(&self, picture: Picture) {
+        // SAFETY: no frame being drawn uses the image: frames are drawn to
+        // completion.
+        unsafe {
+            self.device.destroy_image_view(picture.view, None);
+            self.device.destroy_image(picture.image, None);
+            self.device.free_memory(picture.memory, None);
+        }
+    }
+
+    /// Records the copies that fill the images of `layers` with what a
+    /// frame of `areas` draws of them, and the barriers around them: each
+    /// image is written only where it is sampled, so that what it held
+    /// before is of no use.
+    fn copy_pixels(&self, layers: &[Layer], areas: &[vk::Rect2D]) {
+        let mut copies: Vec<(Pixels, Vec<vk::BufferImageCopy>)> = Vec::new();
+        for layer in layers {
+            let p = layer.pixels;
+            let (x0, y0) = (layer.x, layer.y);
+            let regions: Vec<vk::BufferImageCopy> = areas
+                .iter()
+                .filter_map(|area| {
+                    let left = area.offset.x.max(x0);
+                    let top = area.offset.y.max(y0);
+                    let right = (area.offset.x + area.extent.width as i32).min(x0 + p.width as i32);
+                    let bottom =
+                        (area.offset.y + area.extent.height as i32).min(y0 + p.height as i32);
+                    (right > left && bottom > top).then(|| {
+                        let (x, y) = ((left - x0) as u32, (top - y0) as u32);
+                        let at = u64::from(p.source.first)
+                            + (u64::from(y) * u64::from(p.source.row) + u64::from(x))
+                                * u64::from(BYTES_PER_PIXEL);
+                        vk::BufferImageCopy::default()
+                            .buffer_offset(at)
+                            .buffer_row_length(p.source.row)
+                            .image_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .layer_count(1),
+                            )
+                            .image_offset(vk::Offset3D {
+                                x: x as i32,
+                                y: y as i32,
+                                z: 0,
+                            })
+                            .image_extent(vk::Extent3D {
+                                width: (right - left) as u32,
+                                height: (bottom - top) as u32,
+                                depth: 1,
+                            })
+                    })
+                })
+                .collect();
+            if regions.is_empty() {
+                continue;
+            }
+            match copies.iter_mut().find(|(q, _)| q.image == p.image) {
+                Some((_, all)) => all.extend(regions),
+                None => copies.push((p, regions)),
+            }
+        }
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        let barrier = |image, old, new, src, dst| {
+            vk::ImageMemoryBarrier::default()
+                .image(image)
+                .old_layout(old)
+                .new_layout(new)
+                .src_access_mask(src)
+                .dst_access_mask(dst)
+                .subresource_range(range)
+        };
+        let to_copy: Vec<_> = copies
+            .iter()
+            .map(|(p, _)| {
+                barrier(
+                    p.image,
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags::SHADER_READ,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                )
+            })
+            .collect();
+        let to_sample: Vec<_> = copies
+            .iter()
+            .map(|(p, _)| {
+                barrier(
+                    p.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::AccessFlags::SHADER_READ,
+                )
+            })
+            .collect();
+        // SAFETY: the command buffer is recording, and the images and
+        // buffers belong to the device and outlive the frame; the host's
+        // writes to the buffers are visible to the device.
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                self.commands,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_copy,
+            );
+            for (p, regions) in &copies {
+                self.device.cmd_copy_buffer_to_image(
+                    self.commands,
+                    p.source.buffer,
+                    p.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    regions,
+                );
+            }
+            self.device.cmd_pipeline_barrier(
+                self.commands,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_sample,
+            );
         }
     }
 
@@ -513,8 +752,6 @@ impl Renderer {
             values.push(LayerValues {
                 rect: [layer.x, layer.y, p.width as i32, p.height as i32],
                 output: [target.width, target.height],
-                first: p.first,
-                row: p.row,
                 alpha: u32::from(p.alpha),
                 haze: match (layer.under, haze) {
                     _ if layer.haze.is_empty() => 0,
@@ -528,7 +765,7 @@ impl Renderer {
                 haze_count,
                 blur_first,
                 blur_count,
-                _padding: [0; 3],
+                _padding: 0,
             });
         }
         self.frame_buffers(
@@ -572,6 +809,10 @@ impl Renderer {
             width: target.width,
             height: target.height,
         };
+        let areas: Vec<vk::Rect2D> = match damage {
+            None => vec![vk::Rect2D::from(extent)],
+            Some(rects) => clip(rects, target),
+        };
         // SAFETY: the command buffer, the target, the pipeline and every
         // buffer that the descriptors name belong to the device, the host
         // wrote the frame's values before the submission, and the previous
@@ -585,6 +826,7 @@ impl Renderer {
                 None => vk::ImageLayout::UNDEFINED,
                 Some(_) => vk::ImageLayout::GENERAL,
             };
+            self.copy_pixels(layers, &areas);
             let to_draw = barrier(
                 old,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -626,11 +868,6 @@ impl Renderer {
                 .height(target.height as f32)
                 .max_depth(1.0);
             d.cmd_set_viewport(self.commands, 0, &[viewport]);
-            let whole_area = vk::Rect2D::from(extent);
-            let areas: Vec<vk::Rect2D> = match damage {
-                None => vec![whole_area],
-                Some(rects) => clip(rects, target),
-            };
             for area in &areas {
                 d.cmd_set_scissor(self.commands, 0, std::slice::from_ref(area));
                 if damage.is_some() {
@@ -647,18 +884,23 @@ impl Renderer {
                     if !overlaps(layer, area) {
                         continue;
                     }
-                    let pixels = whole(layer.pixels.buffer);
-                    let infos = [&pixels, &shared[0], &shared[1], &shared[2], &shared[3]];
-                    let writes: Vec<vk::WriteDescriptorSet> = infos
-                        .iter()
-                        .enumerate()
-                        .map(|(binding, info)| {
+                    let image = [vk::DescriptorImageInfo::default()
+                        .image_view(layer.pixels.view)
+                        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                    let mut writes = vec![
+                        vk::WriteDescriptorSet::default()
+                            .dst_binding(0)
+                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                            .image_info(&image),
+                    ];
+                    for (i, info) in shared.iter().enumerate() {
+                        writes.push(
                             vk::WriteDescriptorSet::default()
-                                .dst_binding(binding as u32)
+                                .dst_binding(i as u32 + 1)
                                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                                .buffer_info(&info[..])
-                        })
-                        .collect();
+                                .buffer_info(&info[..]),
+                        );
+                    }
                     self.push.cmd_push_descriptor_set(
                         self.commands,
                         vk::PipelineBindPoint::GRAPHICS,

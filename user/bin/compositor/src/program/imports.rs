@@ -168,7 +168,7 @@ impl Imports for Importer<'_> {
         };
         let (width, height) = (source.width, source.height);
         let copied = self.renderer.read(source).and_then(|pixels| {
-            let buffer = self.renderer.host_pixels(&pixels, width, height)?;
+            let buffer = self.renderer.host_picture(&pixels, width, height, false)?;
             Ok(Wallpaper { pixels, buffer })
         });
         match copied {

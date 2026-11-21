@@ -92,10 +92,9 @@ impl Pointer {
             self.forget(renderer);
             let cursor = self.pack.cursor_or_default(shape);
             let image = self.pack.rasterize(cursor, frame, self.size)?;
-            let mut buffer = renderer
-                .host_pixels(&image.pixels, image.size, image.size)
+            let buffer = renderer
+                .host_picture(&image.pixels, image.size, image.size, true)
                 .ok()?;
-            buffer.alpha = true;
             self.image = Some((key, buffer, image.hotspot));
         }
         let (_, buffer, (hx, hy)) = self.image.as_ref()?;

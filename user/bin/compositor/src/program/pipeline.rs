@@ -8,8 +8,8 @@ use ash::vk;
 const VERTEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compose.vert.spv"));
 const FRAGMENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compose.frag.spv"));
 
-/// The descriptor set layout of the five storage buffers that the shaders
-/// read, pushed for each layer, the pipeline layout and the pipeline,
+/// The descriptor set layout of the layer's image and the four storage
+/// buffers that the shaders read, pushed for each layer, the pipeline layout and the pipeline,
 /// which draws triangle strips into an output with premultiplied alpha.
 pub(super) fn pipeline(
     device: &ash::Device,
@@ -17,9 +17,13 @@ pub(super) fn pipeline(
     let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
     let bindings: Vec<_> = (0..5)
         .map(|binding| {
+            let kind = match binding {
+                0 => vk::DescriptorType::SAMPLED_IMAGE,
+                _ => vk::DescriptorType::STORAGE_BUFFER,
+            };
             vk::DescriptorSetLayoutBinding::default()
                 .binding(binding)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_type(kind)
                 .descriptor_count(1)
                 .stage_flags(stages)
         })

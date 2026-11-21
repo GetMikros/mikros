@@ -476,9 +476,9 @@ impl Compositor {
                 let cursor_part = match (cursor, cursor_surface) {
                     (Cursor::Shape(shape), _) => pointer
                         .image(&self.renderer, now_ms, shape_name(shape), at)
-                        .map(|(image, corner, next)| {
+                        .and_then(|(image, corner, next)| {
                             next_cursor = next;
-                            (image.pixels(), corner, (image.width, image.height))
+                            Some((image.pixels()?, corner, (image.width, image.height)))
                         }),
                     (Cursor::Surface { .. }, Some((buffer, (hx, hy)))) => store
                         .buffers
@@ -520,13 +520,15 @@ impl Compositor {
                         },
                     });
                 // The wallpaper below every surface (MIKSPEC-0075.R22).
-                let wallpaper = store.wallpaper.as_ref().map(|w| Layer {
-                    pixels: w.buffer.pixels(),
-                    x: 0,
-                    y: 0,
-                    under: Under::Flat,
-                    haze: &[],
-                    blur: &[],
+                let wallpaper = store.wallpaper.as_ref().and_then(|w| {
+                    Some(Layer {
+                        pixels: w.buffer.pixels()?,
+                        x: 0,
+                        y: 0,
+                        under: Under::Flat,
+                        haze: &[],
+                        blur: &[],
+                    })
                 });
                 // Every toplevel is told that it is activated, so each
                 // shows the haze, as panels do.
