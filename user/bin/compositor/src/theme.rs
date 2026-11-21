@@ -9,8 +9,9 @@ pub const SYSTEM: &str = "/system/share/desktop/theme.yaml";
 pub const CONFIG: &str = "/system/config/desktop/theme.yaml";
 pub const USER: &str = "apps/system.compositor/data/theme.yaml";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Scheme {
+    #[default]
     Light,
     Dark,
 }
