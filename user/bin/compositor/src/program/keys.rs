@@ -38,11 +38,11 @@ fn screen_key(keysym: u32) -> Option<u8> {
 fn layout() -> mikros_xkb::Names {
     let layout = match std::fs::read(keyboard::PATH) {
         Ok(text) => match keyboard::parse(&text) {
-            Ok((layout, ignored)) => {
+            Ok((settings, ignored)) => {
                 for note in ignored {
                     mikros_rt::log!(Warning, "compositor: {}: {note}", keyboard::PATH);
                 }
-                layout
+                settings.layout
             }
             Err(e) => {
                 mikros_rt::log!(Error, "compositor: {}: {e}", keyboard::PATH);

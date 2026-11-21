@@ -6,9 +6,11 @@
  * the desktop run looks for on the screen. With the arguments
  * `--login <name> <password>`, it then logs that user in through
  * Login. Then it serves the connection until the compositor closes it.
- * Once the seat has a keyboard, it takes the keyboard's keymap, and when
- * the toplevel has the keyboard's focus and the key K is pressed, it
- * presents a frame of a second colour.
+ * Once the seat has a keyboard, it takes the keyboard's keymap and key
+ * repeat, and when the toplevel has the keyboard's focus and the key K is
+ * pressed, after the repeat of 25 keys per second after 600 ms that the
+ * compositor gives without a setting, it presents a frame of a second
+ * colour.
  *
  * With the argument `--control`, as a part of the system app
  * system.mikros.shell_probe in a user session, it shows nothing and only
@@ -51,10 +53,11 @@ struct state {
 	struct wl_keyboard *keyboard;
 	int32_t width, height;
 	int configured;
-	/* Whether the keyboard gave a keymap of xkb, whether the toplevel
-	 * has its focus, and whether K was typed: 1 until the frame of the
-	 * second colour is presented, then 2. */
-	int keymap, focused, typed;
+	/* Whether the keyboard gave a keymap of xkb and the default key
+	 * repeat, whether the toplevel has its focus, and whether K was
+	 * typed: 1 until the frame of the second colour is presented, then
+	 * 2. */
+	int keymap, repeat, focused, typed;
 	/* What presents the toplevel's frames. */
 	VkDevice device;
 	VkQueue queue;
@@ -151,8 +154,8 @@ static void key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint3
 {
 	struct state *s = data;
 	(void)keyboard, (void)serial, (void)time;
-	if (key == KEY_K && state == WL_KEYBOARD_KEY_STATE_PRESSED && s->keymap && s->focused &&
-	    !s->typed)
+	if (key == KEY_K && state == WL_KEYBOARD_KEY_STATE_PRESSED && s->keymap && s->repeat &&
+	    s->focused && !s->typed)
 		s->typed = 1;
 }
 
@@ -165,7 +168,9 @@ static void modifiers(void *data, struct wl_keyboard *keyboard, uint32_t serial,
 
 static void repeat_info(void *data, struct wl_keyboard *keyboard, int32_t rate, int32_t delay)
 {
-	(void)data, (void)keyboard, (void)rate, (void)delay;
+	struct state *s = data;
+	(void)keyboard;
+	s->repeat = rate == 25 && delay == 600;
 }
 
 static const struct wl_keyboard_listener keyboard_listener = {

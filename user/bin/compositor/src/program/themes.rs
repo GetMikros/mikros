@@ -1,33 +1,57 @@
-//! Reading the theme's files (MIKSPEC-0066.R27) and the pointer size of
-//! the accessibility settings (MIKSPEC-0102.R6) when the compositor starts
-//! and once a second after, so that a change applies within a second. Of
-//! each, the configuration's file is used when it exists and can be
-//! parsed, the system's otherwise, and then the user's file, below the
-//! home folder that the session manager gives.
+//! Reading the theme's files (MIKSPEC-0066.R27), the pointer size of the
+//! accessibility settings (MIKSPEC-0102.R6) and the key repeat of the
+//! keyboard settings (MIKSPEC-0066.R29) when the compositor starts and once
+//! a second after, so that a change applies within a second. Of the theme
+//! and the accessibility settings, the configuration's file is used when
+//! it exists and can be parsed, the system's otherwise, and then the
+//! user's file, below the home folder that the session manager gives,
+//! whose key repeat replaces that of the keyboard settings
+//! (MIKSPEC-0102.R14).
 
 use super::Compositor;
 use crate::accessibility;
+use crate::keyboard::{self, Repeat};
 use crate::theme::{self, Theme};
 use std::rc::Rc;
 
 /// How often the files are read, in nanoseconds.
 const PERIOD: i64 = 1_000_000_000;
 
-/// The pointer size of the accessibility settings (MIKSPEC-0102.R6), read
-/// as the theme is, and what was wrong with their files.
-fn pointer_size(problems: &mut Vec<String>) -> u32 {
-    let mut size = |path: &str| {
+/// The pointer size of the accessibility settings and the key repeat,
+/// read as the theme is, and what was wrong with their files.
+fn settings(problems: &mut Vec<String>) -> (u32, Repeat) {
+    let mut values = |path: &str, user: bool| {
         let text = std::fs::read(path).ok()?;
-        accessibility::pointer_size(&text)
+        accessibility::parse(&text, user)
             .map_err(|e| problems.push(format!("{path}: {e}")))
             .ok()
     };
-    let base = size(accessibility::CONFIG).or_else(|| size(accessibility::SYSTEM));
+    let base = values(accessibility::CONFIG, false)
+        .or_else(|| values(accessibility::SYSTEM, false))
+        .unwrap_or_default();
     let home = std::env::var("HOME").ok();
-    let user = home.and_then(|home| size(&format!("{home}/{}", accessibility::USER)));
-    user.flatten()
-        .or(base.flatten())
-        .unwrap_or(accessibility::POINTER_SIZE)
+    let user = home
+        .and_then(|home| values(&format!("{home}/{}", accessibility::USER), true))
+        .unwrap_or_default();
+    let size = user
+        .pointer_size
+        .or(base.pointer_size)
+        .unwrap_or(accessibility::POINTER_SIZE);
+    let system = match std::fs::read(keyboard::PATH) {
+        Ok(text) => match keyboard::parse(&text) {
+            Ok((settings, _)) => settings.repeat,
+            Err(e) => {
+                problems.push(format!("{}: {e}", keyboard::PATH));
+                Repeat::default()
+            }
+        },
+        Err(_) => Repeat::default(),
+    };
+    let repeat = Repeat {
+        rate: user.repeat_rate.unwrap_or(system.rate),
+        delay: user.repeat_delay.unwrap_or(system.delay),
+    };
+    (size, repeat)
 }
 
 /// The theme of the files, and what was wrong with them.
@@ -58,7 +82,7 @@ impl Compositor {
         let mut reported = Vec::new();
         loop {
             let (theme, mut problems) = read();
-            let size = pointer_size(&mut problems);
+            let (size, repeat) = settings(&mut problems);
             if problems != reported {
                 for problem in &problems {
                     mikros_rt::log!(Error, "compositor: the settings file {problem}");
@@ -72,6 +96,13 @@ impl Compositor {
                     self.damaged_all.set(true);
                     self.changed.notify();
                 }
+            }
+            if self
+                .server
+                .borrow_mut()
+                .set_repeat(repeat.rate, repeat.delay)
+            {
+                self.flush_all();
             }
             if *self.server.borrow().theme() != theme {
                 // The haze is tinted with the scheme.

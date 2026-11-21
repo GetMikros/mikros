@@ -1,13 +1,16 @@
 //! `wl_keyboard` of the core protocol (MIKSPEC-0066.R16): the seat's
 //! keyboard and the window that has its focus. Each keyboard gets the
 //! keymap that the program compiled, as a memory object of its own
-//! (MIKSPEC-0066.R6). The client of the focused window gets `enter` with
+//! (MIKSPEC-0066.R6), and then the key repeat, as every keyboard of version
+//! 4 or later does again whenever it changes (MIKSPEC-0066.R29). The
+//! client of the focused window gets `enter` with
 //! the keys held and the modifiers, then `key` and `modifiers`, and
 //! `leave` when the focus moves on. A press of a pointer button on a
 //! window gives it the focus (MIKSPEC-0074.R6); when the focused window
 //! is gone, the topmost window that is left gets it, or none does.
 
 use super::{ClientId, Imports, ProtocolError, Request, Resource, Role, Server, SurfaceId};
+use crate::keyboard::Repeat;
 use crate::wayland::protocols::{wl_keyboard, wl_seat};
 use crate::wayland::wire::{NewId, ObjectId};
 
@@ -29,12 +32,16 @@ struct Focus {
     object: ObjectId,
 }
 
+/// The first version of `wl_keyboard` with `repeat_info`.
+const REPEAT_INFO: u32 = 4;
+
 /// The keyboard: its keymap in xkb's text format, ending with a zero
-/// byte, once the program gave one, the window that has its focus, the
-/// keys held and the modifiers.
+/// byte, once the program gave one, its key repeat, the window that has
+/// its focus, the keys held and the modifiers.
 #[derive(Default)]
 pub struct Keyboard {
     keymap: Option<Vec<u8>>,
+    repeat: Repeat,
     focus: Option<Focus>,
     pressed: Vec<u32>,
     modifiers: Modifiers,
@@ -59,6 +66,7 @@ impl Server {
         };
         let memory = imports.memory(keymap);
         let size = keymap.len() as u32;
+        let Repeat { rate, delay } = self.keyboard.repeat;
         let c = self.client_mut(request);
         c.create(
             id,
@@ -69,6 +77,9 @@ impl Server {
         if let Some(fd) = memory {
             let format = wl_keyboard::keymap_format::XKB_V1;
             wl_keyboard::send_keymap(&mut c.out, id.0, format, fd, size);
+        }
+        if request.version >= REPEAT_INFO {
+            wl_keyboard::send_repeat_info(&mut c.out, id.0, rate as i32, delay as i32);
         }
         if let Some(focus) = self.keyboard.focus.filter(|f| f.client == request.client) {
             let serial = self.next_serial();
@@ -104,6 +115,27 @@ impl Server {
                 wl_seat::send_capabilities(&mut c.out, seat, capabilities);
             }
         }
+    }
+
+    /// Sets the key repeat to `rate` keys per second after `delay`
+    /// milliseconds, and sends it to the keyboards that have `repeat_info`
+    /// when it changed, which it returns.
+    pub fn set_repeat(&mut self, rate: u32, delay: u32) -> bool {
+        let repeat = Repeat { rate, delay };
+        if repeat == self.keyboard.repeat {
+            return false;
+        }
+        self.keyboard.repeat = repeat;
+        for c in self.clients.values_mut() {
+            let keyboards = c
+                .objects
+                .iter()
+                .filter(|(_, o)| o.resource == Resource::Keyboard && o.version >= REPEAT_INFO);
+            for (&keyboard, _) in keyboards {
+                wl_keyboard::send_repeat_info(&mut c.out, keyboard, rate as i32, delay as i32);
+            }
+        }
+        true
     }
 
     /// The keyboards of `client`, with their versions.
@@ -269,12 +301,25 @@ mod tests {
         let mut server = Server::new();
         let (client, _) = with_window(&mut server);
         let events = keyboard_events(&mut server, &client);
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         let (_, opcode, args) = &events[0];
         assert_eq!(*opcode, 0);
         assert_eq!(args[0], Arg::Uint(wl_keyboard::keymap_format::XKB_V1));
         assert!(matches!(args[1], Arg::Fd(_)));
         assert_eq!(args[2], Arg::Uint(15));
+        // Then the key repeat, the default of MIKSPEC-0066.R29.
+        assert_eq!(events[1], (5, 5, vec![Arg::Int(25), Arg::Int(600)]));
+    }
+
+    #[test]
+    fn sends_the_key_repeat_again_when_it_changes() {
+        let mut server = Server::new();
+        let (client, _) = with_window(&mut server);
+        keyboard_events(&mut server, &client);
+        assert!(!server.set_repeat(25, 600));
+        assert!(server.set_repeat(0, 600));
+        let events = keyboard_events(&mut server, &client);
+        assert_eq!(events, [(5, 5, vec![Arg::Int(0), Arg::Int(600)])]);
     }
 
     #[test]
