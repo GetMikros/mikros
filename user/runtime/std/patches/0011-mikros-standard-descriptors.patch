@@ -1,0 +1,53 @@
+diff --git a/std/src/sys/pal/unix/mod.rs b/std/src/sys/pal/unix/mod.rs
+index 1c0a8c4..e2becd4 100644
+--- a/std/src/sys/pal/unix/mod.rs
++++ b/std/src/sys/pal/unix/mod.rs
+@@ -49,6 +49,32 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
+     }
+ 
+     unsafe fn sanitize_standard_fds() {
++        // Mikros's C library keeps the descriptors 0, 1 and 2 that the
++        // process was started without reserved, so that no `open` returns
++        // them: /dev/null is opened once, placed on each of them with
++        // `dup2`, and closed again (MIKSPEC-0060.R16). Without /dev/null
++        // they stay reserved.
++        #[cfg(target_os = "mikros")]
++        {
++            use crate::sys::io::errno;
++            let mut devnull = -1;
++            for fd in 0..3 {
++                if libc::fcntl(fd, libc::F_GETFD) != -1 || errno() != libc::EBADF {
++                    continue;
++                }
++                if devnull == -1 {
++                    devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR, 0);
++                    if devnull == -1 {
++                        return;
++                    }
++                }
++                libc::dup2(devnull, fd);
++            }
++            if devnull != -1 {
++                libc::close(devnull);
++            }
++        }
++
+         #[allow(dead_code, unused_variables, unused_mut)]
+         let mut opened_devnull = -1;
+         #[allow(dead_code, unused_variables, unused_mut)]
+@@ -83,6 +109,7 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
+             target_os = "horizon",
+             target_os = "vita",
+             target_os = "rtems",
++            target_os = "mikros",
+             // The poll on Darwin doesn't set POLLNVAL for closed fds when `events == 0`.
+             target_vendor = "apple",
+         )))]
+@@ -127,6 +154,7 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
+             target_os = "l4re",
+             target_os = "horizon",
+             target_os = "vita",
++            target_os = "mikros",
+         )))]
+         {
+             use crate::sys::io::errno;

@@ -3,12 +3,14 @@
 //! standard output, and exits with 0 when it was given exactly one
 //! argument and every check below passed, and with the number of the
 //! first check that failed otherwise. The launcher probe starts it, and
-//! gives it a time page only from its second request on, and a `USER`
-//! startup handle with `id` 9.
+//! gives it a time page only from its second request on, a `USER`
+//! startup handle with `id` 9, and no standard input.
 
 #![feature(mikros_handles)]
 
 use std::collections::HashMap;
+use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::mikros::startup;
 use std::panic;
 use std::process::ExitCode;
@@ -82,5 +84,11 @@ fn checks() -> Result<String, u8> {
     let caught = panic::catch_unwind(|| panic!("unwinding"));
     let _ = panic::take_hook();
     check(caught.is_err())?;
+    // Without standard input, std placed /dev/null there, which reads
+    // nothing, and left no other descriptor open for it, so that the
+    // next file opened is descriptor 3.
+    check(std::io::stdin().read(&mut [0; 1]).is_ok_and(|n| n == 0))?;
+    let file = std::fs::File::open("/system/bin/hello-std");
+    check(file.is_ok_and(|f| f.as_raw_fd() == 3))?;
     Ok(args[1].clone())
 }
