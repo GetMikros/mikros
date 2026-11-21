@@ -325,10 +325,10 @@ impl Outgoing {
         self.ends.is_empty()
     }
 
-    /// Takes the oldest messages, as many as fit in one channel message,
-    /// but always at least one, with the handles of their file
-    /// descriptors.
-    pub fn take(&mut self) -> Option<(Vec<u8>, Vec<Fd>)> {
+    /// Where the oldest messages end that fit in one channel message, but
+    /// always at least one, in the bytes and in the file descriptors, and
+    /// how many they are.
+    fn front_end(&self) -> Option<((usize, usize), usize)> {
         let mut end = *self.ends.front()?;
         let mut count = 1;
         for &(bytes, fds) in self.ends.iter().skip(1) {
@@ -337,6 +337,33 @@ impl Outgoing {
             }
             (end, count) = ((bytes, fds), count + 1);
         }
+        Some((end, count))
+    }
+
+    /// The oldest messages, as many as fit in one channel message but
+    /// always at least one, with their file descriptors, which stay until
+    /// `sent` takes them.
+    pub fn front(&self) -> Option<(&[u8], &[Fd])> {
+        let ((bytes, fds), _) = self.front_end()?;
+        Some((&self.bytes[..bytes], &self.fds[..fds]))
+    }
+
+    /// Takes the messages that `front` gave, once they were sent, with
+    /// their file descriptors, whose handles went with them.
+    pub fn sent(&mut self) -> Vec<Fd> {
+        self.take().map(|(_, fds)| fds).unwrap_or_default()
+    }
+
+    /// The bytes and the file descriptors of the messages that wait.
+    pub fn queued(&self) -> (usize, usize) {
+        (self.bytes.len(), self.fds.len())
+    }
+
+    /// Takes the oldest messages, as many as fit in one channel message,
+    /// but always at least one, with the handles of their file
+    /// descriptors.
+    pub fn take(&mut self) -> Option<(Vec<u8>, Vec<Fd>)> {
+        let (end, count) = self.front_end()?;
         self.ends.drain(..count);
         for at in self.ends.iter_mut() {
             *at = (at.0 - end.0, at.1 - end.1);
@@ -520,5 +547,20 @@ mod tests {
         assert_eq!((bytes.len(), fds.len()), (64 * 8, 64));
         let (_, fds) = out.take().unwrap();
         assert_eq!(fds, (64..70).map(Fd).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn keeps_messages_until_they_are_sent() {
+        let mut out = Outgoing::default();
+        out.send(1, 0, vec![Arg::Fd(Fd(7))]);
+        out.send(2, 0, vec![Arg::Uint(3)]);
+        // What could not be sent stays, the same each time.
+        let (bytes, fds) = out.front().unwrap();
+        assert_eq!((bytes.len(), fds), (8 + 12, &[Fd(7)][..]));
+        assert_eq!(out.front().unwrap().0.len(), 20);
+        assert_eq!(out.queued(), (20, 1));
+        assert_eq!(out.sent(), [Fd(7)]);
+        assert!(out.front().is_none());
+        assert_eq!(out.queued(), (0, 0));
     }
 }

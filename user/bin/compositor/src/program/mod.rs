@@ -112,6 +112,10 @@ pub struct Compositor {
     /// that the last frame drew, with where (MIKSPEC-0066.R17).
     damaged_all: Cell<bool>,
     drawn_cursor: Cell<Option<(Cursor, Rect)>>,
+    /// The compositor itself, for the tasks it starts.
+    me: std::rc::Weak<Compositor>,
+    /// The clients whose events wait until their channels take more.
+    flushing: RefCell<std::collections::BTreeSet<ClientId>>,
     /// The acquire points that a task watches, with what ends the watch
     /// (`watch_acquires`).
     acquiring: RefCell<BTreeMap<(crate::server::TimelineId, u64), Rc<Notify>>>,
@@ -127,6 +131,10 @@ fn take(id: u32) -> Option<OwnedHandle> {
     // SAFETY: the handle is ours, and is handed over once.
     Some(unsafe { OwnedHandle::from_raw(handle.into_raw_handle()) })
 }
+
+/// The signals of a channel that it takes more, and that its peer closed.
+const WRITABLE: u32 = 1 << 1;
+const PEER_CLOSED: u32 = 1 << 2;
 
 /// The value that the kernel timeline `timeline` has reached.
 fn timeline_value(timeline: u32) -> Option<u64> {
@@ -272,23 +280,49 @@ impl Compositor {
     }
 
     /// Sends a client the events it has, whole messages in each channel
-    /// message.
+    /// message. Those that its full channel does not take wait, and are
+    /// sent once it can take more.
     fn flush(&self, client: ClientId) {
-        let channels = self.channels.borrow();
-        let Some(channel) = channels.get(&client) else {
+        let Some(channel) = self.channels.borrow().get(&client).map(|c| c.raw()) else {
             return;
         };
         let mut server = self.server.borrow_mut();
         let Some(c) = server.client(client) else {
             return;
         };
-        while let Some((bytes, fds)) = c.out.take() {
+        while let Some((bytes, fds)) = c.out.front() {
             debug_assert!(bytes.len() <= CHANNEL_BYTES && fds.len() <= CHANNEL_HANDLES);
-            let handles: Vec<u32> = fds.into_iter().map(Fd::into_raw_handle).collect();
-            if mikros_rt::midl::channel_write(channel.raw(), &bytes, &handles).is_err() {
-                return;
+            let handles: Vec<u32> = fds.iter().map(|fd| fd.as_raw_handle()).collect();
+            match mikros_rt::midl::channel_write(channel, bytes, &handles) {
+                // The handles went with the message.
+                Ok(()) => {
+                    for fd in c.out.sent() {
+                        let _ = fd.into_raw_handle();
+                    }
+                }
+                Err(mikros_rt::midl::SHOULD_WAIT) => break,
+                // The serve loop ends a channel that broke.
+                Err(_) => return,
             }
         }
+        let waiting = !c.out.is_empty();
+        drop(server);
+        if !waiting {
+            return;
+        }
+        if !self.flushing.borrow_mut().insert(client) {
+            return;
+        }
+        let (Some(me), Some(watched)) = (self.me.upgrade(), duplicate(channel)) else {
+            self.flushing.borrow_mut().remove(&client);
+            return;
+        };
+        self.spawner.spawn(async move {
+            let writable = me.reactor.signals(watched.raw(), WRITABLE | PEER_CLOSED);
+            let _ = writable.await;
+            me.flushing.borrow_mut().remove(&client);
+            me.flush(client);
+        });
     }
 
     fn flush_all(&self) {
@@ -705,7 +739,9 @@ pub fn main() {
     let directory = DirectoryAsyncClient::new(directory, reactor.clone());
     let mut server = Server::new();
     server.buffer_formats = imports::FORMATS.to_vec();
-    let compositor = Rc::new(Compositor {
+    let compositor = Rc::new_cyclic(|me| Compositor {
+        me: me.clone(),
+        flushing: RefCell::default(),
         reactor: reactor.clone(),
         spawner: spawner.clone(),
         launcher: Rc::new(launcher),
