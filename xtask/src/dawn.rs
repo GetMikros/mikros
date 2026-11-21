@@ -10,12 +10,17 @@
 //! extensions. The build takes a long time, which is why it is a command
 //! of its own and not a part of `cargo xtask build`.
 //!
-//! With `--test` the command also builds a program that runs a compute
-//! shader through Dawn's C API on the CPU Vulkan driver, `user/tests/webgpu`,
-//! puts it in a system of its own as the only system test, and boots that
-//! with selftest, as `cargo xtask test` does its system tests.
+//! With `--test` the command also builds two programs and boots two
+//! systems. `user/tests/webgpu` runs a compute shader through Dawn's C API
+//! on the CPU Vulkan driver; it is the only system test of a system of its
+//! own, which is booted with selftest, as `cargo xtask test` does its
+//! system tests. `user/tests/dawn-sdl` renders a frame with Dawn to a
+//! window of SDL3's Wayland driver; it is the switcher part of the shell
+//! probe in a desktop system, which is booted through the desktop run's
+//! scenario, whose check is that the window shows the frame's colour.
 
-use crate::build::{self, Kind, Linking};
+use crate::build::{self, DawnTest, Kind, Linking};
+use crate::desktop::Window;
 use crate::qemu::{MachineArgs, Processor};
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -25,6 +30,18 @@ use std::time::Duration;
 
 /// The library's file name in the install directory's `libraries`.
 pub const LIBRARY: &str = "libwebgpu_dawn.slib";
+
+/// The window of the Dawn window program: the colour of the triangle that
+/// covers its frame, and its size.
+const WINDOW: Window = Window {
+    colour: [30, 190, 90],
+    size: (128, 96),
+    what: "the Dawn window showed",
+};
+
+/// The memory of the machine of the desktop run unless `--memory` says
+/// otherwise, as in `cargo xtask test`.
+const DESKTOP_MEMORY: &str = "3G";
 
 /// The ports that Dawn builds with its own files, and the option that
 /// names the directory of the source of each.
@@ -47,7 +64,8 @@ pub struct Args {
     /// The build kind of the system to test.
     #[arg(long, value_enum, default_value_t = Kind::Debug, requires = "test")]
     kind: Kind,
-    /// Seconds the machine may go on without selftest writing a line.
+    /// Seconds the compute test's machine may go on without selftest writing
+    /// a line, and the whole desktop run's scenario may take.
     #[arg(long, default_value_t = 240, requires = "test")]
     timeout: u64,
     #[command(flatten)]
@@ -63,10 +81,10 @@ pub fn run(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Builds the test program of `install`'s Dawn, a C++ program that uses
-/// Dawn's C API, linked dynamically with the C++ runtimes, and with Dawn
-/// and the libraries of abseil that it needs.
-fn build_program(install: &Path) -> Result<PathBuf> {
+/// The arguments that link a program with Dawn, the static library of
+/// `install`, and the libraries of abseil that it needs, and that find
+/// Dawn's headers.
+fn link_args(install: &Path) -> Result<Vec<String>> {
     let libraries = install.join("libraries");
     let mut args = vec![
         "-Wall".to_string(),
@@ -85,20 +103,73 @@ fn build_program(install: &Path) -> Result<PathBuf> {
     abseil.sort();
     args.extend(abseil);
     args.push("-Wl,--end-group".to_string());
+    Ok(args)
+}
+
+/// Builds the test program of `install`'s Dawn, a C++ program that uses
+/// Dawn's C API, linked dynamically with the C++ runtimes, and with Dawn
+/// and the libraries of abseil that it needs.
+fn build_program(install: &Path) -> Result<PathBuf> {
     build::c_build(
         "webgpu",
         &["user/tests/webgpu/webgpu.cpp"],
+        Linking::Dynamic,
+        &link_args(install)?,
+    )
+}
+
+/// Builds the window program of `install`'s Dawn, which draws to a window of
+/// SDL3's: linked as the test program is, with SDL3, statically, and the
+/// libraries that it needs, Wayland, xkbcommon and the Vulkan loader,
+/// dynamically.
+fn build_window_program(install: &Path) -> Result<PathBuf> {
+    let sdl = crate::sdl::build()?;
+    let wayland = crate::wayland::build()?;
+    let xkbcommon = crate::ports::build(&crate::ports::load("xkbcommon")?)?;
+    let vulkan = crate::vulkan::loader()?;
+    let mut args = link_args(install)?;
+    args.extend([
+        "-Werror".to_string(),
+        format!("-I{}", sdl.join("include").display()),
+        sdl.join("libraries")
+            .join(crate::sdl::LIBRARY)
+            .display()
+            .to_string(),
+        wayland.library.display().to_string(),
+        xkbcommon
+            .install
+            .join("libraries/libxkbcommon.dlib")
+            .display()
+            .to_string(),
+        vulkan
+            .join("libraries")
+            .join(crate::vulkan::LOADER)
+            .display()
+            .to_string(),
+    ]);
+    build::c_build(
+        "dawn-sdl",
+        &["user/tests/dawn-sdl/dawn_sdl.cpp"],
         Linking::Dynamic,
         &args,
     )
 }
 
-/// Builds the test program and the Dawn run's system, boots it, and fails
-/// unless the test passes.
+/// Builds the programs and the Dawn run's systems, boots the system of the
+/// compute test, and fails unless its test passes, and boots the desktop
+/// system, and fails unless the window shows the frame.
 fn test(args: &Args, install: &Path) -> Result<()> {
-    let program = build_program(install)?;
-    println!("built    {}", program.display());
-    let built = build::build_dawn_test(args.kind, &program)?;
+    let compute = build_program(install)?;
+    println!("built    {}", compute.display());
+    let window = build_window_program(install)?;
+    println!("built    {}", window.display());
+    let built = build::build_dawn_test(
+        args.kind,
+        &DawnTest {
+            compute: &compute,
+            window: &window,
+        },
+    )?;
     let system = built
         .dawn_image
         .as_deref()
@@ -107,6 +178,7 @@ fn test(args: &Args, install: &Path) -> Result<()> {
         .join("target/test")
         .join(args.kind.name())
         .join("dawn");
+    let timeout = Duration::from_secs(args.timeout);
     let passed = crate::system_tests::run_with(
         &built,
         system,
@@ -114,12 +186,30 @@ fn test(args: &Args, install: &Path) -> Result<()> {
         Processor::available(),
         args.kind,
         &dir,
-        Duration::from_secs(args.timeout),
+        timeout,
     )?;
     if passed != 1 {
         bail!("{passed} tests passed, one was expected");
     }
     println!("ok       the Dawn test passed");
+    let system = built
+        .dawn_desktop_image
+        .as_deref()
+        .context("the build made no desktop system for the Dawn run")?;
+    let mut machine = args.machine.clone();
+    machine
+        .memory
+        .get_or_insert_with(|| DESKTOP_MEMORY.to_owned());
+    crate::desktop::run_with(
+        &machine,
+        args.kind,
+        &dir.join("desktop"),
+        timeout,
+        &built,
+        system,
+        &WINDOW,
+    )?;
+    println!("ok       the Dawn window showed its frame");
     Ok(())
 }
 

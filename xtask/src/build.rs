@@ -97,6 +97,10 @@ pub struct Built {
     /// system of the Dawn run: the system without the system tests, with
     /// selftest, and with the program as its only test.
     pub dawn_image: Option<PathBuf>,
+    /// With the Dawn run's system, the system of its desktop run: the
+    /// desktop run's system with the Dawn window program as the shell
+    /// probe's switcher part.
+    pub dawn_desktop_image: Option<PathBuf>,
     /// Where xkbcommon was built.
     pub xkbcommon: crate::ports::Built,
 }
@@ -133,11 +137,20 @@ pub fn build_tests(kind: Kind) -> Result<Built> {
     build_for(kind, BootImage::SystemTests)
 }
 
+/// The programs of the Dawn run.
+pub struct DawnTest<'a> {
+    /// The program that is the only system test of the Dawn run's system.
+    pub compute: &'a Path,
+    /// The program that is the shell probe's switcher part in the Dawn
+    /// run's desktop system.
+    pub window: &'a Path,
+}
+
 /// Builds every component of the build kind `kind`, and a test image's
-/// system as its system image, and the Dawn run's system, whose only system
-/// test is the program `program`.
-pub fn build_dawn_test(kind: Kind, program: &Path) -> Result<Built> {
-    build_for_with(kind, BootImage::SystemTests, Some(program))
+/// system as its system image, and the Dawn run's two systems with the
+/// programs of `dawn`.
+pub fn build_dawn_test(kind: Kind, dawn: &DawnTest) -> Result<Built> {
+    build_for_with(kind, BootImage::SystemTests, Some(dawn))
 }
 
 /// Builds every component of the build kind `kind`, with `boot` as the
@@ -147,9 +160,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
 }
 
 /// Builds every component of the build kind `kind`, with `boot` as the
-/// boot image, and with the test image with system tests also a Dawn run's
-/// system image when there is a Dawn test program `dawn_test`.
-fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Result<Built> {
+/// boot image, and with the test image with system tests also the Dawn
+/// run's system images when there are Dawn programs `dawn_test`.
+fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> Result<Built> {
     // The compositor's build script reads them.
     crate::wayland::protocols()?;
     let bootmenu = cargo_build("bootmenu", "bootmenu", "x86_64-unknown-uefi", kind)?;
@@ -231,6 +244,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Resu
     let mut takeover_image = None;
     let mut desktop_image = None;
     let mut dawn_image = None;
+    let mut dawn_desktop_image = None;
     let (boot_image, system_image) = match boot {
         BootImage::System | BootImage::SystemTests => {
             let tests = boot == BootImage::SystemTests;
@@ -370,7 +384,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Resu
                 // the user that the probe logs in.
                 let shell = crate::workspace_root().join(PROBE_SHELL.1);
                 let users = desktop_users(kind)?;
-                let desktop: Vec<(&str, &Path)> = whole
+                let desktop_members: Vec<(&str, &Path)> = whole
                     .iter()
                     .copied()
                     .filter(|&(at, _)| at != SESSION_SETTINGS)
@@ -379,10 +393,10 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Resu
                         ("state/accounts/users", users.as_path()),
                     ])
                     .collect();
-                let desktop = boot_image(kind, "desktop.img", &desktop)?;
+                let desktop = boot_image(kind, "desktop.img", &desktop_members)?;
                 println!("built    {}", desktop.display());
                 desktop_image = Some(desktop);
-                if let Some(program) = dawn_test {
+                if let Some(dawn_test) = dawn_test {
                     // The Dawn run's system: the system with selftest
                     // and what it needs of the test images, and the
                     // Dawn test program as the only test.
@@ -392,7 +406,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Resu
                         .chain(&login)
                         .chain(&test_support)
                         .map(|(at, path)| (at.as_str(), path.as_path()))
-                        .chain([(at, program)])
+                        .chain([(at, dawn_test.compute)])
                         .collect();
                     let loader = format!("system/libraries/{}", crate::vulkan::LOADER);
                     for needed in [
@@ -407,6 +421,33 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Resu
                     let image = boot_image(kind, "dawn-tests.img", &dawn)?;
                     println!("built    {}", image.display());
                     dawn_image = Some(image);
+                    // The Dawn run's desktop system: the desktop run's
+                    // system with its shell probe's switcher part replaced
+                    // by the Dawn window program.
+                    let folder = format!("system/apps/{SHELL_PROBE}/");
+                    let greeter = desktop_members
+                        .iter()
+                        .find(|(at, _)| *at == format!("{folder}greeter-probe"))
+                        .map(|(_, path)| path.to_path_buf())
+                        .context("the desktop system has no shell probe")?;
+                    let parts = shell_probe_parts(DAWN_SWITCHER);
+                    let window = dawn_test.window.to_path_buf();
+                    let shell = shell_probe(&parts, greeter, DAWN_SWITCHER, window);
+                    let dir = c_dir(DAWN_SWITCHER).join("app");
+                    let members = crate::system_apps::members(&shell, &dir)?;
+                    let dawn_desktop: Vec<(&str, &Path)> = desktop_members
+                        .iter()
+                        .copied()
+                        .filter(|(at, _)| !at.starts_with(&folder))
+                        .chain(
+                            members
+                                .iter()
+                                .map(|(at, path)| (at.as_str(), path.as_path())),
+                        )
+                        .collect();
+                    let image = boot_image(kind, "dawn-desktop.img", &dawn_desktop)?;
+                    println!("built    {}", image.display());
+                    dawn_desktop_image = Some(image);
                 }
             }
             let early: Vec<(&str, &Path)> = early
@@ -2130,6 +2171,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&Path>) -> Resu
         takeover_image,
         desktop_image,
         dawn_image,
+        dawn_desktop_image,
         xkbcommon,
     })
 }
@@ -2717,33 +2759,60 @@ fn greeter_probe(
                       arguments: [\"--login\", dee, dee-password]\n",
         files: vec![(name.to_owned(), program.clone(), true)],
     };
-    // The shell of the desktop run's user session: its desktop part hands
-    // the compositor a wallpaper of a test colour, its taskbar part shows
-    // a panel of haze, its start-menu part connects to the service
-    // manager's Control and so asks a question, and its switcher part is a
-    // window of SDL's, which only has to show.
-    let shell = crate::system_apps::SystemApp {
-        id: "system.mikros.shell_probe",
-        version: "1.0.0",
-        name: "Shell probe",
-        description: "The shell of the desktop run",
-        executable: name,
-        shell_parts: "  - roles: [desktop]\n    executable: greeter-probe\n    \
-                      arguments: [\"--wallpaper\"]\n  \
-                      - roles: [taskbar]\n    executable: greeter-probe\n    \
-                      arguments: [\"--panel\"]\n  \
-                      - roles: [start-menu]\n    executable: greeter-probe\n    \
-                      arguments: [\"--control\"]\n  \
-                      - roles: [switcher]\n    executable: sdl-probe\n    \
-                      arguments: []\n",
-        files: vec![
-            (name.to_owned(), program, true),
-            ("sdl-probe".to_owned(), sdl_program, true),
-        ],
-    };
+    let parts = shell_probe_parts("sdl-probe");
+    let shell = shell_probe(&parts, program, "sdl-probe", sdl_program);
     let mut members = crate::system_apps::members(&greeter, &dir.join("app"))?;
     members.extend(crate::system_apps::members(&shell, &dir.join("app"))?);
     Ok(members)
+}
+
+/// The ID of the shell probe, the system app that is the shell of the
+/// desktop run's user session.
+const SHELL_PROBE: &str = "system.mikros.shell_probe";
+
+/// The name of the switcher part's program in the Dawn run's shell probe.
+const DAWN_SWITCHER: &str = "dawn-sdl";
+
+/// The `shell_parts` of the shell probe: its desktop part hands the
+/// compositor a wallpaper of a test colour, its taskbar part shows a panel
+/// of haze, its start-menu part connects to the service manager's Control
+/// and so asks a question, and its switcher part is the program
+/// `switcher`, a window that only has to show.
+fn shell_probe_parts(switcher: &str) -> String {
+    format!(
+        "  - roles: [desktop]\n    executable: greeter-probe\n    \
+         arguments: [\"--wallpaper\"]\n  \
+         - roles: [taskbar]\n    executable: greeter-probe\n    \
+         arguments: [\"--panel\"]\n  \
+         - roles: [start-menu]\n    executable: greeter-probe\n    \
+         arguments: [\"--control\"]\n  \
+         - roles: [switcher]\n    executable: {switcher}\n    \
+         arguments: []\n"
+    )
+}
+
+/// The shell probe with the greeter probe `greeter` for its desktop,
+/// taskbar and start-menu parts and the program `switcher`, which is
+/// installed as `executable`, for its switcher part; `parts` is
+/// `shell_probe_parts(executable)`.
+fn shell_probe<'a>(
+    parts: &'a str,
+    greeter: PathBuf,
+    executable: &str,
+    switcher: PathBuf,
+) -> crate::system_apps::SystemApp<'a> {
+    crate::system_apps::SystemApp {
+        id: SHELL_PROBE,
+        version: "1.0.0",
+        name: "Shell probe",
+        description: "The shell of the desktop run",
+        executable: "greeter-probe",
+        shell_parts: parts,
+        files: vec![
+            ("greeter-probe".to_owned(), greeter, true),
+            (executable.to_owned(), switcher, true),
+        ],
+    }
 }
 
 /// Builds the SDL part of the desktop run, `user/tests/sdl-probe`: a
