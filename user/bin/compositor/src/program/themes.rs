@@ -1,7 +1,7 @@
 //! Reading the theme's files (MIKSPEC-0066.R27), the pointer size of the
-//! accessibility settings (MIKSPEC-0102.R6) and the key repeat of the
-//! keyboard settings (MIKSPEC-0066.R29) when the compositor starts and once
-//! a second after, so that a change applies within a second. Of the theme
+//! accessibility settings (MIKSPEC-0102.R6) and the key repeat and layout
+//! of the keyboard settings (MIKSPEC-0066.R29) when the compositor starts
+//! and once a second after, so that a change applies within a second. Of the theme
 //! and the accessibility settings, the configuration's file is used when
 //! it exists and can be parsed, the system's otherwise, and then the
 //! user's file, below the home folder that the session manager gives,
@@ -10,16 +10,17 @@
 
 use super::Compositor;
 use crate::accessibility;
-use crate::keyboard::{self, Repeat};
+use crate::keyboard::{self, Layout, Repeat};
 use crate::theme::{self, Theme};
 use std::rc::Rc;
 
 /// How often the files are read, in nanoseconds.
 const PERIOD: i64 = 1_000_000_000;
 
-/// The pointer size of the accessibility settings and the key repeat,
-/// read as the theme is, and what was wrong with their files.
-fn settings(problems: &mut Vec<String>) -> (u32, Repeat) {
+/// The pointer size of the accessibility settings, the key repeat and the
+/// keyboard layout, read as the theme is, and what was wrong with their
+/// files.
+fn settings(problems: &mut Vec<String>) -> (u32, Repeat, Layout) {
     let mut values = |path: &str, user: bool| {
         let text = std::fs::read(path).ok()?;
         accessibility::parse(&text, user)
@@ -37,21 +38,28 @@ fn settings(problems: &mut Vec<String>) -> (u32, Repeat) {
         .pointer_size
         .or(base.pointer_size)
         .unwrap_or(accessibility::POINTER_SIZE);
-    let system = match std::fs::read(keyboard::PATH) {
+    let keyboard = match std::fs::read(keyboard::PATH) {
         Ok(text) => match keyboard::parse(&text) {
-            Ok((settings, _)) => settings.repeat,
+            Ok((settings, ignored)) => {
+                let notes = ignored
+                    .into_iter()
+                    .map(|n| format!("{}: {n}", keyboard::PATH));
+                problems.extend(notes);
+                settings
+            }
             Err(e) => {
                 problems.push(format!("{}: {e}", keyboard::PATH));
-                Repeat::default()
+                keyboard::Settings::default()
             }
         },
-        Err(_) => Repeat::default(),
+        Err(_) => keyboard::Settings::default(),
     };
+    let system = keyboard.repeat;
     let repeat = Repeat {
         rate: user.repeat_rate.unwrap_or(system.rate),
         delay: user.repeat_delay.unwrap_or(system.delay),
     };
-    (size, repeat)
+    (size, repeat, keyboard.layout)
 }
 
 /// The theme of the files, and what was wrong with them.
@@ -82,7 +90,7 @@ impl Compositor {
         let mut reported = Vec::new();
         loop {
             let (theme, mut problems) = read();
-            let (size, repeat) = settings(&mut problems);
+            let (size, repeat, layout) = settings(&mut problems);
             if problems != reported {
                 for problem in &problems {
                     mikros_rt::log!(Error, "compositor: the settings file {problem}");
@@ -104,6 +112,7 @@ impl Compositor {
             {
                 self.flush_all();
             }
+            self.relayout(&layout);
             if *self.server.borrow().theme() != theme {
                 // The haze is tinted with the scheme.
                 let mut store = self.store.borrow_mut();

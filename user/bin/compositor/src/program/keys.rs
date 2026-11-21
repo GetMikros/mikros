@@ -1,7 +1,8 @@
 //! The keyboards of the seat, whose devices `mouse` reads. They share one
 //! keymap and its state, compiled from the system's keyboard layout
-//! (MIKSPEC-0066.R6) when the first keyboard comes, whose text the
-//! clients' keyboards get. Ctrl, Alt and a function key whose keysym is
+//! (MIKSPEC-0066.R6) when the first keyboard comes, and again whenever
+//! the layout changes (MIKSPEC-0066.R29), whose text the clients'
+//! keyboards get. Ctrl, Alt and a function key whose keysym is
 //! that of F2 to F7, or `XF86Switch_VT_2` to `XF86Switch_VT_7`, which
 //! xkb's PC layouts give them while Ctrl and Alt are held, ask the
 //! session manager for the screen of a text console (MIKSPEC-0066.R12):
@@ -33,30 +34,31 @@ fn screen_key(keysym: u32) -> Option<u8> {
         .map(|i| i as u8 + 1)
 }
 
-/// The names of the system's keyboard layout, or xkbcommon's defaults
-/// when its file is absent or invalid.
-fn layout() -> mikros_xkb::Names {
-    let layout = match std::fs::read(keyboard::PATH) {
-        Ok(text) => match keyboard::parse(&text) {
-            Ok((settings, ignored)) => {
-                for note in ignored {
-                    mikros_rt::log!(Warning, "compositor: {}: {note}", keyboard::PATH);
-                }
-                settings.layout
-            }
-            Err(e) => {
-                mikros_rt::log!(Error, "compositor: {}: {e}", keyboard::PATH);
-                keyboard::Layout::default()
-            }
-        },
-        Err(_) => keyboard::Layout::default(),
+/// The layout of the keyboard settings, or xkbcommon's defaults when
+/// their file is absent or invalid, which the theme loop reports.
+fn read_layout() -> keyboard::Layout {
+    let text = std::fs::read(keyboard::PATH).ok();
+    let settings = text.and_then(|text| keyboard::parse(&text).ok());
+    settings.map(|(s, _)| s.layout).unwrap_or_default()
+}
+
+/// The keymap of `layout`, or the default keymap when xkbcommon cannot
+/// compile it.
+fn compile(layout: &keyboard::Layout) -> Option<mikros_xkb::Keymap> {
+    let names = mikros_xkb::Names {
+        model: layout.model.clone(),
+        layout: layout.layout.clone(),
+        variant: layout.variant.clone(),
+        options: layout.options.clone(),
     };
-    mikros_xkb::Names {
-        model: layout.model,
-        layout: layout.layout,
-        variant: layout.variant,
-        options: layout.options,
+    let keymap = mikros_xkb::Keymap::new(&names).or_else(|| {
+        mikros_rt::log!(Error, "compositor: the keymap {names:?} cannot be compiled");
+        mikros_xkb::Keymap::new(&mikros_xkb::Names::default())
+    });
+    if keymap.is_none() {
+        mikros_rt::log!(Error, "compositor: the default keymap cannot be compiled");
     }
+    keymap
 }
 
 /// The modifiers of `keymap` as the server takes them.
@@ -86,21 +88,54 @@ impl Compositor {
         if self.keymap.borrow().is_some() {
             return true;
         }
-        let names = layout();
-        let keymap = mikros_xkb::Keymap::new(&names).or_else(|| {
-            mikros_rt::log!(Error, "compositor: the keymap {names:?} cannot be compiled");
-            mikros_xkb::Keymap::new(&mikros_xkb::Names::default())
-        });
-        let Some(keymap) = keymap else {
-            mikros_rt::log!(Error, "compositor: the default keymap cannot be compiled");
+        let layout = read_layout();
+        let Some(keymap) = compile(&layout) else {
             return false;
         };
-        match keymap.text_v1() {
-            Some(text) => self.server.borrow_mut().set_keymap(text),
-            None => mikros_rt::log!(Error, "compositor: the keymap cannot be written"),
-        }
+        self.give_keymap(&keymap);
         *self.keymap.borrow_mut() = Some(keymap);
+        *self.layout.borrow_mut() = Some(layout);
         true
+    }
+
+    /// Compiles the keymap again when `layout` is not the one compiled,
+    /// with the keys that are held pressed in its state, and gives the
+    /// server its text (MIKSPEC-0066.R29). Nothing is compiled before the
+    /// first keyboard came.
+    pub(super) fn relayout(&self, layout: &keyboard::Layout) {
+        if self
+            .layout
+            .borrow()
+            .as_ref()
+            .is_none_or(|compiled| compiled == layout)
+        {
+            return;
+        }
+        *self.layout.borrow_mut() = Some(layout.clone());
+        let Some(mut keymap) = compile(layout) else {
+            return;
+        };
+        for key in self.server.borrow().keys_held() {
+            keymap.update(key as u16, true);
+        }
+        self.give_keymap(&keymap);
+        *self.keymap.borrow_mut() = Some(keymap);
+        self.flush_all();
+    }
+
+    /// Gives the server the text of `keymap` and its modifiers.
+    fn give_keymap(&self, keymap: &mikros_xkb::Keymap) {
+        let Some(text) = keymap.text_v1() else {
+            mikros_rt::log!(Error, "compositor: the keymap cannot be written");
+            return;
+        };
+        let mut store = self.store.borrow_mut();
+        let mut importer = super::imports::Importer {
+            renderer: &self.renderer,
+            store: &mut store,
+        };
+        let mut server = self.server.borrow_mut();
+        server.set_keymap(&mut importer, text, modifiers(keymap));
     }
 }
 

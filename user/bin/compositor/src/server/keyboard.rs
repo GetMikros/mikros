@@ -1,7 +1,8 @@
 //! `wl_keyboard` of the core protocol (MIKSPEC-0066.R16): the seat's
 //! keyboard and the window that has its focus. Each keyboard gets the
 //! keymap that the program compiled, as a memory object of its own
-//! (MIKSPEC-0066.R6), and then the key repeat, as every keyboard of version
+//! (MIKSPEC-0066.R6), and again whenever the program compiles another
+//! (MIKSPEC-0066.R29), and then the key repeat, as every keyboard of version
 //! 4 or later does again whenever it changes (MIKSPEC-0066.R29). The
 //! client of the focused window gets `enter` with
 //! the keys held and the modifiers, then `key` and `modifiers`, and
@@ -98,11 +99,18 @@ impl Server {
     }
 
     /// Gives the seat the keymap `keymap`, in xkb's text format and
-    /// ending with a zero byte, which keyboards made later get, and tells
-    /// the clients' seats that it has a keyboard.
-    pub fn set_keymap(&mut self, keymap: Vec<u8>) {
-        let had = self.keyboard.keymap.replace(keymap).is_some();
-        if had {
+    /// ending with a zero byte, with the `modifiers` of its state. With
+    /// the first, it tells the clients' seats that it has a keyboard;
+    /// with another, every keyboard gets it in a memory object of its own
+    /// that `imports` makes, and the focused window's client's keyboards
+    /// get the modifiers.
+    pub fn set_keymap(&mut self, imports: &mut dyn Imports, keymap: Vec<u8>, modifiers: Modifiers) {
+        self.keyboard.modifiers = modifiers;
+        let old = self.keyboard.keymap.replace(keymap);
+        if old.is_some() {
+            if old != self.keyboard.keymap {
+                self.send_keymap(imports);
+            }
             return;
         }
         let capabilities = self.capabilities();
@@ -115,6 +123,41 @@ impl Server {
                 wl_seat::send_capabilities(&mut c.out, seat, capabilities);
             }
         }
+    }
+
+    fn send_keymap(&mut self, imports: &mut dyn Imports) {
+        let Some(keymap) = self.keyboard.keymap.clone() else {
+            return;
+        };
+        let clients: Vec<ClientId> = self.clients.keys().copied().collect();
+        for client in clients {
+            for (keyboard, _) in self.keyboards_of(client) {
+                let (Some(fd), Some(c)) = (imports.memory(&keymap), self.clients.get_mut(&client))
+                else {
+                    continue;
+                };
+                let format = wl_keyboard::keymap_format::XKB_V1;
+                wl_keyboard::send_keymap(&mut c.out, keyboard, format, fd, keymap.len() as u32);
+            }
+        }
+        let Some(focus) = self.keyboard.focus else {
+            return;
+        };
+        let serial = self.next_serial();
+        let m = self.keyboard.modifiers;
+        for (keyboard, _) in self.keyboards_of(focus.client) {
+            if let Some(c) = self.clients.get_mut(&focus.client) {
+                let (depressed, latched, locked) = (m.depressed, m.latched, m.locked);
+                wl_keyboard::send_modifiers(
+                    &mut c.out, keyboard, serial, depressed, latched, locked, m.group,
+                );
+            }
+        }
+    }
+
+    /// The keys held, as evdev codes.
+    pub fn keys_held(&self) -> Vec<u32> {
+        self.keyboard.pressed.clone()
     }
 
     /// Sets the key repeat to `rate` keys per second after `delay`
@@ -253,7 +296,7 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::TestClient;
+    use super::super::tests::{FakeImports, TestClient};
     use super::*;
     use crate::wayland::protocols::{wl_compositor, wl_registry};
     use crate::wayland::wire::Arg;
@@ -270,7 +313,8 @@ mod tests {
     /// surface 6, a toplevel of 100 by 50 at the output's corner.
     fn with_window(server: &mut Server) -> (TestClient, SurfaceId) {
         server.set_screen((1280, 800));
-        server.set_keymap(b"xkb_keymap {};\0".to_vec());
+        let keymap = b"xkb_keymap {};\0".to_vec();
+        server.set_keymap(&mut FakeImports::default(), keymap, Modifiers::default());
         let client = TestClient::new(server);
         client.send(server, 1, 1, vec![Arg::NewId(NewId(2))]);
         client.bind(server, 2, &wl_compositor::INTERFACE, 3);
@@ -309,6 +353,25 @@ mod tests {
         assert_eq!(args[2], Arg::Uint(15));
         // Then the key repeat, the default of MIKSPEC-0066.R29.
         assert_eq!(events[1], (5, 5, vec![Arg::Int(25), Arg::Int(600)]));
+    }
+
+    #[test]
+    fn sends_another_keymap_to_every_keyboard() {
+        let mut server = Server::new();
+        let (client, window) = with_window(&mut server);
+        server.focus_keyboard(Some(window));
+        keyboard_events(&mut server, &client);
+        let mut imports = FakeImports::default();
+        let same = b"xkb_keymap {};\0".to_vec();
+        server.set_keymap(&mut imports, same, Modifiers::default());
+        assert!(keyboard_events(&mut server, &client).is_empty());
+        let other = b"xkb_keymap { de };\0".to_vec();
+        let size = other.len() as u32;
+        server.set_keymap(&mut imports, other, SHIFT);
+        let events = keyboard_events(&mut server, &client);
+        assert_eq!(events.iter().map(|e| e.1).collect::<Vec<_>>(), [0, 4]);
+        assert_eq!(events[0].2[2], Arg::Uint(size));
+        assert_eq!(events[1].2[1], Arg::Uint(1));
     }
 
     #[test]

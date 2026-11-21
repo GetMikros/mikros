@@ -109,8 +109,10 @@ pub struct Compositor {
     /// that the last frame drew, with where (MIKSPEC-0066.R17).
     damaged_all: Cell<bool>,
     drawn_cursor: Cell<Option<(Cursor, Rect)>>,
-    /// The keymap that the keyboards share, once one came (`keys`).
+    /// The keymap that the keyboards share, once one came, and the
+    /// layout it was compiled from (`keys`).
     keymap: RefCell<Option<mikros_xkb::Keymap>>,
+    layout: RefCell<Option<crate::keyboard::Layout>>,
 }
 
 /// The startup handle `id` of the `USER` role, as mikros-rt's handle.
@@ -652,6 +654,7 @@ pub fn main() {
         damaged_all: Cell::new(false),
         drawn_cursor: Cell::new(None),
         keymap: RefCell::new(None),
+        layout: RefCell::new(None),
     });
     let c = compositor.clone();
     executor.block_on(async move {
