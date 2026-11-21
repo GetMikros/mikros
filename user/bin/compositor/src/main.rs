@@ -2,7 +2,8 @@
 //! wire format of their messages on a client's channel, and the code
 //! that the build script generates for each interface from the protocol
 //! files. `server` holds its side of the clients' connections, `theme`
-//! the desktop's theme from its files, `haze` the blurred copy of a
+//! the desktop's theme from its files, `keyboard` the keyboard layout
+//! from its file, `haze` the blurred copy of a
 //! wallpaper, and `program`, which only runs on Mikros, shows their
 //! surfaces on the display and serves their channels.
 
@@ -13,6 +14,7 @@
 
 mod accessibility;
 mod haze;
+mod keyboard;
 #[cfg(target_os = "mikros")]
 mod program;
 mod server;

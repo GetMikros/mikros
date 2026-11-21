@@ -3,15 +3,15 @@
 //! of F2 to F7, or `XF86Switch_VT_2` to `XF86Switch_VT_7`, which xkb's PC
 //! layouts give them while Ctrl and Alt are held, ask the session manager
 //! for the screen of a text console (MIKSPEC-0066.R12). Screen 1 is the
-//! desktop's own. Clients get no keys yet.
+//! desktop's own. Clients get no keys yet. The keymap is compiled from
+//! the system's keyboard layout (MIKSPEC-0066.R6).
 
+use crate::keyboard;
 use mikros_evdev::codes::KEY_A;
 use mikros_rt::interfaces::mikros::input::DeviceInfo;
 use mikros_rt::interfaces::mikros::session::SeatAsyncServer;
 use std::rc::Rc;
 
-/// The keyboard layout until `/system/config/keyboard.yaml` names one.
-const LAYOUT: &str = "us";
 /// The keysyms of F1 and of `XF86Switch_VT_1`; those of the next keys
 /// follow them.
 const F1: u32 = 0xFFBE;
@@ -26,6 +26,32 @@ fn screen_key(keysym: u32) -> Option<u8> {
         .into_iter()
         .find_map(|first| keysym.checked_sub(first).filter(|&i| i < SCREENS))
         .map(|i| i as u8 + 1)
+}
+
+/// The names of the system's keyboard layout, or xkbcommon's defaults
+/// when its file is absent or invalid.
+fn layout() -> mikros_xkb::Names {
+    let layout = match std::fs::read(keyboard::PATH) {
+        Ok(text) => match keyboard::parse(&text) {
+            Ok((layout, ignored)) => {
+                for note in ignored {
+                    mikros_rt::log!(Warning, "compositor: {}: {note}", keyboard::PATH);
+                }
+                layout
+            }
+            Err(e) => {
+                mikros_rt::log!(Error, "compositor: {}: {e}", keyboard::PATH);
+                keyboard::Layout::default()
+            }
+        },
+        Err(_) => keyboard::Layout::default(),
+    };
+    mikros_xkb::Names {
+        model: layout.model,
+        layout: layout.layout,
+        variant: layout.variant,
+        options: layout.options,
+    }
 }
 
 /// A keyboard of the seat, with its keymap's state, which asks through
@@ -43,12 +69,13 @@ impl Keys {
         if info.keys[usize::from(KEY_A / 8)] & (1 << (KEY_A % 8)) == 0 {
             return None;
         }
-        let names = mikros_xkb::Names {
-            layout: LAYOUT.into(),
-            ..Default::default()
-        };
-        let Some(keymap) = mikros_xkb::Keymap::new(&names) else {
-            mikros_rt::log!(Error, "compositor: the keymap cannot be compiled");
+        let names = layout();
+        let keymap = mikros_xkb::Keymap::new(&names).or_else(|| {
+            mikros_rt::log!(Error, "compositor: the keymap {names:?} cannot be compiled");
+            mikros_xkb::Keymap::new(&mikros_xkb::Names::default())
+        });
+        let Some(keymap) = keymap else {
+            mikros_rt::log!(Error, "compositor: the default keymap cannot be compiled");
             return None;
         };
         mikros_rt::log!(Info, "compositor: reading the keyboard {instance}");
