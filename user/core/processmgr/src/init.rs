@@ -274,6 +274,10 @@ impl Manager {
                 }
             });
         }
+        // The output and error that processes are given go to the log
+        // service once the process manager can connect to it.
+        let connect = crate::output::connect(self.shared.clone(), control.clone());
+        self.shared.spawner.spawn(connect);
         let shared = self.shared.clone();
         let me = own_identity(&self.shared)?;
         self.shared.spawner.spawn(async move {
@@ -291,7 +295,7 @@ impl Manager {
 
 /// The process manager's own `Directory` connection, bound over the
 /// service manager's control endpoint.
-async fn bind_own_directory(
+pub(crate) async fn bind_own_directory(
     shared: &Shared,
     control: &ProcessDirectoryAsyncClient,
 ) -> Result<ClientEnd<Directory>, Status> {

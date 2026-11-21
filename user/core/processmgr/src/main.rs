@@ -17,6 +17,7 @@ mod grants;
 mod init;
 mod launcher;
 mod namespace;
+mod output;
 mod portable;
 mod processes;
 mod records;

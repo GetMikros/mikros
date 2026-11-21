@@ -85,6 +85,9 @@ pub struct Shared {
     /// The commands, and whether they were read from the root file
     /// system's `/system`.
     pub commands: RefCell<Option<(bool, Rc<crate::commands::Commands>)>>,
+    /// The log service's `ProcessSources`, which the standard output and
+    /// error that processes are given go to (MIKSPEC-0063.R21).
+    pub output: crate::output::Sink,
 }
 
 /// A process to start.
@@ -165,6 +168,7 @@ impl Shared {
             waiters: RefCell::new(Vec::new()),
             killed_sessions: RefCell::new(BTreeSet::new()),
             commands: RefCell::new(None),
+            output: Default::default(),
         })
     }
 
@@ -326,7 +330,7 @@ impl Shared {
             login_session,
             admin,
             arguments,
-            handles,
+            mut handles,
             mut working_directory,
             umask,
             inherits_app,
@@ -385,6 +389,9 @@ impl Shared {
             .restricted(namespace, &identity)
             .await
             .inspect_err(|_| started.kill())?;
+        // Standard output and error for a process started without them.
+        let kept = crate::output::give(&mut handles, &app_id);
+        let forwarded = app_id.clone();
         let transferred = self
             .transfer(
                 &started,
@@ -432,6 +439,8 @@ impl Shared {
         match recorded {
             Ok(watched) => {
                 self.spawner.spawn(self.clone().watch(pid, watched));
+                let forward = crate::output::forward(self.clone(), pid, forwarded, kept);
+                self.spawner.spawn(forward);
                 Ok(started.process)
             }
             Err(status) => {
