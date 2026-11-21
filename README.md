@@ -53,6 +53,9 @@ The host needs these tools, which `cargo xtask setup` checks:
 | GDB | 12.1.0 |
 | `mkfs.btrfs` (btrfs-progs) | 6.12.0 |
 | `mkfs.exfat` (exfatprogs) | 1.2.0 |
+| Python `mako`, `packaging` and `yaml` (PyYAML), for Mesa | mako 0.8.0 |
+| `flex` and `bison`, for Mesa | any |
+| `pkg-config` and expat, for Wayland's `wayland-scanner` | any |
 
 All of user space is one Cargo workspace, `user/`, which `cargo xtask`
 builds for Mikros. Its packages test the code that does not need Mikros on

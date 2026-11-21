@@ -3,7 +3,7 @@
 
 use crate::firmware;
 use crate::qemu::{self, Gpu};
-use crate::tools::{Distro, Status, TOOLS, Tool};
+use crate::tools::{Distro, Status, TOOLS, Tool, Version};
 use anyhow::{Context, Result, bail};
 use std::io::{self, BufRead, Write};
 use std::process::Command;
@@ -36,6 +36,10 @@ pub fn run(args: &Args) -> Result<()> {
                     "too old  {} {v}, need {} or newer",
                     tool.name, tool.min_version
                 );
+                missing.push(tool);
+            }
+            Status::Missing if tool.min_version == Version(0, 0, 0) => {
+                println!("missing  {} ({})", tool.name, tool.program);
                 missing.push(tool);
             }
             Status::Missing => {

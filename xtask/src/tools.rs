@@ -1,5 +1,8 @@
 //! Host tools that the development environment needs, with their minimum
-//! versions and the commands that install them.
+//! versions and the commands that install them (MIKSPEC-0023.R5). Besides
+//! programs, these are the Python modules that Mesa's build runs with the
+//! host's `python3`, mako, packaging and PyYAML, and the expat library,
+//! which the build host's `wayland-scanner` links and pkg-config finds.
 
 use std::fmt;
 use std::process::Command;
@@ -108,6 +111,13 @@ impl Distro {
 pub enum Source {
     /// From the distribution package of this name.
     Package(&'static str),
+    /// From the distribution package of these names on Arch Linux, on
+    /// Debian and Ubuntu, and on Fedora.
+    Packages {
+        arch: &'static str,
+        debian: &'static str,
+        fedora: &'static str,
+    },
     /// With `cargo install` of this crate, which needs no privileges.
     Crate(&'static str),
     /// GDB with support for x86_64: `gdb-multiarch` on Debian and Ubuntu
@@ -125,47 +135,134 @@ fn gdb_package(distro: Distro, arch: &str) -> &'static str {
     }
 }
 
-/// A host tool, the version of it the repository needs, and where it
-/// comes from.
+/// A host tool, the version of it the repository needs, where it comes
+/// from and how its version is found. `program` is a program, or the name
+/// of a Python module or of a pkg-config package.
 pub struct Tool {
     pub name: &'static str,
     pub program: &'static str,
     pub min_version: Version,
     source: Source,
+    probe: Probe,
+}
+
+/// How a tool's version is found.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    /// The first line that the program prints for `--version`.
+    Version,
+    /// The `__version__` of the module, imported by the host's `python3`.
+    Python,
+    /// What `pkg-config --modversion` prints for the package.
+    PkgConfig,
 }
 
 /// The host tools the development environment needs, with the minimum version
 /// of each.
-pub const TOOLS: [Tool; 5] = [
+pub const TOOLS: [Tool; 12] = [
     Tool {
         name: "QEMU",
         program: "qemu-system-x86_64",
         min_version: Version(8, 2, 0),
         source: Source::Package("qemu-system-x86"),
+        probe: Probe::Version,
     },
     Tool {
         name: "GDB",
         program: "gdb",
         min_version: Version(12, 1, 0),
         source: Source::Gdb,
+        probe: Probe::Version,
     },
     Tool {
         name: "mkfs.btrfs",
         program: "mkfs.btrfs",
         min_version: Version(6, 12, 0),
         source: Source::Package("btrfs-progs"),
+        probe: Probe::Version,
     },
     Tool {
         name: "mkfs.exfat",
         program: "mkfs.exfat",
         min_version: Version(1, 2, 0),
         source: Source::Package("exfatprogs"),
+        probe: Probe::Version,
     },
     Tool {
         name: "cargo-fuzz",
         program: "cargo-fuzz",
         min_version: Version(0, 13, 0),
         source: Source::Crate("cargo-fuzz"),
+        probe: Probe::Version,
+    },
+    Tool {
+        name: "Python mako",
+        program: "mako",
+        min_version: Version(0, 8, 0),
+        source: Source::Packages {
+            arch: "python-mako",
+            debian: "python3-mako",
+            fedora: "python3-mako",
+        },
+        probe: Probe::Python,
+    },
+    Tool {
+        name: "Python packaging",
+        program: "packaging",
+        min_version: Version(0, 0, 0),
+        source: Source::Packages {
+            arch: "python-packaging",
+            debian: "python3-packaging",
+            fedora: "python3-packaging",
+        },
+        probe: Probe::Python,
+    },
+    Tool {
+        name: "PyYAML",
+        program: "yaml",
+        min_version: Version(0, 0, 0),
+        source: Source::Packages {
+            arch: "python-yaml",
+            debian: "python3-yaml",
+            fedora: "python3-pyyaml",
+        },
+        probe: Probe::Python,
+    },
+    Tool {
+        name: "flex",
+        program: "flex",
+        min_version: Version(0, 0, 0),
+        source: Source::Package("flex"),
+        probe: Probe::Version,
+    },
+    Tool {
+        name: "bison",
+        program: "bison",
+        min_version: Version(0, 0, 0),
+        source: Source::Package("bison"),
+        probe: Probe::Version,
+    },
+    Tool {
+        name: "pkg-config",
+        program: "pkg-config",
+        min_version: Version(0, 0, 0),
+        source: Source::Packages {
+            arch: "pkgconf",
+            debian: "pkg-config",
+            fedora: "pkgconf-pkg-config",
+        },
+        probe: Probe::Version,
+    },
+    Tool {
+        name: "expat",
+        program: "expat",
+        min_version: Version(0, 0, 0),
+        source: Source::Packages {
+            arch: "expat",
+            debian: "libexpat1-dev",
+            fedora: "expat-devel",
+        },
+        probe: Probe::PkgConfig,
     },
 ];
 
@@ -177,16 +274,30 @@ pub enum Status {
 }
 
 impl Tool {
-    /// Runs the tool with `--version` and compares the reported version with
-    /// the minimum.
+    /// Finds the tool's version as its probe says and compares it with the
+    /// minimum.
     pub fn check(&self) -> Status {
         let program = match self.source {
             Source::Gdb => crate::debug::gdb(),
             _ => self.program,
         };
-        let Ok(output) = Command::new(program).arg("--version").output() else {
+        let output = match self.probe {
+            Probe::Version => Command::new(program).arg("--version").output(),
+            Probe::Python => {
+                let code =
+                    format!("import {program}; print(getattr({program}, '__version__', '0.0'))");
+                Command::new("python3").args(["-c", &code]).output()
+            }
+            Probe::PkgConfig => Command::new("pkg-config")
+                .args(["--modversion", program])
+                .output(),
+        };
+        let Ok(output) = output else {
             return Status::Missing;
         };
+        if self.probe != Probe::Version && !output.status.success() {
+            return Status::Missing;
+        }
         if matches!(self.source, Source::Gdb) && !debugs_x86_64(program) {
             return Status::Missing;
         }
@@ -203,6 +314,15 @@ impl Tool {
     pub fn install_command(&self, distro: Distro) -> Vec<String> {
         match self.source {
             Source::Package(package) => distro.install_command(package),
+            Source::Packages {
+                arch,
+                debian,
+                fedora,
+            } => distro.install_command(match distro {
+                Distro::Arch => arch,
+                Distro::Debian | Distro::Ubuntu => debian,
+                Distro::Fedora => fedora,
+            }),
             Source::Crate(name) => ["cargo", "install", name, "--locked"]
                 .map(String::from)
                 .to_vec(),
@@ -224,6 +344,24 @@ fn debugs_x86_64(gdb: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installs_the_package_of_each_distribution() {
+        let mako = TOOLS.iter().find(|t| t.name == "Python mako").unwrap();
+        let package = |distro| mako.install_command(distro).last().unwrap().clone();
+        assert_eq!(package(Distro::Arch), "python-mako");
+        assert_eq!(package(Distro::Ubuntu), "python3-mako");
+        let expat = TOOLS.iter().find(|t| t.name == "expat").unwrap();
+        assert_eq!(
+            expat.install_command(Distro::Fedora).last().unwrap(),
+            "expat-devel"
+        );
+        assert!(TOOLS.iter().all(|t| {
+            Distro::ALL
+                .iter()
+                .all(|&d| !t.install_command(d).is_empty())
+        }));
+    }
 
     #[test]
     fn installs_gdb_multiarch_where_gdb_has_one_architecture() {
