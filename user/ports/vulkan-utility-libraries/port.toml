@@ -1,0 +1,10 @@
+# The Khronos Vulkan utility libraries, which Dawn's Vulkan backend uses,
+# at the release of the Vulkan headers of user/ports/vulkan-headers: the
+# libraries are generated per header version, so the two must match.
+# Dawn's build files build them with Dawn (user/ports/dawn), so this port
+# is only unpacked. Apache-2.0.
+
+[source]
+url = "https://github.com/KhronosGroup/Vulkan-Utility-Libraries/archive/refs/tags/vulkan-sdk-1.4.363.0.tar.gz"
+sha256 = "a5308b62e3bac84cf45c4d7dd5b830aabace4847fdb71f4fd7db3be034c2bebf"
+dir = "Vulkan-Utility-Libraries-vulkan-sdk-1.4.363.0"

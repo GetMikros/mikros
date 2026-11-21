@@ -1,0 +1,9 @@
+# SPIRV-Tools, which Dawn's shader compiler, Tint, reads and writes SPIR-V
+# with, at the commit that Elegance's Dawn build pins. Dawn's build files
+# build it with Dawn (user/ports/dawn), so this port is only unpacked.
+# Apache-2.0.
+
+[source]
+url = "https://github.com/KhronosGroup/SPIRV-Tools/archive/e265f557e3db20843c6d135d2b9eeb51ecc79d73.tar.gz"
+sha256 = "466d0798ea6d802dc8825d2edfea5431c1b32f16e28542c58b49c1aec6389650"
+dir = "SPIRV-Tools-e265f557e3db20843c6d135d2b9eeb51ecc79d73"

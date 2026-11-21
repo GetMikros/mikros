@@ -1,0 +1,8 @@
+# The SPIR-V headers, at the commit that Elegance's Dawn build pins. Dawn's
+# build files build them with Dawn (user/ports/dawn), so this port is only
+# unpacked. MIT.
+
+[source]
+url = "https://github.com/KhronosGroup/SPIRV-Headers/archive/04fd3caa1e8267e4d95c806cad901181728e1006.tar.gz"
+sha256 = "392f4801409aad9c4f1b77745f179952fd6264e4c8bd0fc1bc45dfa6807bf6d0"
+dir = "SPIRV-Headers-04fd3caa1e8267e4d95c806cad901181728e1006"
