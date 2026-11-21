@@ -436,6 +436,15 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+# find_package finds the packages of share/cmake by itself, but not those
+# of libraries/cmake, so each of these is named, by its folder.
+file(GLOB _MIKROS_PACKAGES LIST_DIRECTORIES true \"${{CMAKE_CURRENT_LIST_DIR}}/libraries/cmake/*\")
+foreach(_mikros_package IN LISTS _MIKROS_PACKAGES)
+  if(IS_DIRECTORY \"${{_mikros_package}}\")
+    get_filename_component(_mikros_name \"${{_mikros_package}}\" NAME)
+    set(${{_mikros_name}}_DIR \"${{_mikros_package}}\" CACHE PATH \"A CMake package of the sysroot\")
+  endif()
+endforeach()
 
 get_filename_component(_MIKROS_LLVM \"${{CMAKE_CURRENT_LIST_DIR}}/{llvm}\" ABSOLUTE)
 set(_MIKROS_CONFIG \"--config=${{CMAKE_CURRENT_LIST_DIR}}/{TRIPLE}.cfg\")

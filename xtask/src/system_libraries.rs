@@ -7,7 +7,12 @@
 //! headers and loader, with `vulkan_mikros.h`, from their ports.
 //! Libraries lie in `libraries/`, their pkg-config files in
 //! `libraries/pkgconfig/` with an empty prefix, and the Mikros protocol
-//! files in `share/wayland-protocols/mikros/`.
+//! files in `share/wayland-protocols/mikros/`. The CMake packages that
+//! these projects install go to the same places as in their installs
+//! (MIKSPEC-0062.R14): `libraries/cmake/<Package>/` for a library's, such
+//! as `VulkanLoader`, and `share/cmake/<Package>/` for headers alone, such
+//! as `VulkanHeaders`. Their files find what they describe relative to
+//! their own folder, which the sysroot keeps.
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -44,10 +49,24 @@ fn sysroot_pc(pc: &Path) -> Result<String> {
     Ok(text.replace("prefix=/system", "prefix="))
 }
 
+/// Copies the CMake packages that the install `install`, a port's
+/// `/system`, holds into the same folders of the sysroot, if it holds
+/// any.
+fn cmake_packages(install: &Path) -> Result<()> {
+    let sysroot = crate::sysroot::dir();
+    for dir in ["libraries/cmake", "share/cmake"] {
+        let packages = install.join(dir);
+        if packages.is_dir() {
+            copy_tree(&packages, &sysroot.join(dir))?;
+        }
+    }
+    Ok(())
+}
+
 /// Builds every system library and installs it in the sysroot, which
 /// `crate::sysroot::build` made.
 pub fn install() -> Result<()> {
-    crate::wayland::build()?;
+    cmake_packages(&crate::wayland::build()?.install)?;
     crate::wayland::install_protocols()?;
     mikros_protocols()?;
     xkbcommon()?;
@@ -89,18 +108,23 @@ pub fn xkbcommon() -> Result<()> {
     write_if_changed(
         &sysroot.join("libraries/pkgconfig/xkbcommon.pc"),
         pc.as_bytes(),
-    )
+    )?;
+    cmake_packages(&built.install)
 }
 
 /// Installs the Vulkan headers, with those of the Mikros extensions, the
 /// loader and its pkg-config file.
 fn vulkan() -> Result<()> {
     let sysroot = crate::sysroot::dir();
-    let headers = crate::vulkan::headers()?.join("include");
+    let install = crate::vulkan::headers()?;
+    cmake_packages(&install)?;
+    let headers = install.join("include");
     for dir in ["vulkan", "vk_video"] {
         copy_tree(&headers.join(dir), &sysroot.join("include").join(dir))?;
     }
-    let loader = crate::vulkan::loader()?.join("libraries");
+    let install = crate::vulkan::loader()?;
+    cmake_packages(&install)?;
+    let loader = install.join("libraries");
     let library = loader.join(crate::vulkan::LOADER);
     write_if_changed(
         &sysroot.join("libraries").join(crate::vulkan::LOADER),
