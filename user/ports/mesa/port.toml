@@ -44,6 +44,9 @@
 #   release points of a surface's sync object, and the formats are
 #   those the compositor sends; the option mikros-buffer-xml names the
 #   compositor's protocol file.
+# - 0012: lavapipe checks the result of os_get_total_physical_memory,
+#   and reports its default heap size when the size is unknown, and not
+#   whatever the variable held.
 
 [source]
 url = "https://archive.mesa3d.org/mesa-26.3.1.tar.xz"

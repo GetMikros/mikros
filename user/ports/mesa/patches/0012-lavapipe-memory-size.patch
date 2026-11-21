@@ -1,0 +1,12 @@
+--- a/src/gallium/frontends/lavapipe/lvp_device.c
++++ b/src/gallium/frontends/lavapipe/lvp_device.c
+@@ -1831,7 +1831,8 @@
+ 
+    VkDeviceSize low_size = 3ULL*1024*1024*1024;
+    VkDeviceSize total_size;
+-   os_get_total_physical_memory(&total_size);
++   if (!os_get_total_physical_memory(&total_size))
++      total_size = low_size;
+    pMemoryProperties->memoryHeapCount = 1;
+    pMemoryProperties->memoryHeaps[0] = (VkMemoryHeap) {
+       .size = low_size,
