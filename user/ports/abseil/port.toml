@@ -1,7 +1,11 @@
 # Abseil, the C++ library that Dawn is written against, at the release
 # that Dawn's current source builds with. It is only unpacked here: Dawn's
 # own build files build it, as part of Dawn (user/ports/dawn), which is
-# why this port has no [build] table. Apache-2.0.
+# why this port has no [build] table. Apache-2.0. The patch:
+# - 0001: Mikros is a platform with mmap, which abseil's low level
+#   allocator, thread identities, semaphores and so its mutexes need, and
+#   one whose raw logging writes with write(2), so that its fatal checks
+#   say what failed.
 
 [source]
 url = "https://github.com/abseil/abseil-cpp/archive/refs/tags/20260817.0.tar.gz"
