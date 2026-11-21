@@ -5,17 +5,17 @@
 //! `get_panel` are served yet: the first gives the renderer the buffer's
 //! pixels as the output's wallpaper (MIKSPEC-0075.R22) and then releases
 //! the buffer, the second makes a panel (MIKSPEC-0076.R3) of a surface
-//! without a role. The others end the component's connection.
+//! without a role. The others end the component's connection with
+//! wl_display's `implementation` error until they are served.
 
 use super::{Imports, ProtocolError, Request, Resource, Server};
 use crate::wayland::protocols::{
-    mikros_panel_v1, mikros_shell_v1, wl_buffer, wl_output, wl_surface,
+    mikros_panel_v1, mikros_shell_v1, wl_buffer, wl_display, wl_output, wl_surface,
 };
 use crate::wayland::wire::{Arg, DecodeError};
 
 /// The protocol error of a request of the shell global that its
-/// component may not make or that is not served, for which the protocol
-/// file defines no code.
+/// component may not make, for which the protocol file defines no code.
 pub(super) const SHELL_ERROR: u32 = 0;
 
 impl Server {
@@ -108,7 +108,11 @@ impl Server {
                 c.create(id, interface, request.version, Resource::Panel(surface))?;
                 self.make_panel(request, id.0, surface, edge)
             }
-            _ => Err(error(
+            // Requests that are not served yet end the connection with
+            // wl_display's error for that, rather than doing nothing.
+            _ => Err(ProtocolError::new(
+                request.object,
+                wl_display::error::IMPLEMENTATION,
                 "a request of the shell global that is not served yet",
             )),
         }
@@ -185,6 +189,20 @@ mod tests {
         let mode = events.iter().find(|e| e.0 == 3 && e.1 == 1).unwrap();
         assert_eq!(mode.2[1..3], [Arg::Int(1280), Arg::Int(800)]);
         assert!(events.iter().any(|e| (e.0, e.1) == (5, 0)));
+    }
+
+    #[test]
+    fn ends_requests_that_are_not_served_with_the_implementation_error() {
+        let mut server = Server::new();
+        let shell = component(&mut server, &["menubar"]);
+        globals(&mut server, &shell);
+        shell.bind(&mut server, 2, &mikros_shell_v1::INTERFACE, 3);
+        // logout, request 8, which the compositor does not serve yet.
+        shell.send(&mut server, 3, 8, vec![]);
+        assert_eq!(
+            shell.error(&mut server),
+            Some(wl_display::error::IMPLEMENTATION)
+        );
     }
 
     #[test]
