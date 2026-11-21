@@ -125,6 +125,7 @@ const SYS_UTIMENSAT: i64 = 280;
 const SYS_RENAMEAT2: i64 = 316;
 const SYS_FCHMODAT2: i64 = 452;
 const SYS_UNAME: i64 = 63;
+const SYS_SYSINFO: i64 = 99;
 const SYS_SETHOSTNAME: i64 = 170;
 const SYS_FACCESSAT2: i64 = 439;
 const SYS_STATX: i64 = 332;
@@ -363,6 +364,7 @@ extern "C" fn __mikros_syscall(
         ),
         SYS_GETRANDOM => getrandom(a1 as *mut u8, a2 as u64),
         SYS_UNAME => uname::uname(a1 as *mut u8),
+        SYS_SYSINFO => crate::sysinfo::sysinfo(a1 as *mut u8),
         SYS_SETHOSTNAME => uname::sethostname(),
         SYS_CLOCK_GETTIME => clock::gettime(a1, a2 as *mut clock::Timespec),
         SYS_NANOSLEEP => clock::nanosleep(

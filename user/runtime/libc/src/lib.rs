@@ -28,6 +28,7 @@ mod start;
 mod startup;
 mod stat;
 mod syscall;
+mod sysinfo;
 mod terminal;
 mod thread;
 mod timerfd;

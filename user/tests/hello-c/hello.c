@@ -25,6 +25,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/timerfd.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -1250,6 +1251,22 @@ static int host_name_defaults(void)
 	return sethostname("other", 5) == -1 && errno == EPERM;
 }
 
+/* sysinfo, sysconf and get_phys_pages report the frames of the kernel's
+ * frame allocator in pages of 4096 bytes, with nothing else. */
+static int memory_is_reported(void)
+{
+	struct sysinfo info;
+	memset(&info, 0xff, sizeof info);
+	if (sysinfo(&info) != 0 || info.mem_unit != 4096 || info.totalram == 0)
+		return 0;
+	if (info.freeram > info.totalram || info.uptime != 0 || info.procs != 0)
+		return 0;
+	long pages = sysconf(_SC_PHYS_PAGES);
+	long free = sysconf(_SC_AVPHYS_PAGES);
+	return pages == (long)info.totalram && free > 0 && free <= pages &&
+	       get_phys_pages() == pages && sysconf(_SC_PAGESIZE) == 4096;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -1329,6 +1346,8 @@ int main(int argc, char **argv)
 		return 38;
 	if (!scripts_are_run())
 		return 39;
+	if (!memory_is_reported())
+		return 40;
 	char *copy = malloc(64);
 	if (!copy)
 		return 34;
