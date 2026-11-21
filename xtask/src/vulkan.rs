@@ -35,6 +35,12 @@ fn source(port: &crate::ports::Port) -> Result<PathBuf> {
     crate::port::patched_source(&archive, &dir, &port.source, &port.dir.join("patches"), &[])
 }
 
+/// The patched source of the headers, for a project that builds them with
+/// its own build files.
+pub fn headers_source() -> Result<PathBuf> {
+    source(&crate::ports::load("vulkan-headers")?)
+}
+
 /// Installs the headers, and returns the directory their prefix,
 /// `/system`, was installed in.
 pub fn headers() -> Result<PathBuf> {

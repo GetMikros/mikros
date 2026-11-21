@@ -128,15 +128,21 @@ pub fn test_programs(port: &Port) -> String {
     format!("/system/libexec/{}-tests", port.name)
 }
 
-/// Fetches, patches and builds `port`, a Meson project.
-pub fn build(port: &Port) -> Result<Built> {
+/// Fetches the source archive of `port`, a `.tar.gz`, unpacks it and
+/// applies its patches, and returns the directory of the source.
+pub fn source(port: &Port) -> Result<PathBuf> {
     let root = crate::workspace_root();
     let dir = root.join("target/sources").join(&port.name);
     let archive = dir.join(format!("{}.tar.gz", port.source));
     let what = format!("{} source", port.name);
     crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
     let patches = port.dir.join("patches");
-    let source = crate::port::patched_source(&archive, &dir, &port.source, &patches, &[])?;
+    crate::port::patched_source(&archive, &dir, &port.source, &patches, &[])
+}
+
+/// Fetches, patches and builds `port`, a Meson project.
+pub fn build(port: &Port) -> Result<Built> {
+    let source = source(port)?;
     let install = crate::build_systems::meson(&port.name, &source, &port.options)?;
     Ok(Built {
         source,
