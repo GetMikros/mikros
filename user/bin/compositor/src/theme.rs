@@ -1,4 +1,4 @@
-//! The theme of the desktop (MIKSPEC-0066.R19): the values of the
+//! The theme of the desktop (MIKSPEC-0066.R27): the values of the
 //! system's `theme.yaml`, or of the configuration's, which replaces it as
 //! a whole, with those that the user's file sets over them. A file that
 //! cannot be read or parsed sets none.
@@ -23,6 +23,8 @@ pub struct Theme {
     pub font: String,
     /// In hundredths of a point.
     pub font_size: u32,
+    /// The name of the cursor theme, which only the compositor uses.
+    pub cursor: String,
 }
 
 /// The theme that the system's file sets, for the values that no file
@@ -34,6 +36,7 @@ impl Default for Theme {
             scheme: Scheme::Light,
             font: "sans-serif".into(),
             font_size: 1000,
+            cursor: "default".into(),
         }
     }
 }
@@ -45,6 +48,7 @@ pub struct Values {
     scheme: Option<Scheme>,
     font: Option<String>,
     font_size: Option<u32>,
+    cursor: Option<String>,
 }
 
 impl Theme {
@@ -53,6 +57,7 @@ impl Theme {
         self.scheme = values.scheme.unwrap_or(self.scheme);
         self.font = values.font.clone().unwrap_or(self.font);
         self.font_size = values.font_size.unwrap_or(self.font_size);
+        self.cursor = values.cursor.clone().unwrap_or(self.cursor);
         self
     }
 }
@@ -71,7 +76,7 @@ pub fn parse(text: &[u8]) -> Result<Values, String> {
     }
     let root = mikros_yaml::parse(text).map_err(|e| at(e.line, &format!("{:?}", e.kind)))?;
     let map = root.map().map_err(|e| at(e.line, "not a map"))?;
-    let known = ["accent", "scheme", "font", "font_size"];
+    let known = ["accent", "scheme", "font", "font_size", "cursor"];
     if let Some(entry) = map.unknown(&known).next() {
         return Err(at(entry.line, &format!("the unknown key {}", entry.key)));
     }
@@ -97,6 +102,16 @@ pub fn parse(text: &[u8]) -> Result<Values, String> {
             return Err(at(line, "font is empty"));
         }
         values.font = Some(text.into());
+    }
+    if let Some((line, text)) = text("cursor")? {
+        // A file name in /system/share/cursors.
+        let name = text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+        if text.is_empty() || text.starts_with('.') || !name {
+            return Err(at(line, "cursor is not the name of a cursor theme"));
+        }
+        values.cursor = Some(text.into());
     }
     if let Some((line, text)) = text("font_size")? {
         let size = hundredths(text).filter(|&s| (100..=100_000).contains(&s));
@@ -133,7 +148,8 @@ mod tests {
 
     #[test]
     fn reads_every_key() {
-        let text = b"accent: \"#2279fb\"\nscheme: dark\nfont: DejaVu Sans\nfont_size: 10.5\n";
+        let text =
+            b"accent: \"#2279fb\"\nscheme: dark\nfont: DejaVu Sans\nfont_size: 10.5\ncursor: big\n";
         let theme = Theme::default().with(&parse(text).unwrap());
         assert_eq!(
             theme,
@@ -142,6 +158,7 @@ mod tests {
                 scheme: Scheme::Dark,
                 font: "DejaVu Sans".into(),
                 font_size: 1050,
+                cursor: "big".into(),
             }
         );
     }
@@ -169,6 +186,8 @@ mod tests {
             b"font_size: 0\n",
             b"font_size: 10.555\n",
             b"font_size: ten\n",
+            b"cursor: ../x\n",
+            b"cursor: \"\"\n",
             b"colour: \"#000000\"\n",
             b"- accent\n",
         ] {

@@ -15,6 +15,8 @@ pub struct HostBuffer {
     mapped: *mut u8,
     pub width: u32,
     pub height: u32,
+    /// Whether the fourth byte of its pixels is alpha, premultiplied.
+    pub alpha: bool,
 }
 
 impl HostBuffer {
@@ -26,7 +28,7 @@ impl HostBuffer {
             height: self.height,
             row: self.width,
             first: 0,
-            alpha: false,
+            alpha: self.alpha,
         }
     }
 }
@@ -116,6 +118,7 @@ impl Renderer {
                 mapped: mapped.cast(),
                 width: 0,
                 height: 0,
+                alpha: false,
             }),
             Err(e) => {
                 // SAFETY: the buffer and the memory are unused.

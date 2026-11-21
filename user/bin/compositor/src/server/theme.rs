@@ -1,6 +1,7 @@
-//! `mikros_theme_v1` (MIKSPEC-0076.R17): the theme's values, sent to each
-//! theme object when its client binds the global and again to all of
-//! them whenever the theme changes.
+//! `mikros_theme_v1` (MIKSPEC-0076.R17, MIKSPEC-0066.R27): the theme's
+//! values but its cursor theme, sent to each theme object when its client
+//! binds the global and again to all of them whenever one of them
+//! changes.
 
 use super::{ClientId, Resource, Server};
 use crate::theme::{Scheme, Theme};
@@ -15,10 +16,13 @@ impl Server {
     /// Makes `theme` the theme, and sends it to every theme object if it
     /// changed.
     pub fn set_theme(&mut self, theme: Theme) {
-        if theme == self.theme {
+        // Clients get every value but the cursor theme's.
+        let seen = |t: &Theme| (t.accent, t.scheme, t.font.clone(), t.font_size);
+        let changed = seen(&theme) != seen(&self.theme);
+        self.theme = theme;
+        if !changed {
             return;
         }
-        self.theme = theme;
         let objects: Vec<(ClientId, ObjectId)> = self
             .clients
             .iter()
@@ -91,7 +95,14 @@ mod tests {
         let sent = events(&mut server, &client);
         assert_eq!(sent.len(), 4);
         assert_eq!(sent[1].2, [Arg::Uint(2)]);
-        server.set_theme(theme);
+        server.set_theme(theme.clone());
         assert!(events(&mut server, &client).is_empty());
+        // Nor does the cursor theme, which clients do not get.
+        server.set_theme(Theme {
+            cursor: "big".into(),
+            ..theme
+        });
+        assert!(events(&mut server, &client).is_empty());
+        assert_eq!(server.theme().cursor, "big");
     }
 }

@@ -1,24 +1,25 @@
 //! The desktop run: the system of the system tests without the session
 //! settings, so that a desktop counts as installed, and with shell
 //! settings that name the greeter probe as the greeter, boots, the
-//! session manager starts the compositor in greeter mode and gives it the
-//! display, and the compositor starts the probe, a system app, which
-//! draws a fullscreen toplevel in one colour with Vulkan, and then logs
-//! in `dee`, whose login mode is `CONSOLE`. The run waits until dee's
-//! session started on text console 1 and its screen shows, without the
-//! colour. Then it presses Ctrl, Alt and F1, which the console turns into
-//! a switch to the desktop, until the colour covers the screen, and
-//! Ctrl, Alt and F2, which the compositor turns into a switch back to the
-//! console, until the colour has left the screen again. In dee's session
-//! it then runs `desktop`, which starts dee's desktop, whose shell is the
-//! shell probe: the run waits until the wallpaper that its desktop part
-//! hands the compositor covers the screen, until the haze of that
-//! wallpaper shows under its taskbar part's transparent panel, and until
-//! its start-menu part connected to the service manager's `Control`,
-//! whose question the compositor cancels, and was refused. It then presses Ctrl, Alt and F2
-//! until the wallpaper has left the screen, and ends the session with
-//! `exit`, which ends the desktop too. It keeps the last screen dump in
-//! `desktop.ppm`.
+//! session manager starts the compositor in greeter mode and gives it
+//! the display, and the compositor starts the probe, a system app,
+//! which draws a fullscreen toplevel in one colour with Vulkan, and
+//! then logs in `dee`, whose login mode is `CONSOLE`. The run waits
+//! until dee's session started on text console 1 and its screen shows,
+//! without the colour. Then it presses Ctrl, Alt and F1, which the
+//! console turns into a switch to the desktop, until the colour covers
+//! the screen, and Ctrl, Alt and F2, which the compositor turns into a
+//! switch back to the console, until the colour has left the screen
+//! again. In dee's session it then runs `desktop`, which starts dee's
+//! desktop, whose shell is the shell probe: the run waits until the
+//! wallpaper that its desktop part hands the compositor covers the
+//! screen, until the haze of that wallpaper shows under its taskbar
+//! part's transparent panel with the pointer's arrow in the middle of
+//! the screen, and until its start-menu part connected to the service
+//! manager's `Control`, whose question the compositor cancels, and was
+//! refused. It then presses Ctrl, Alt and F2 until the wallpaper has
+//! left the screen, and ends the session with `exit`, which ends the
+//! desktop too. It keeps the last screen dump in `desktop.ppm`.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -53,6 +54,11 @@ const WALLPAPER: [u8; 3] = [40, 90, 160];
 /// cover.
 const HAZE: [u8; 3] = [210, 220, 235];
 const HAZE_PART: f64 = 0.05;
+/// A pixel inside the black fill of the cursor theme's default arrow,
+/// which the compositor draws with its hotspot in the middle of the
+/// screen until it reads pointer devices: 2 right of the hotspot and 7
+/// below it.
+const ARROW_PIXEL: (usize, usize) = (642, 407);
 const TOLERANCE: u8 = 2;
 /// The share of the screen that the colour must cover, and the share
 /// that it may still cover on a text console's screen.
@@ -77,6 +83,14 @@ fn colour_share(ppm: &[u8], colour: [u8; 3], part: f64) -> Option<f64> {
     };
     let shown = pixels.iter().filter(|p| near(p)).count();
     Some(shown as f64 / pixels.len() as f64)
+}
+
+/// The pixel at `(x, y)` of the screen dump `ppm`.
+fn pixel(ppm: &[u8], (x, y): (usize, usize)) -> Option<[u8; 3]> {
+    let head = &ppm[..ppm.len().min(32)];
+    let text = String::from_utf8_lossy(head);
+    let width: usize = text.split_ascii_whitespace().nth(1)?.parse().ok()?;
+    scenario::ppm_pixels(ppm)?.get(y * width + x).copied()
 }
 
 /// The screen of a run: its monitor's socket, the file of its dumps, and
@@ -169,6 +183,10 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         screen.until(&mut qemu, WALLPAPER, &covered, what)?;
         let what = "the taskbar's haze showed";
         screen.until_below(&mut qemu, HAZE, HAZE_PART, &covered, what)?;
+        let shown = pixel(&fs::read(&dump)?, ARROW_PIXEL);
+        if shown != Some([0, 0, 0]) {
+            bail!("the pointer's arrow is not in the middle of the screen: {shown:?}");
+        }
         scenario::wait_for_line(&log, CANCELLED, &mut qemu, deadline)?;
         let serial = scenario::wait_for_line(&log, SHELL_EXITED, &mut qemu, deadline)?;
         let exited = serial
@@ -218,5 +236,7 @@ mod tests {
         assert_eq!(colour_share(&screen, WALLPAPER, 1.0), Some(0.25));
         assert_eq!(colour_share(b"not a picture", COLOUR, 1.0), None);
         assert_eq!(colour_share(&screen, COLOUR, 0.5), Some(0.5));
+        assert_eq!(pixel(&screen, (2, 0)), Some([40, 90, 160]));
+        assert_eq!(pixel(&screen, (4, 0)), None);
     }
 }

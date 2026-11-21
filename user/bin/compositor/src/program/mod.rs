@@ -14,6 +14,7 @@ mod keys;
 mod output;
 mod parts;
 mod pipeline;
+mod pointer;
 mod render;
 mod session;
 mod themes;
@@ -101,6 +102,8 @@ pub struct Compositor {
     channels: RefCell<BTreeMap<ClientId, OwnedHandle>>,
     /// Set when a surface committed, or the display came.
     changed: Notify,
+    /// The pointer and its cursor (MIKSPEC-0066.R28).
+    pointer: RefCell<pointer::Pointer>,
 }
 
 /// The startup handle `id` of the `USER` role, as mikros-rt's handle.
@@ -290,8 +293,9 @@ impl Compositor {
                     let _ = self.reactor.timeline(timeline, point.value).await;
                 }
             }
-            let (drawn, fading) = {
+            let (drawn, fading, next_cursor) = {
                 let store = self.store.borrow();
+                let mut pointer = self.pointer.borrow_mut();
                 let target = output.back();
                 // The haze of the output's size, fading in for 250 ms
                 // after it was made (MIKSPEC-0066.R18).
@@ -330,7 +334,23 @@ impl Compositor {
                         blur: &s.blur,
                     })
                 });
-                let layers: Vec<Layer> = wallpaper.into_iter().chain(surfaces).collect();
+                let mut layers: Vec<Layer> = wallpaper.into_iter().chain(surfaces).collect();
+                // The pointer above everything (MIKSPEC-0066.R17).
+                let now_ms = milliseconds().into();
+                let screen = (target.width as i32, target.height as i32);
+                let mut next_cursor = None;
+                if let Some((cursor, (x, y), next)) = pointer.image(&self.renderer, now_ms, screen)
+                {
+                    next_cursor = next;
+                    layers.push(Layer {
+                        pixels: cursor.pixels(),
+                        x,
+                        y,
+                        under: Under::Flat,
+                        haze: &[],
+                        blur: &[],
+                    });
+                }
                 let look = Look {
                     flat: haze::flat(store.scheme),
                     translucent: haze::translucent(store.scheme),
@@ -339,7 +359,7 @@ impl Compositor {
                 let drawn = self
                     .renderer
                     .draw(target, BACKGROUND, &layers, haze.as_ref(), &look);
-                (drawn, fading)
+                (drawn, fading, next_cursor)
             };
             if let Err(e) = drawn {
                 mikros_rt::log!(Error, "compositor: drawing a frame: {e:?}");
@@ -361,9 +381,15 @@ impl Compositor {
             }
             self.server.borrow_mut().frames_done(milliseconds());
             self.flush_all();
-            // While the haze fades in, frames follow each other.
-            if fading {
-                let next = mikros_rt::objects::now() + FADE_FRAME;
+            // While the haze fades in, frames follow each other, and an
+            // animated cursor asks for a frame when its next one is due.
+            let wait = match (fading, next_cursor) {
+                (true, _) => Some(FADE_FRAME),
+                (false, Some(ms)) => Some(ms as i64 * 1_000_000),
+                (false, None) => None,
+            };
+            if let Some(wait) = wait {
+                let next = mikros_rt::objects::now() + wait;
                 let _ = self.reactor.sleep_until(next).await;
                 self.changed.notify();
             }
@@ -532,6 +558,7 @@ pub fn main() {
         display_instance: RefCell::new(None),
         channels: RefCell::default(),
         changed: Notify::default(),
+        pointer: RefCell::new(pointer::Pointer::new()),
     });
     let c = compositor.clone();
     executor.block_on(async move {

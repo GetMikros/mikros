@@ -11,6 +11,7 @@
 // yet, and the host builds only the tests.
 #![allow(dead_code)]
 
+mod accessibility;
 mod haze;
 #[cfg(target_os = "mikros")]
 mod program;
