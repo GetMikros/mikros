@@ -12,9 +12,10 @@
 //! console, until the colour has left the screen again. In dee's session
 //! it then runs `desktop`, which starts dee's desktop, whose shell is the
 //! shell probe: the run waits until the wallpaper that its desktop part
-//! hands the compositor covers the screen, and until its taskbar part
-//! connected to the service manager's `Control`, whose question the
-//! compositor cancels, and was refused. It then presses Ctrl, Alt and F2
+//! hands the compositor covers the screen, until the haze of that
+//! wallpaper shows under its taskbar part's transparent panel, and until
+//! its start-menu part connected to the service manager's `Control`,
+//! whose question the compositor cancels, and was refused. It then presses Ctrl, Alt and F2
 //! until the wallpaper has left the screen, and ends the session with
 //! `exit`, which ends the desktop too. It keeps the last screen dump in
 //! `desktop.ppm`.
@@ -40,12 +41,18 @@ const DESKTOP_ENDED: &str = "sessionmgr: the desktop of dee ended";
 /// question, and once the shell probe exited, which it does with 0 when
 /// it was refused.
 const CANCELLED: &str = "compositor: cancelled the question";
-const SHELL_EXITED: &str = "compositor: the part taskbar of system.mikros.shell_probe exited";
+const SHELL_EXITED: &str = "compositor: the part start-menu of system.mikros.shell_probe exited";
 /// The probe's colour and the test colour of the shell probe's
 /// wallpaper, in the bytes of the display, and how far a pixel may be
 /// from them.
 const COLOUR: [u8; 3] = [200, 40, 120];
 const WALLPAPER: [u8; 3] = [40, 90, 160];
+/// The haze of that wallpaper in the light scheme, which the shell
+/// probe's transparent taskbar shows along the bottom edge, 48 rows of
+/// the 800 of the screen, and the bottom part of the screen that it must
+/// cover.
+const HAZE: [u8; 3] = [210, 220, 235];
+const HAZE_PART: f64 = 0.05;
 const TOLERANCE: u8 = 2;
 /// The share of the screen that the colour must cover, and the share
 /// that it may still cover on a text console's screen.
@@ -54,10 +61,12 @@ const GONE: f64 = 0.1;
 /// How often the screen is dumped while the run waits for the colour.
 const DUMP_EVERY: Duration = Duration::from_secs(1);
 
-/// The share of the pixels of the screen dump `ppm` that show `colour`,
-/// or None when it is not a PPM image.
-pub fn colour_share(ppm: &[u8], colour: [u8; 3]) -> Option<f64> {
-    let pixels = scenario::ppm_pixels(ppm)?;
+/// The share of the pixels of the last `part` of the screen dump `ppm`,
+/// its bottom rows, or all of it for 1, that show `colour`, or None when
+/// it is not a PPM image.
+fn colour_share(ppm: &[u8], colour: [u8; 3], part: f64) -> Option<f64> {
+    let all = scenario::ppm_pixels(ppm)?;
+    let pixels = &all[all.len() - (all.len() as f64 * part) as usize..];
     if pixels.is_empty() {
         return Some(0.0);
     }
@@ -88,9 +97,23 @@ impl Screen<'_> {
         wanted: &dyn Fn(f64) -> bool,
         what: &str,
     ) -> Result<()> {
+        self.until_below(qemu, colour, 1.0, wanted, what)
+    }
+
+    /// As `until`, for the share of `colour` on the last `part` of the
+    /// screen, its bottom rows.
+    fn until_below(
+        &mut self,
+        qemu: &mut std::process::Child,
+        colour: [u8; 3],
+        part: f64,
+        wanted: &dyn Fn(f64) -> bool,
+        what: &str,
+    ) -> Result<()> {
         loop {
             let ppm = scenario::screen_dump(self.socket, self.dump)?;
-            let share = colour_share(&ppm, colour).context("the screen dump is not a PPM image")?;
+            let share =
+                colour_share(&ppm, colour, part).context("the screen dump is not a PPM image")?;
             if wanted(share) {
                 return Ok(());
             }
@@ -144,6 +167,8 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         scenario::wait_for_line(&log, DESKTOP_STARTED, &mut qemu, deadline)?;
         let what = "dee's desktop showed";
         screen.until(&mut qemu, WALLPAPER, &covered, what)?;
+        let what = "the taskbar's haze showed";
+        screen.until_below(&mut qemu, HAZE, HAZE_PART, &covered, what)?;
         scenario::wait_for_line(&log, CANCELLED, &mut qemu, deadline)?;
         let serial = scenario::wait_for_line(&log, SHELL_EXITED, &mut qemu, deadline)?;
         let exited = serial
@@ -189,8 +214,9 @@ mod tests {
             [40, 90, 160],
             [200, 40, 120],
         ]);
-        assert_eq!(colour_share(&screen, COLOUR), Some(0.75));
-        assert_eq!(colour_share(&screen, WALLPAPER), Some(0.25));
-        assert_eq!(colour_share(b"not a picture", COLOUR), None);
+        assert_eq!(colour_share(&screen, COLOUR, 1.0), Some(0.75));
+        assert_eq!(colour_share(&screen, WALLPAPER, 1.0), Some(0.25));
+        assert_eq!(colour_share(b"not a picture", COLOUR, 1.0), None);
+        assert_eq!(colour_share(&screen, COLOUR, 0.5), Some(0.5));
     }
 }

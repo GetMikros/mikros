@@ -13,7 +13,8 @@
  * permission whose question the compositor cancels: it exits with 0 when
  * the connection is refused and with 70 when it is not. With
  * `--wallpaper [file]`, as that app's desktop part, it hands the
- * compositor a wallpaper (wallpaper.c).
+ * compositor a wallpaper (wallpaper.c), and with `--panel`, as its
+ * taskbar part, it shows a panel of haze (panel.c).
  *
  * It exits with the number of the step that failed, if one does. */
 
@@ -322,6 +323,7 @@ static int control(void)
 }
 
 int wallpaper(const char *file);
+int panel(void);
 
 int main(int argc, char **argv)
 {
@@ -329,6 +331,8 @@ int main(int argc, char **argv)
 		return control();
 	if (argc >= 2 && strcmp(argv[1], "--wallpaper") == 0)
 		return wallpaper(argc >= 3 ? argv[2] : NULL);
+	if (argc == 2 && strcmp(argv[1], "--panel") == 0)
+		return panel();
 	struct state s = {0};
 	mikros_handle_t channel = mikros_take_startup_handle(ROLE_USER, WAYLAND_ID);
 	int fd = channel == 0 ? -1 : mikros_fd_from_handle(channel, KIND_CHANNEL);

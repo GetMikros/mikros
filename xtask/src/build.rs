@@ -2598,6 +2598,7 @@ fn greeter_probe(
         (own.join("mikros-buffer-v1.xml"), "mikros-buffer-v1"),
         (staged.join("xdg-activation-v1.xml"), "xdg-activation-v1"),
         (own.join("mikros-shell-v1.xml"), "mikros-shell-v1"),
+        (own.join("mikros-material-v1.xml"), "mikros-material-v1"),
     ] {
         let source = dir.join(format!("{stem}-protocol.c"));
         for (mode, out) in [
@@ -2633,6 +2634,7 @@ fn greeter_probe(
     let mut sources = vec![
         "user/tests/greeter-probe/greeter.c",
         "user/tests/greeter-probe/wallpaper.c",
+        "user/tests/greeter-probe/panel.c",
     ];
     sources.extend(code.iter().map(String::as_str));
     let program = c_build(name, &sources, Linking::Dynamic, &args)?;
@@ -2648,8 +2650,9 @@ fn greeter_probe(
         files: vec![(name.to_owned(), program.clone(), true)],
     };
     // The shell of the desktop run's user session: its desktop part hands
-    // the compositor a wallpaper of a test colour, and its taskbar part
-    // connects to the service manager's Control and so asks a question.
+    // the compositor a wallpaper of a test colour, its taskbar part shows
+    // a panel of haze, and its start-menu part connects to the service
+    // manager's Control and so asks a question.
     let shell = crate::system_apps::SystemApp {
         id: "system.mikros.shell_probe",
         version: "1.0.0",
@@ -2659,6 +2662,8 @@ fn greeter_probe(
         shell_parts: "  - roles: [desktop]\n    executable: greeter-probe\n    \
                       arguments: [\"--wallpaper\"]\n  \
                       - roles: [taskbar]\n    executable: greeter-probe\n    \
+                      arguments: [\"--panel\"]\n  \
+                      - roles: [start-menu]\n    executable: greeter-probe\n    \
                       arguments: [\"--control\"]\n",
         files: vec![(name.to_owned(), program, true)],
     };
