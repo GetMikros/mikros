@@ -337,6 +337,10 @@ impl Server {
                         .map(|p| p.timeline),
                 );
             }
+            for w in &s.waiting {
+                buffers.insert(w.buffer);
+                timelines.extend([w.acquire].iter().chain(&w.release).map(|p| p.timeline));
+            }
         }
         timelines.extend(self.releases.iter().map(|p| p.timeline));
         self.imported_buffers.retain(|b| {
@@ -359,6 +363,7 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Role;
     use super::super::surface::tests::with_surface;
     use super::super::tests::TestClient;
     use super::*;
@@ -444,23 +449,49 @@ mod tests {
     }
 
     #[test]
-    fn shows_buffers_with_their_points_and_releases_the_last() {
+    fn shows_buffers_once_their_acquire_points_are_reached() {
         let mut server = Server::new();
         let client = with_sync(&mut server);
+        server.surfaces.values_mut().next().unwrap().role = Role::Toplevel;
         points(&mut server, &client, 1, 2);
         attach(&mut server, &client, 6);
         assert_eq!(client.error(&mut server), None);
-        let surface = server.surfaces().next().unwrap().1;
         let (buffer, timeline) = (1, 2);
+        let point = |value| Point { timeline, value };
+        // The buffer waits for its acquire point; until a frame finds it
+        // reached, the surface shows nothing, and nothing changed.
+        assert_eq!(server.awaited(), [point(1)]);
+        server.settle(|_| false);
+        assert_eq!(server.surfaces().next().unwrap().1.current.buffer, None);
+        assert!(server.take_damage().is_empty());
+        server.settle(|p| p.value <= 1);
+        let surface = server.surfaces().next().unwrap().1;
         assert_eq!(surface.current.buffer, Some(buffer));
-        assert_eq!(surface.current.release, Some(Point { timeline, value: 2 }));
+        assert_eq!(surface.current.release, Some(point(2)));
+        assert!(server.awaited().is_empty());
         assert!(server.take_releases().is_empty());
-        // A second buffer: the first one's release point is due, and the
-        // first buffer, once its object is gone, is forgotten.
+        assert!(!server.take_damage().is_empty());
+        // Two more buffers wait, and the first stays shown; once both
+        // points are reached, the newest is shown, and the release points
+        // of the two before it are due.
         client.send(&mut server, 5, 0, token(9, 42));
         points(&mut server, &client, 3, 4);
         attach(&mut server, &client, 9);
-        assert_eq!(server.take_releases(), [Point { timeline, value: 2 }]);
+        client.send(&mut server, 5, 0, token(10, 43));
+        points(&mut server, &client, 5, 6);
+        attach(&mut server, &client, 10);
+        assert_eq!(
+            server.surfaces().next().unwrap().1.current.buffer,
+            Some(buffer)
+        );
+        assert!(server.take_releases().is_empty());
+        server.settle(|p| p.value <= 5);
+        assert_eq!(server.take_releases(), [point(2), point(4)]);
+        assert_eq!(
+            server.surfaces().next().unwrap().1.current.release,
+            Some(point(6))
+        );
+        // The first buffer, once its object is gone, is forgotten.
         client.send(&mut server, 6, 0, vec![]);
         assert_eq!(client.imports.borrow().dropped_buffers, [buffer]);
         assert_eq!(client.error(&mut server), None);

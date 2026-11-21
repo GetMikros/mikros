@@ -25,9 +25,10 @@ fn on_output(rect: Rect, origin: (i32, i32), size: (i32, i32)) -> Option<Rect> {
 impl Server {
     /// Records the damage of a commit of `surface`, in its own
     /// coordinates: what its client damaged, or all of it for a new
-    /// buffer without damage.
-    pub(super) fn commit_damage(&mut self, surface: SurfaceId, new_buffer: bool) {
-        let Some(s) = self.surfaces.get(&surface) else {
+    /// buffer without damage. The damage of a commit whose buffer `waits`
+    /// for its acquire point goes with that buffer.
+    pub(super) fn commit_damage(&mut self, surface: SurfaceId, new_buffer: bool, waits: bool) {
+        let Some(s) = self.surfaces.get_mut(&surface) else {
             return;
         };
         let state = &s.current;
@@ -45,7 +46,9 @@ impl Server {
                 height: i32::MAX,
             });
         }
-        if !rects.is_empty() {
+        if let (true, Some(waiting)) = (waits, s.waiting.last_mut()) {
+            waiting.damage.extend(rects);
+        } else if !rects.is_empty() {
             self.committed.entry(surface).or_default().extend(rects);
         }
     }
@@ -152,7 +155,7 @@ mod tests {
         let state = &mut server.surfaces.get_mut(&id).unwrap().current;
         state.damage.clear();
         state.buffer_damage.clear();
-        server.commit_damage(id, true);
+        server.commit_damage(id, true, false);
         assert_eq!(server.take_damage(), [rect(0, 0, 100, 50)]);
     }
 }

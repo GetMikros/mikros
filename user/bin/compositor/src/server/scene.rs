@@ -3,14 +3,13 @@
 //! their edges, each with its buffer once it has one, and the areas of
 //! its materials.
 
-use super::{BufferId, Point, Rect, Role, Server, SurfaceId};
+use super::{BufferId, Rect, Role, Server, SurfaceId};
 
 /// A surface that a frame shows.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Shown {
     pub surface: SurfaceId,
     pub buffer: BufferId,
-    pub acquire: Option<Point>,
     pub x: i32,
     pub y: i32,
     pub haze: Vec<Rect>,
@@ -37,7 +36,6 @@ impl Server {
             let shown = Shown {
                 surface: id,
                 buffer,
-                acquire: s.current.acquire,
                 x,
                 y,
                 haze: s.current.materials.haze.rects().to_vec(),
@@ -72,6 +70,7 @@ mod tests {
                 buffer,
                 ..SurfaceState::default()
             },
+            waiting: Vec::new(),
             pending_frames: Vec::new(),
             frames: Vec::new(),
             xdg: None,

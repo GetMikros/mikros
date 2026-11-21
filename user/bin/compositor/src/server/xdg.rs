@@ -99,7 +99,8 @@ impl Server {
                 if s.role != Role::None || s.xdg.is_some() {
                     return Err(role_error("the surface has a role"));
                 }
-                if s.current.buffer.is_some() || s.pending.buffer.is_some() {
+                let waits = !s.waiting.is_empty();
+                if s.current.buffer.is_some() || s.pending.buffer.is_some() || waits {
                     return Err(ProtocolError::new(
                         request.object,
                         xdg_wm_base::error::INVALID_SURFACE_STATE,

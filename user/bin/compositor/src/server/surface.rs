@@ -84,7 +84,11 @@ pub struct Surface {
     pub(super) attached: bool,
     /// The surface's mikros_surface_sync_v1 object, while it has one.
     pub sync: Option<ObjectId>,
+    /// The committed state, whose buffer is the one that frames show.
     pub current: SurfaceState,
+    /// The buffers that commits attached after it with an acquire point
+    /// that no frame found reached yet, oldest first.
+    pub(super) waiting: Vec<Waiting>,
     /// The frame callbacks of the pending state, and those of the
     /// committed state, which the next frame answers.
     pub(super) pending_frames: Vec<ObjectId>,
@@ -95,6 +99,30 @@ pub struct Surface {
     pub panel: Option<super::panel::PanelState>,
     /// Its mikros_surface_material_v1 object, while it has one.
     pub material: Option<ObjectId>,
+}
+
+/// A buffer that a commit attached with its acquire point, which frames
+/// show once a frame finds that point reached, and until then the one
+/// before it (MIKSPEC-0074.R14): its release point, and the damage of its
+/// commit in surface coordinates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Waiting {
+    pub buffer: BufferId,
+    pub acquire: Point,
+    pub release: Option<Point>,
+    pub damage: Vec<Rect>,
+}
+
+/// The most buffers that wait for their acquire points on a surface; a
+/// commit past them gives up the oldest, whose damage the next keeps.
+const WAITING_MAX: usize = 16;
+
+impl Surface {
+    /// The release points of the buffers that it shows and that wait.
+    pub(super) fn releases(&self) -> impl Iterator<Item = Point> + '_ {
+        let waiting = self.waiting.iter().filter_map(|w| w.release);
+        self.current.release.into_iter().chain(waiting)
+    }
 }
 
 impl Server {
@@ -158,6 +186,7 @@ impl Server {
                         attached: false,
                         sync: None,
                         current: SurfaceState::default(),
+                        waiting: Vec::new(),
                         pending_frames: Vec::new(),
                         frames: Vec::new(),
                         xdg: None,
@@ -251,7 +280,7 @@ impl Server {
         match decoded {
             wl_surface::Request::Destroy => {
                 if let Some(surface) = self.surfaces.remove(&id) {
-                    self.releases.extend(surface.current.release);
+                    self.releases.extend(surface.releases());
                 }
                 self.client_mut(request).destroy(request.object);
                 self.collect(imports);
@@ -375,14 +404,37 @@ impl Server {
         // A new buffer, or new areas of its materials, change what the
         // whole surface shows when its client damaged nothing.
         let changed = surface.attached || pending.materials != current.materials;
-        // A buffer's points are those of the commit that attached it: the
-        // compositor no longer reads what the last commit attached.
+        // A buffer's points are those of the commit that attached it. A
+        // buffer with an acquire point waits for a frame that finds it
+        // reached; any other replaces what the surface shows at once, and
+        // what waits: the compositor no longer reads those.
+        let mut waits = false;
         if surface.attached {
-            self.releases.extend(current.release.take());
-            current.buffer = pending.buffer;
-            current.acquire = pending.acquire.take();
-            current.release = pending.release.take();
             surface.attached = false;
+            match (pending.buffer, pending.acquire.take()) {
+                (Some(buffer), Some(acquire)) => {
+                    if surface.waiting.len() >= WAITING_MAX {
+                        let oldest = surface.waiting.remove(0);
+                        self.releases.extend(oldest.release);
+                        surface.waiting[0].damage.extend(oldest.damage);
+                    }
+                    surface.waiting.push(Waiting {
+                        buffer,
+                        acquire,
+                        release: pending.release.take(),
+                        damage: Vec::new(),
+                    });
+                    waits = true;
+                }
+                (buffer, _) => {
+                    self.releases.extend(current.release.take());
+                    let waited = surface.waiting.drain(..);
+                    self.releases.extend(waited.filter_map(|w| w.release));
+                    current.buffer = buffer;
+                    current.acquire = None;
+                    current.release = pending.release.take();
+                }
+            }
         }
         pending.acquire = None;
         pending.release = None;
@@ -398,9 +450,39 @@ impl Server {
         surface.frames.extend(frames);
         self.committed(request, id);
         self.panel_committed(id);
-        self.commit_damage(id, changed);
+        self.commit_damage(id, changed, waits);
         self.collect(imports);
         Ok(())
+    }
+
+    /// Shows, on each surface, the newest of the buffers that wait whose
+    /// acquire point `reached` says is reached, with the damage of its
+    /// commit and those before it, and gives up the buffers that it
+    /// replaces.
+    pub fn settle(&mut self, reached: impl Fn(Point) -> bool) {
+        for (&id, s) in self.surfaces.iter_mut() {
+            let Some(newest) = s.waiting.iter().rposition(|w| reached(w.acquire)) else {
+                continue;
+            };
+            let settled: Vec<Waiting> = s.waiting.drain(..=newest).collect();
+            self.releases.extend(s.current.release.take());
+            let damage = self.committed.entry(id).or_default();
+            for w in &settled[..newest] {
+                self.releases.extend(w.release);
+                damage.extend(&w.damage);
+            }
+            let shown = &settled[newest];
+            damage.extend(&shown.damage);
+            s.current.buffer = Some(shown.buffer);
+            s.current.acquire = Some(shown.acquire);
+            s.current.release = shown.release;
+        }
+    }
+
+    /// The acquire points that buffers wait for.
+    pub fn awaited(&self) -> Vec<Point> {
+        let waiting = self.surfaces.values().flat_map(|s| &s.waiting);
+        waiting.map(|w| w.acquire).collect()
     }
 
     /// Answers the frame callbacks of every committed state, once the

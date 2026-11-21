@@ -3,10 +3,12 @@
 //! the toplevels of its clients on the display, and serves each client's
 //! Wayland channel: a channel message's requests go to the server, and the
 //! events they cause go back once they are handled. A frame is drawn
-//! whenever a surface commits: once each shown buffer's acquire point is
-//! reached, the wallpaper and the buffers are drawn into an output image,
-//! the release points of buffers that no surface shows any more are
-//! reached, and the image is shown.
+//! whenever something changed, and whenever an acquire point that a
+//! buffer waits for is reached: each surface shows the newest buffer
+//! whose acquire point is reached when the frame starts, which no frame
+//! waits for (MIKSPEC-0074.R14). The wallpaper and the buffers are drawn
+//! into an output image, the release points of buffers that no surface
+//! shows any more are reached, and the image is shown.
 
 mod host;
 mod imports;
@@ -21,7 +23,7 @@ mod session;
 mod themes;
 
 use crate::haze;
-use crate::server::{ClientId, Cursor, Rect, Server, shape_name};
+use crate::server::{ClientId, Cursor, Point, Rect, Server, shape_name};
 use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
 use imports::{Importer, Store};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
@@ -36,8 +38,9 @@ use output::Output;
 use render::{Haze, Layer, Look, Renderer, Under};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::os::mikros::startup;
+use std::pin::pin;
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 use std::time::Duration;
@@ -109,6 +112,9 @@ pub struct Compositor {
     /// that the last frame drew, with where (MIKSPEC-0066.R17).
     damaged_all: Cell<bool>,
     drawn_cursor: Cell<Option<(Cursor, Rect)>>,
+    /// The acquire points that a task watches, with what ends the watch
+    /// (`watch_acquires`).
+    acquiring: RefCell<BTreeMap<(crate::server::TimelineId, u64), Rc<Notify>>>,
     /// The keymap that the keyboards share, once one came, and the
     /// layout it was compiled from (`keys`).
     keymap: RefCell<Option<mikros_xkb::Keymap>>,
@@ -120,6 +126,14 @@ fn take(id: u32) -> Option<OwnedHandle> {
     let handle = startup::take_handle(USER, id)?;
     // SAFETY: the handle is ours, and is handed over once.
     Some(unsafe { OwnedHandle::from_raw(handle.into_raw_handle()) })
+}
+
+/// The value that the kernel timeline `timeline` has reached.
+fn timeline_value(timeline: u32) -> Option<u64> {
+    let mut value = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { mikros_rt::sys::timeline_get(timeline, &mut value) };
+    (status == mikros_rt::OK).then_some(value)
 }
 
 fn duplicate(raw: u32) -> Option<OwnedHandle> {
@@ -284,6 +298,57 @@ impl Compositor {
         }
     }
 
+    /// Watches each acquire point that a buffer waits for, once, on a
+    /// duplicate of its timeline's handle, and wakes the frame loop once
+    /// it is reached. The watch of a point that no buffer waits for any
+    /// more ends.
+    fn watch_acquires(self: &Rc<Self>) {
+        let awaited: std::collections::BTreeSet<_> = self
+            .server
+            .borrow()
+            .awaited()
+            .into_iter()
+            .map(|p| (p.timeline, p.value))
+            .collect();
+        self.acquiring.borrow_mut().retain(|key, ended| {
+            let keep = awaited.contains(key);
+            if !keep {
+                ended.notify();
+            }
+            keep
+        });
+        for key @ (timeline, value) in awaited {
+            if self.acquiring.borrow().contains_key(&key) {
+                continue;
+            }
+            let handle = self.store.borrow().timeline(timeline);
+            let Some(handle) = handle.and_then(duplicate) else {
+                continue;
+            };
+            let ended = Rc::new(Notify::default());
+            self.acquiring.borrow_mut().insert(key, ended.clone());
+            let me = self.clone();
+            self.spawner.spawn(async move {
+                let mut reached = pin!(me.reactor.timeline(handle.raw(), value));
+                let mut ended = pin!(ended.changed());
+                let woken = poll_fn(|cx| {
+                    if reached.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(true);
+                    }
+                    match ended.as_mut().poll(cx) {
+                        Poll::Ready(()) => Poll::Ready(false),
+                        Poll::Pending => Poll::Pending,
+                    }
+                })
+                .await;
+                if woken {
+                    me.acquiring.borrow_mut().remove(&key);
+                    me.changed.notify();
+                }
+            });
+        }
+    }
+
     /// Draws and shows a frame whenever something changed.
     async fn frames(self: Rc<Self>) {
         loop {
@@ -297,8 +362,20 @@ impl Compositor {
                 server.refocus();
                 server.pointer_frame();
             }
+            // Each surface shows the newest of its buffers whose acquire
+            // point is reached now, and the frame loop wakes when one of
+            // those that buffers still wait for is reached.
+            {
+                let store = self.store.borrow();
+                let reached = |point: Point| match store.timeline(point.timeline) {
+                    Some(timeline) => timeline_value(timeline).is_none_or(|v| v >= point.value),
+                    None => true,
+                };
+                self.server.borrow_mut().settle(reached);
+            }
+            self.watch_acquires();
             // What the frame shows, and the cursor of the client under the
-            // pointer, each buffer once its acquire point is reached.
+            // pointer.
             let shown = self.server.borrow().shown();
             let (cursor, at) = {
                 let server = self.server.borrow();
@@ -313,19 +390,9 @@ impl Compositor {
                     .borrow()
                     .surfaces()
                     .find(|(id, _)| **id == surface)
-                    .and_then(|(_, s)| Some((s.current.buffer?, s.current.acquire, hotspot))),
+                    .and_then(|(_, s)| Some((s.current.buffer?, hotspot))),
                 _ => None,
             };
-            let acquires = shown.iter().map(|s| s.acquire);
-            for point in acquires.chain(cursor_surface.map(|c| c.1)) {
-                let Some(point) = point else {
-                    continue;
-                };
-                let timeline = self.store.borrow().timeline(point.timeline);
-                if let Some(timeline) = timeline {
-                    let _ = self.reactor.timeline(timeline, point.value).await;
-                }
-            }
             // What changed: the server's damage, the cursor's old and new
             // area when it moved, changed or is animated, or everything
             // (MIKSPEC-0066.R17).
@@ -354,7 +421,7 @@ impl Compositor {
                             next_cursor = next;
                             (image.pixels(), corner, (image.width, image.height))
                         }),
-                    (Cursor::Surface { .. }, Some((buffer, _, (hx, hy)))) => store
+                    (Cursor::Surface { .. }, Some((buffer, (hx, hy)))) => store
                         .buffers
                         .get(&buffer)
                         .map(|b| (b.pixels(), (at.0 - hx, at.1 - hy), (b.width, b.height))),
@@ -653,6 +720,7 @@ pub fn main() {
         pointer: RefCell::new(pointer::Pointer::new()),
         damaged_all: Cell::new(false),
         drawn_cursor: Cell::new(None),
+        acquiring: RefCell::default(),
         keymap: RefCell::new(None),
         layout: RefCell::new(None),
     });

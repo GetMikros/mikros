@@ -315,7 +315,7 @@ impl Server {
         let releases = &mut self.releases;
         self.surfaces.retain(|_, s| {
             if s.client == client {
-                releases.extend(s.current.release);
+                releases.extend(s.releases());
             }
             s.client != client
         });
