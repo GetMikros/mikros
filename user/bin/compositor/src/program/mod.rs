@@ -23,6 +23,7 @@ mod session;
 mod themes;
 
 use crate::haze;
+use crate::restarts::{LIMIT, Restarts};
 use crate::server::{ClientId, Cursor, Point, Rect, Server, shape_name};
 use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
 use imports::{Importer, Store};
@@ -40,7 +41,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::future::{Future, poll_fn};
 use std::os::mikros::startup;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 use std::time::Duration;
@@ -619,10 +620,14 @@ impl Compositor {
 
 impl Compositor {
     /// Starts the greeter, the one part of greeter mode, with the `Login`
-    /// channel, and serves its Wayland connection.
+    /// channel, and serves its Wayland connection, starting it again when
+    /// it exits.
     async fn greet(self: Rc<Self>, login: OwnedHandle) {
         match parts::find("greeter") {
-            Ok(part) => self.run_part(part, Some(login), "the greeter".into()).await,
+            Ok(part) => {
+                self.keep_part(part, Some(login), "the greeter".into())
+                    .await
+            }
             Err(e) => mikros_rt::log!(Error, "compositor: no greeter: {e:?}"),
         }
     }
@@ -648,36 +653,89 @@ impl Compositor {
             };
             for part in found {
                 let name = format!("the part {} of {package}", part.roles.join(" "));
-                if let Some(serving) = self.clone().start_part(part, None, name).await {
-                    self.spawner.spawn(serving);
-                }
+                let first = self.clone().start_part(&part, None, &name).await;
+                self.spawner
+                    .spawn(self.clone().keep_started(part, None, name, first));
             }
         }
     }
 
     /// Starts `part`, called `name` in the log, with `login` in greeter
-    /// mode, logs how it exits, and serves its Wayland connection.
-    async fn run_part(self: Rc<Self>, part: parts::Part, login: Option<OwnedHandle>, name: String) {
-        if let Some(serving) = self.start_part(part, login, name).await {
-            serving.await;
-        }
-    }
-
-    /// Starts `part` as `run_part` does, and returns the serving of its
-    /// Wayland connection once it has started.
-    async fn start_part(
+    /// mode, and keeps it running (MIKSPEC-0075.R21).
+    async fn keep_part(
         self: Rc<Self>,
         part: parts::Part,
         login: Option<OwnedHandle>,
         name: String,
-    ) -> Option<impl std::future::Future<Output = ()> + 'static> {
+    ) {
+        let first = self.clone().start_part(&part, login.as_ref(), &name).await;
+        self.keep_started(part, login, name, first).await;
+    }
+
+    /// Serves `part`, which `first` started unless its start failed, and
+    /// starts it again each time its component exits, at most five times
+    /// within 60 seconds; after that its roles stay empty, and windows,
+    /// focus and the shortcuts that need no component keep working.
+    async fn keep_started(
+        self: Rc<Self>,
+        part: parts::Part,
+        login: Option<OwnedHandle>,
+        name: String,
+        first: Option<Started>,
+    ) {
+        let mut restarts = Restarts::default();
+        let mut started = first;
+        loop {
+            if let Some(Started { serving, exited }) = started.take() {
+                let ended = Rc::new(Notify::default());
+                let signal = ended.clone();
+                self.spawner.spawn(async move {
+                    serving.await;
+                    signal.notify();
+                });
+                exited.await;
+                // Its connection ends with it, which frees its roles for
+                // the part that starts next.
+                ended.changed().await;
+            }
+            if !restarts.allow(mikros_rt::objects::now()) {
+                mikros_rt::log!(
+                    Error,
+                    "compositor: {name} stopped more than {LIMIT} times within a minute; leaving its roles empty"
+                );
+                return;
+            }
+            mikros_rt::log!(Info, "compositor: starting {name} again");
+            started = self.clone().start_part(&part, login.as_ref(), &name).await;
+        }
+    }
+
+    /// Starts `part`, called `name` in the log, with a copy of `login` in
+    /// greeter mode, and returns the serving of its Wayland connection and
+    /// the wait for its exit, which logs it, once it has started.
+    async fn start_part(
+        self: Rc<Self>,
+        part: &parts::Part,
+        login: Option<&OwnedHandle>,
+        name: &str,
+    ) -> Option<Started> {
         let Ok((ours, theirs)) = mikros_rt::midl::channel_create() else {
             return None;
         };
         // SAFETY: the kernel just made both ends for us.
         let (ours, theirs) =
             unsafe { (OwnedHandle::from_raw(ours), OwnedHandle::from_raw(theirs)) };
-        let pid = match parts::start(&self.launcher, &part, theirs, login).await {
+        let login = match login {
+            Some(login) => match duplicate(login.raw()) {
+                Some(copy) => Some(copy),
+                None => {
+                    mikros_rt::log!(Error, "compositor: no copy of the login channel for {name}");
+                    return None;
+                }
+            },
+            None => None,
+        };
+        let pid = match parts::start(&self.launcher, part, theirs, login).await {
             Ok(pid) => pid,
             Err(e) => {
                 mikros_rt::log!(Error, "compositor: starting {name}: {e}");
@@ -686,15 +744,29 @@ impl Compositor {
         };
         mikros_rt::log!(Info, "compositor: started {name} as pid {pid}");
         let launcher = self.launcher.clone();
-        self.spawner.spawn(async move {
+        let name = name.to_owned();
+        let exited = async move {
             match parts::exited(&launcher, pid).await {
                 Ok(0) => mikros_rt::log!(Info, "compositor: {name} exited"),
                 Ok(code) => mikros_rt::log!(Error, "compositor: {name} exited with {code}"),
                 Err(e) => mikros_rt::log!(Error, "compositor: waiting for {name}: {e}"),
             }
-        });
-        Some(self.serve_component(ours, part.roles, part.app_id))
+        };
+        let serving = self
+            .clone()
+            .serve_component(ours, part.roles.clone(), part.app_id.clone());
+        Some(Started {
+            serving: Box::pin(serving),
+            exited: Box::pin(exited),
+        })
     }
+}
+
+/// A part that has started: the serving of its Wayland connection, which
+/// ends with the connection, and the wait for its exit.
+struct Started {
+    serving: Pin<Box<dyn Future<Output = ()>>>,
+    exited: Pin<Box<dyn Future<Output = ()>>>,
 }
 
 /// The device name of the render device that clients should allocate

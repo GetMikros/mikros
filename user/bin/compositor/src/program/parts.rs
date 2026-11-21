@@ -32,7 +32,7 @@ const SAME_RIGHTS: u32 = 1 << 31;
 const FOREVER: i64 = i64::MAX;
 
 /// A part of the shell: what to start, for which roles.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Part {
     /// The app ID of its package, which is its process's.
     pub app_id: String,

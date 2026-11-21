@@ -17,6 +17,7 @@ mod haze;
 mod keyboard;
 #[cfg(target_os = "mikros")]
 mod program;
+mod restarts;
 mod server;
 mod theme;
 mod wayland;
