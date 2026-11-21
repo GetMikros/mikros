@@ -140,9 +140,10 @@ fn source(port: &crate::ports::Port) -> Result<PathBuf> {
 
 /// The files of the wayland-protocols port that the compositor serves,
 /// relative to its source.
-const PROTOCOLS: [&str; 2] = [
+const PROTOCOLS: [&str; 3] = [
     "stable/xdg-shell/xdg-shell.xml",
     "staging/xdg-activation/xdg-activation-v1.xml",
+    "staging/cursor-shape/cursor-shape-v1.xml",
 ];
 
 /// Puts the protocol files that the compositor serves in

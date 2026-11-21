@@ -8,6 +8,7 @@
 
 mod area;
 mod buffer;
+mod cursor_shape;
 mod material;
 mod panel;
 mod scene;
@@ -24,7 +25,8 @@ pub use surface::{Rect, Role, Surface, SurfaceId};
 
 use crate::wayland::protocols::{
     mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, mikros_theme_v1, wl_callback,
-    wl_compositor, wl_display, wl_output, wl_registry, wl_seat, xdg_wm_base,
+    wl_compositor, wl_display, wl_output, wl_registry, wl_seat, wp_cursor_shape_manager_v1,
+    xdg_wm_base,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -64,6 +66,8 @@ pub enum Resource {
     Panel(SurfaceId),
     Seat,
     Pointer,
+    CursorShapes,
+    CursorShape,
 }
 
 /// An object of a client.
@@ -249,6 +253,11 @@ impl Server {
         server.add_global(&mikros_material_v1::INTERFACE, 1, Resource::Materials);
         server.add_global(&mikros_theme_v1::INTERFACE, 1, Resource::Theme);
         server.add_global(&wl_seat::INTERFACE, seat::SEAT_VERSION, Resource::Seat);
+        server.add_global(
+            &wp_cursor_shape_manager_v1::INTERFACE,
+            cursor_shape::VERSION,
+            Resource::CursorShapes,
+        );
         server
     }
 
@@ -421,6 +430,9 @@ impl Server {
             }
             Resource::Panel(id) => self.panel_request(request, id, args)?,
             Resource::Seat | Resource::Pointer => self.seat_request(request, resource, args)?,
+            Resource::CursorShapes | Resource::CursorShape => {
+                self.cursor_shape_request(request, resource, args)?
+            }
             Resource::Theme => {
                 return Err(ProtocolError::invalid_method(
                     header.sender,
@@ -698,7 +710,8 @@ pub(crate) mod tests {
                 &Arg::String(Some("wl_output".into())),
                 &Arg::String(Some("mikros_material_v1".into())),
                 &Arg::String(Some("mikros_theme_v1".into())),
-                &Arg::String(Some("wl_seat".into()))
+                &Arg::String(Some("wl_seat".into())),
+                &Arg::String(Some("wp_cursor_shape_manager_v1".into()))
             ]
         );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);
