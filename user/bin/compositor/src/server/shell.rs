@@ -6,17 +6,14 @@
 //! pixels as the output's wallpaper (MIKSPEC-0075.R22) and then releases
 //! the buffer, the second makes a panel (MIKSPEC-0076.R3) of a surface
 //! without a role. The others end the component's connection with
-//! wl_display's `implementation` error until they are served.
+//! wl_display's `implementation` error until they are served. The shell's
+//! own errors are those of MIKSPEC-0076.R19.
 
 use super::{Imports, ProtocolError, Request, Resource, Server};
 use crate::wayland::protocols::{
     mikros_panel_v1, mikros_shell_v1, wl_buffer, wl_display, wl_output, wl_surface,
 };
 use crate::wayland::wire::{Arg, DecodeError};
-
-/// The protocol error of a request of the shell global that its
-/// component may not make, for which the protocol file defines no code.
-pub(super) const SHELL_ERROR: u32 = 0;
 
 impl Server {
     /// Sends the description of the output to `output`, a new object of
@@ -69,11 +66,13 @@ impl Server {
             mikros_shell_v1::Request::decode(request.opcode, args).map_err(|e: DecodeError| {
                 ProtocolError::invalid_method(request.object, format!("{e:?}"))
             })?;
-        let error = |message: &str| ProtocolError::new(request.object, SHELL_ERROR, message);
+        let forbidden = |message: &str| {
+            ProtocolError::new(request.object, mikros_shell_v1::error::FORBIDDEN, message)
+        };
         match decoded {
             mikros_shell_v1::Request::SetWallpaper { output, buffer } => {
                 if !self.client_mut(request).has_role("desktop") {
-                    return Err(error("set_wallpaper needs the role desktop"));
+                    return Err(forbidden("set_wallpaper needs the role desktop"));
                 }
                 let c = self.client_mut(request);
                 c.resource(request.object, output, &wl_output::INTERFACE)?;
@@ -82,8 +81,13 @@ impl Server {
                 else {
                     unreachable!("buffers are wl_buffer objects");
                 };
+                // The compositor's own memory for the copy may run out.
                 if !imports.set_wallpaper(id) {
-                    return Err(error("the wallpaper's buffer cannot be copied"));
+                    return Err(ProtocolError::new(
+                        request.object,
+                        wl_display::error::NO_MEMORY,
+                        "the wallpaper's buffer cannot be copied",
+                    ));
                 }
                 wl_buffer::send_release(&mut self.client_mut(request).out, buffer);
                 Ok(())
@@ -96,7 +100,7 @@ impl Server {
             } => {
                 let c = self.client_mut(request);
                 if !c.has_role("menubar") && !c.has_role("taskbar") {
-                    return Err(error("get_panel needs the role menubar or taskbar"));
+                    return Err(forbidden("get_panel needs the role menubar or taskbar"));
                 }
                 c.resource(request.object, output, &wl_output::INTERFACE)?;
                 let Resource::Surface(surface) =
@@ -211,7 +215,10 @@ mod tests {
         let taskbar = component(&mut server, &["taskbar"]);
         globals(&mut server, &taskbar);
         set_wallpaper(&mut server, &taskbar);
-        assert_eq!(taskbar.error(&mut server), Some(SHELL_ERROR));
+        assert_eq!(
+            taskbar.error(&mut server),
+            Some(mikros_shell_v1::error::FORBIDDEN)
+        );
         assert!(taskbar.imports.borrow().wallpapers.is_empty());
     }
 }

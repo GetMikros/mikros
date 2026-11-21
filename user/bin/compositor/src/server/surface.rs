@@ -91,6 +91,8 @@ pub struct Surface {
     pub xdg: Option<super::xdg::XdgState>,
     /// The state of its panel, while it has one.
     pub panel: Option<super::panel::PanelState>,
+    /// Its mikros_surface_material_v1 object, while it has one.
+    pub material: Option<ObjectId>,
 }
 
 impl Server {
@@ -158,6 +160,7 @@ impl Server {
                         frames: Vec::new(),
                         xdg: None,
                         panel: None,
+                        material: None,
                     },
                 );
             }
@@ -362,6 +365,7 @@ impl Server {
         id: SurfaceId,
     ) -> Result<(), ProtocolError> {
         self.check_commit(request, id)?;
+        self.check_panel_commit(id)?;
         self.check_points(id)?;
         let surface = self.surfaces.get_mut(&id).expect("a checked surface");
         let pending = &mut surface.pending;

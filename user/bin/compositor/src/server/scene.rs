@@ -76,6 +76,7 @@ mod tests {
             frames: Vec::new(),
             xdg: None,
             panel,
+            material: None,
         }
     }
 

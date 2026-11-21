@@ -2,7 +2,8 @@
 //! which the compositor draws a material (MIKSPEC-0066.R18). Each
 //! `set_region` replaces the area of its material in the surface's pending
 //! state and cuts it out of the other material's area; the next commit
-//! applies both.
+//! applies both. A surface has one material object at a time, and the
+//! errors are those of MIKSPEC-0076.R22.
 
 use super::area::Area;
 use super::{ProtocolError, Request, Resource, Server, SurfaceId};
@@ -10,10 +11,6 @@ use crate::wayland::protocols::{
     mikros_material_v1, mikros_surface_material_v1, wl_region, wl_surface,
 };
 use crate::wayland::wire::Arg;
-
-/// The protocol error of a material that is none of these, for which the
-/// protocol file defines no code.
-const MATERIAL_ERROR: u32 = 0;
 
 const NONE: u32 = 0;
 const HAZE: u32 = 1;
@@ -44,8 +41,18 @@ impl Server {
                 else {
                     unreachable!("surfaces are wl_surface objects");
                 };
+                if self.surface_mut(surface)?.material.is_some() {
+                    return Err(ProtocolError::new(
+                        request.object,
+                        mikros_material_v1::error::SURFACE_EXISTS,
+                        "a second material object of a surface",
+                    ));
+                }
                 let interface = &mikros_surface_material_v1::INTERFACE;
-                c.create(id, interface, request.version, Resource::Material(surface))
+                let c = self.client_mut(request);
+                c.create(id, interface, request.version, Resource::Material(surface))?;
+                self.surface_mut(surface)?.material = Some(id.0);
+                Ok(())
             }
             Resource::Material(surface) => {
                 match mikros_surface_material_v1::Request::decode(request.opcode, args)
@@ -55,6 +62,11 @@ impl Server {
                         self.set_material(request, surface, material, region)
                     }
                     mikros_surface_material_v1::Request::Destroy => {
+                        if let Some(s) = self.surfaces.get_mut(&surface)
+                            && s.material == Some(request.object)
+                        {
+                            s.material = None;
+                        }
                         self.client_mut(request).destroy(request.object);
                         Ok(())
                     }
@@ -71,20 +83,18 @@ impl Server {
         material: u32,
         region: u32,
     ) -> Result<(), ProtocolError> {
+        let error = |code, message: &str| ProtocolError::new(request.object, code, message);
         if material > BLUR {
-            return Err(ProtocolError::new(
-                request.object,
-                MATERIAL_ERROR,
-                "a material that is none, haze or blur",
-            ));
+            let code = mikros_surface_material_v1::error::INVALID_MATERIAL;
+            return Err(error(code, "a material that is none, haze or blur"));
         }
         self.client_mut(request)
             .resource(request.object, region, &wl_region::INTERFACE)?;
         let rects = self.regions.get(&(request.client, region));
         let area = Area::of(rects.map(Vec::as_slice).unwrap_or_default());
-        // A surface that is gone takes no state.
         let Some(surface) = self.surfaces.get_mut(&surface) else {
-            return Ok(());
+            let code = mikros_surface_material_v1::error::NO_SURFACE;
+            return Err(error(code, "a request of a material whose surface is gone"));
         };
         let materials = &mut surface.pending.materials;
         materials.haze.cut(&area);
@@ -181,6 +191,37 @@ mod tests {
         let mut server = Server::new();
         let client = surface(&mut server);
         set(&mut server, &client, 7, 3, [0, 0, 10, 10]);
-        assert_eq!(client.error(&mut server), Some(MATERIAL_ERROR));
+        let invalid = mikros_surface_material_v1::error::INVALID_MATERIAL;
+        assert_eq!(client.error(&mut server), Some(invalid));
+    }
+
+    #[test]
+    fn gives_a_surface_one_material_object_at_a_time() {
+        let mut server = Server::new();
+        let client = surface(&mut server);
+        let again = || vec![Arg::NewId(NewId(7)), Arg::Object(Some(5))];
+        client.send(&mut server, 4, 0, again());
+        let exists = mikros_material_v1::error::SURFACE_EXISTS;
+        assert_eq!(client.error(&mut server), Some(exists));
+        // Once the first is destroyed, the surface may get another.
+        let mut server = Server::new();
+        let client = surface(&mut server);
+        client.send(&mut server, 6, 1, vec![]);
+        client.send(&mut server, 4, 0, again());
+        assert_eq!(client.error(&mut server), None);
+    }
+
+    #[test]
+    fn refuses_requests_after_the_surface_but_destroy() {
+        let mut server = Server::new();
+        let client = surface(&mut server);
+        client.send(&mut server, 5, 0, vec![]);
+        set(&mut server, &client, 7, HAZE, [0, 0, 10, 10]);
+        let no_surface = mikros_surface_material_v1::error::NO_SURFACE;
+        assert_eq!(client.error(&mut server), Some(no_surface));
+        let client = surface(&mut server);
+        client.send(&mut server, 5, 0, vec![]);
+        client.send(&mut server, 6, 1, vec![]);
+        assert_eq!(client.error(&mut server), None);
     }
 }

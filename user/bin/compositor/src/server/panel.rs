@@ -3,15 +3,11 @@
 //! sends `configure` with the panel's size after each commit that follows
 //! a change of its thickness and whenever the screen's size changes, and
 //! shows the panel's buffer, at the edge, only once the client
-//! acknowledged a configure.
+//! acknowledged a configure. Its errors are those of MIKSPEC-0076.R20.
 
 use super::{ProtocolError, Rect, Request, Role, Server, SurfaceId};
-use crate::wayland::protocols::mikros_panel_v1;
+use crate::wayland::protocols::{mikros_panel_v1, mikros_shell_v1};
 use crate::wayland::wire::{Arg, ObjectId};
-
-/// The protocol error of a panel request that breaks the protocol, for
-/// which the protocol file defines no code.
-pub const PANEL_ERROR: u32 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
@@ -40,9 +36,10 @@ pub struct PanelState {
     pub thickness: u32,
     pub exclusive: bool,
     /// The size of the last configure, once one was sent, and the serials
-    /// that the client has not yet acknowledged.
+    /// of every configure sent.
     sent_size: Option<(u32, u32)>,
     sent: Vec<u32>,
+    /// Whether the client acknowledged a configure.
     pub configured: bool,
 }
 
@@ -95,36 +92,39 @@ impl Server {
     ) -> Result<(), ProtocolError> {
         let decoded = mikros_panel_v1::Request::decode(request.opcode, args)
             .map_err(|e| ProtocolError::invalid_method(request.object, format!("{e:?}")))?;
+        let error = |code, message: &str| ProtocolError::new(request.object, code, message);
+        if matches!(decoded, mikros_panel_v1::Request::Destroy) {
+            if let Some(surface) = self.surfaces.get_mut(&id) {
+                surface.panel = None;
+            }
+            self.client_mut(request).destroy(request.object);
+            return Ok(());
+        }
         let panel = self
             .surfaces
             .get_mut(&id)
             .and_then(|s| s.panel.as_mut())
             .filter(|p| p.object == request.object);
+        let Some(panel) = panel else {
+            let code = mikros_panel_v1::error::NO_SURFACE;
+            return Err(error(code, "a request of a panel whose surface is gone"));
+        };
         match decoded {
-            mikros_panel_v1::Request::Destroy => {
-                if let Some(surface) = self.surfaces.get_mut(&id) {
-                    surface.panel = None;
-                }
-                self.client_mut(request).destroy(request.object);
-            }
-            // The requests of a panel whose surface is gone do nothing.
-            _ if panel.is_none() => {}
+            mikros_panel_v1::Request::Destroy => unreachable!("destroy is handled first"),
             mikros_panel_v1::Request::SetThickness { thickness } => {
-                panel.expect("a panel").thickness = thickness;
+                panel.thickness = thickness;
             }
             mikros_panel_v1::Request::SetExclusive { exclusive } => {
-                panel.expect("a panel").exclusive = exclusive == 1;
+                panel.exclusive = exclusive == 1;
             }
             mikros_panel_v1::Request::AckConfigure { serial } => {
-                let panel = panel.expect("a panel");
-                let Some(at) = panel.sent.iter().position(|&s| s == serial) else {
-                    return Err(ProtocolError::new(
-                        request.object,
-                        PANEL_ERROR,
-                        "an acknowledged serial that was not sent",
+                if !panel.sent.contains(&serial) {
+                    let code = mikros_panel_v1::error::INVALID_SERIAL;
+                    return Err(error(
+                        code,
+                        "an acknowledged serial that no configure carried",
                     ));
-                };
-                panel.sent.drain(..=at);
+                }
                 panel.configured = true;
             }
         }
@@ -132,7 +132,9 @@ impl Server {
     }
 
     /// Gives the surface `surface` of the request's client the role of a
-    /// panel `object` along `edge`.
+    /// panel `object` along `edge`: a surface without a role, or a panel's
+    /// whose panel object was destroyed. The errors are the shell
+    /// global's (MIKSPEC-0076.R19).
     pub(super) fn make_panel(
         &mut self,
         request: Request,
@@ -140,15 +142,47 @@ impl Server {
         surface: SurfaceId,
         edge: u32,
     ) -> Result<(), ProtocolError> {
-        let error = |message: &str| ProtocolError::new(request.object, PANEL_ERROR, message);
-        let edge = Edge::of(edge).ok_or_else(|| error("an edge that is not 1 to 4"))?;
+        let error = |code, message: &str| ProtocolError::new(request.object, code, message);
+        let edge = Edge::of(edge).ok_or_else(|| {
+            error(
+                mikros_shell_v1::error::INVALID_EDGE,
+                "an edge that is not 1 to 4",
+            )
+        })?;
         let s = self.surface_mut(surface)?;
-        if s.role != Role::None || s.xdg.is_some() {
-            return Err(error("a panel of a surface that has a role"));
+        let free = match s.role {
+            Role::None => s.xdg.is_none(),
+            Role::Panel => s.panel.is_none(),
+            Role::Toplevel => false,
+        };
+        if !free {
+            let code = mikros_shell_v1::error::SURFACE_HAS_ROLE;
+            return Err(error(
+                code,
+                "a panel of a surface that has a role or a panel",
+            ));
         }
         s.role = Role::Panel;
         s.panel = Some(PanelState::new(object, edge));
         Ok(())
+    }
+
+    /// Checks a commit of the surface `id` against its panel: no buffer
+    /// before the client acknowledged a configure.
+    pub(super) fn check_panel_commit(&self, id: SurfaceId) -> Result<(), ProtocolError> {
+        let Some(s) = self.surfaces.get(&id) else {
+            return Ok(());
+        };
+        match &s.panel {
+            Some(panel) if !panel.configured && s.pending.buffer.is_some() => {
+                Err(ProtocolError::new(
+                    panel.object,
+                    mikros_panel_v1::error::UNCONFIGURED_BUFFER,
+                    "a buffer before a configure was acknowledged",
+                ))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Configures the panel of `id` after a commit when its size is not
@@ -204,8 +238,10 @@ impl Server {
 mod tests {
     use super::super::tests::TestClient;
     use super::*;
-    use crate::wayland::protocols::{mikros_shell_v1, wl_compositor, wl_output, wl_registry};
-    use crate::wayland::wire::NewId;
+    use crate::wayland::protocols::{
+        mikros_buffer_v1, mikros_shell_v1, wl_compositor, wl_output, wl_registry,
+    };
+    use crate::wayland::wire::{Fd, NewId};
 
     /// A taskbar whose registry is 2, compositor 3, output 4, shell 5,
     /// surface 6 and panel 7 at `edge`.
@@ -302,12 +338,75 @@ mod tests {
     fn refuses_panels_of_other_roles_and_edges() {
         let mut server = Server::new();
         let client = panel(&mut server, &["desktop"], 2);
-        assert_eq!(
-            client.error(&mut server),
-            Some(super::super::shell::SHELL_ERROR)
-        );
+        let forbidden = mikros_shell_v1::error::FORBIDDEN;
+        assert_eq!(client.error(&mut server), Some(forbidden));
         let mut server = Server::new();
         let client = panel(&mut server, &["menubar"], 5);
-        assert_eq!(client.error(&mut server), Some(PANEL_ERROR));
+        let invalid_edge = mikros_shell_v1::error::INVALID_EDGE;
+        assert_eq!(client.error(&mut server), Some(invalid_edge));
+    }
+
+    /// get_panel of the surface 6 as the panel `id`.
+    fn get_panel(server: &mut Server, client: &TestClient, id: u32) {
+        let args = vec![
+            Arg::NewId(NewId(id)),
+            Arg::Object(Some(6)),
+            Arg::Object(Some(4)),
+            Arg::Uint(2),
+        ];
+        client.send(server, 5, 0, args);
+    }
+
+    #[test]
+    fn gives_a_surface_one_panel_at_a_time() {
+        let has_role = Some(mikros_shell_v1::error::SURFACE_HAS_ROLE);
+        let mut server = Server::new();
+        let client = panel(&mut server, &["taskbar"], 2);
+        get_panel(&mut server, &client, 8);
+        assert_eq!(client.error(&mut server), has_role);
+        // After its panel object is destroyed, the surface may get another.
+        let mut server = Server::new();
+        let client = panel(&mut server, &["taskbar"], 2);
+        client.send(&mut server, 7, 3, vec![]);
+        get_panel(&mut server, &client, 8);
+        assert_eq!(client.error(&mut server), None);
+        assert_eq!(the_panel(&server).object, 8);
+    }
+
+    #[test]
+    fn refuses_buffers_before_a_configure_and_unsent_serials() {
+        let mut server = Server::new();
+        let client = panel(&mut server, &["taskbar"], 2);
+        client.send(&mut server, 7, 0, vec![Arg::Uint(48)]);
+        client.send(&mut server, 6, 6, vec![]);
+        client.send(&mut server, 7, 2, vec![Arg::Uint(4242)]);
+        let invalid_serial = mikros_panel_v1::error::INVALID_SERIAL;
+        assert_eq!(client.error(&mut server), Some(invalid_serial));
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        let client = panel(&mut server, &["taskbar"], 2);
+        client.bind(&mut server, 2, &mikros_buffer_v1::INTERFACE, 9);
+        let mut token = vec![Arg::NewId(NewId(10)), Arg::Fd(Fd(40))];
+        token.extend([64, 32, 0x3432_5258, 0, 0, 256, 0].map(Arg::Uint));
+        client.send(&mut server, 9, 0, token);
+        let attach = vec![Arg::Object(Some(10)), Arg::Int(0), Arg::Int(0)];
+        client.send(&mut server, 6, 1, attach);
+        client.send(&mut server, 6, 6, vec![]);
+        let unconfigured = mikros_panel_v1::error::UNCONFIGURED_BUFFER;
+        assert_eq!(client.error(&mut server), Some(unconfigured));
+    }
+
+    #[test]
+    fn refuses_requests_after_the_surface_but_destroy() {
+        let mut server = Server::new();
+        let client = panel(&mut server, &["taskbar"], 2);
+        client.send(&mut server, 6, 0, vec![]);
+        client.send(&mut server, 7, 3, vec![]);
+        assert_eq!(client.error(&mut server), None);
+        let client = panel(&mut server, &["taskbar"], 2);
+        client.send(&mut server, 6, 0, vec![]);
+        client.send(&mut server, 7, 0, vec![Arg::Uint(48)]);
+        let no_surface = mikros_panel_v1::error::NO_SURFACE;
+        assert_eq!(client.error(&mut server), Some(no_surface));
     }
 }
