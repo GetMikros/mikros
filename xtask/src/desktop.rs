@@ -79,13 +79,9 @@ const MOVE_TO_WALLPAPER: &str = "mouse_move 100 100";
 const MOVED_ARROW_PIXEL: (usize, usize) = (742, 507);
 const MOVE_TO_PANEL: &str = "mouse_move 0 270";
 const HAND_PIXEL: (usize, usize) = (740, 784);
-/// The colour of the window that the shell probe's SDL part shows, which
-/// the compositor puts at the top left corner of the screen, and its size,
-/// and what the compositor logs when that part ends, which it must not do
-/// before its window showed, with its failed step's number after it if it
-/// failed.
-const SDL_COLOUR: [u8; 3] = [230, 150, 20];
-const SDL_WINDOW: (usize, usize) = (128, 96);
+/// What the compositor logs when the shell probe's switcher part ends,
+/// which it must not do before its window showed, with its failed step's
+/// number after it if it failed.
 const SDL_EXITED: &str = "compositor: the part switcher of system.mikros.shell_probe exited";
 const TOLERANCE: u8 = 2;
 /// The share of the screen that the colour must cover, and the share
@@ -94,6 +90,23 @@ const COVERED: f64 = 0.9;
 const GONE: f64 = 0.1;
 /// How often the screen is dumped while the run waits for the colour.
 const DUMP_EVERY: Duration = Duration::from_secs(1);
+
+/// The window that the shell probe's switcher part shows, which the
+/// compositor puts at the top left corner of the screen: its colour, its
+/// size, and what the run is waiting for while it is not shown.
+pub struct Window {
+    pub colour: [u8; 3],
+    pub size: (usize, usize),
+    pub what: &'static str,
+}
+
+/// The window of the SDL probe, which the desktop run's system has by
+/// default.
+const SDL: Window = Window {
+    colour: [230, 150, 20],
+    size: (128, 96),
+    what: "the SDL window showed",
+};
 
 /// The share of the pixels of the last `part` of the screen dump `ppm`,
 /// its bottom rows, or all of it for 1, that show `colour`, or None when
@@ -269,9 +282,23 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         .desktop_image
         .as_deref()
         .context("the build of the system tests has no desktop system")?;
+    run_with(machine, kind, dir, timeout, &built, system, &SDL)
+}
+
+/// Boots the desktop run's scenario of `built` with the system `system`,
+/// whose shell probe's switcher part shows `window`.
+pub fn run_with(
+    machine: &MachineArgs,
+    kind: Kind,
+    dir: &Path,
+    timeout: Duration,
+    built: &build::Built,
+    system: &Path,
+    window: &Window,
+) -> Result<()> {
     fs::create_dir_all(dir)?;
     let disk = dir.join("disk.img");
-    image::create_with_system(kind, &built, system, &disk, "")?;
+    image::create_with_system(kind, built, system, &disk, "")?;
     let log = dir.join("serial.log");
     let socket = scenario::monitor_socket(dir);
     let mut qemu = scenario::start(machine, dir, false)?;
@@ -303,8 +330,8 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         screen.until(&mut qemu, WALLPAPER, &covered, what)?;
         let what = "the taskbar's haze showed";
         screen.until_below(&mut qemu, HAZE, HAZE_PART, &covered, what)?;
-        let what = "the SDL window showed";
-        screen.until_corner(&mut qemu, &log, SDL_EXITED, SDL_COLOUR, SDL_WINDOW, what)?;
+        let Window { colour, size, what } = *window;
+        screen.until_corner(&mut qemu, &log, SDL_EXITED, colour, size, what)?;
         let shown = pixel(&fs::read(&dump)?, ARROW_PIXEL);
         if shown != Some([0, 0, 0]) {
             bail!("the pointer's arrow is not in the middle of the screen: {shown:?}");
@@ -377,19 +404,19 @@ mod tests {
 
     #[test]
     fn counts_the_pixels_of_the_corner() {
-        let (c, w) = (SDL_COLOUR, WALLPAPER);
+        let (c, w) = (SDL.colour, WALLPAPER);
         // A screen of 4 by 3 pixels, whose 2 by 2 corner has one pixel of
         // the wrong colour, and a window colour elsewhere that does not
         // count.
         let rows = [[c, c, c, c], [c, w, w, w], [c, c, c, c]];
         let mut screen = b"P6\n4 3\n255\n".to_vec();
         screen.extend(rows.iter().flatten().flatten());
-        assert_eq!(corner_share(&screen, SDL_COLOUR, (2, 2)), Some(0.75));
-        assert_eq!(corner_share(&screen, SDL_COLOUR, (1, 3)), Some(1.0));
+        assert_eq!(corner_share(&screen, SDL.colour, (2, 2)), Some(0.75));
+        assert_eq!(corner_share(&screen, SDL.colour, (1, 3)), Some(1.0));
         assert_eq!(corner_share(&screen, WALLPAPER, (2, 2)), Some(0.25));
-        assert_eq!(corner_share(&screen, SDL_COLOUR, (5, 1)), None);
-        assert_eq!(corner_share(&screen, SDL_COLOUR, (2, 4)), None);
-        assert_eq!(corner_share(&screen, SDL_COLOUR, (0, 2)), None);
-        assert_eq!(corner_share(b"not a picture", SDL_COLOUR, (1, 1)), None);
+        assert_eq!(corner_share(&screen, SDL.colour, (5, 1)), None);
+        assert_eq!(corner_share(&screen, SDL.colour, (2, 4)), None);
+        assert_eq!(corner_share(&screen, SDL.colour, (0, 2)), None);
+        assert_eq!(corner_share(b"not a picture", SDL.colour, (1, 1)), None);
     }
 }
