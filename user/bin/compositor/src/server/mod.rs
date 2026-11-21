@@ -9,6 +9,7 @@
 mod area;
 mod buffer;
 mod cursor_shape;
+mod damage;
 mod material;
 mod panel;
 mod scene;
@@ -234,6 +235,10 @@ pub struct Server {
     buffer_sizes: BTreeMap<BufferId, (u32, u32)>,
     /// The seat's pointer.
     pub pointer: seat::Pointer,
+    /// Where the surfaces shown at the last `take_damage` lay, and what
+    /// commits damaged since, in surface coordinates.
+    drawn: BTreeMap<SurfaceId, Rect>,
+    committed: BTreeMap<SurfaceId, Vec<Rect>>,
     imported_timelines: BTreeSet<TimelineId>,
     /// The release points of buffers that surfaces no longer show.
     releases: Vec<Point>,

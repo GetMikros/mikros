@@ -372,6 +372,9 @@ impl Server {
         let surface = self.surfaces.get_mut(&id).expect("a checked surface");
         let pending = &mut surface.pending;
         let current = &mut surface.current;
+        // A new buffer, or new areas of its materials, change what the
+        // whole surface shows when its client damaged nothing.
+        let changed = surface.attached || pending.materials != current.materials;
         // A buffer's points are those of the commit that attached it: the
         // compositor no longer reads what the last commit attached.
         if surface.attached {
@@ -395,6 +398,7 @@ impl Server {
         surface.frames.extend(frames);
         self.committed(request, id);
         self.panel_committed(id);
+        self.commit_damage(id, changed);
         self.collect(imports);
         Ok(())
     }
