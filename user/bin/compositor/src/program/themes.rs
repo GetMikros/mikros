@@ -35,9 +35,11 @@ fn read() -> (Theme, Vec<String>) {
     let mut problems = Vec::new();
     let mut values = |path: &str| {
         let text = std::fs::read(path).ok()?;
-        theme::parse(&text)
+        let (values, ignored) = theme::parse(&text)
             .map_err(|e| problems.push(format!("{path}: {e}")))
-            .ok()
+            .ok()?;
+        problems.extend(ignored.into_iter().map(|note| format!("{path}: {note}")));
+        Some(values)
     };
     let base = values(theme::CONFIG).or_else(|| values(theme::SYSTEM));
     let user = std::env::var("HOME")

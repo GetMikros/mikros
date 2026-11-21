@@ -22,16 +22,17 @@ pub fn pointer_size(text: &[u8]) -> Result<Option<u32>, String> {
     {
         return Ok(None);
     }
-    let root = mikros_yaml::parse(text).map_err(|e| format!("line {}: {:?}", e.line, e.kind))?;
-    let map = root
-        .map()
-        .map_err(|e| format!("line {}: not a map", e.line))?;
+    let at =
+        |line: usize, column: usize, what: &str| format!("line {line}, column {column}: {what}");
+    let root =
+        mikros_yaml::parse(text).map_err(|e| at(e.line, e.column, &format!("{:?}", e.kind)))?;
+    let map = root.map().map_err(|e| at(e.line, e.column, "not a map"))?;
     let Some(node) = map.get("pointer_size") else {
         return Ok(None);
     };
     match node.integer(24, 128) {
         Ok(size) => Ok(Some(size as u32)),
-        Err(_) => Err(format!("line {}: pointer_size is not 24 to 128", node.line)),
+        Err(_) => Err(at(node.line, node.column, "pointer_size is not 24 to 128")),
     }
 }
 
