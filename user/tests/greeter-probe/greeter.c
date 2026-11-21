@@ -23,7 +23,6 @@
 #include <mikros/startup.h>
 #include <mikros/syscalls.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 #include <wayland-client.h>
 #define VK_USE_PLATFORM_WAYLAND_KHR
@@ -363,10 +362,11 @@ int main(int argc, char **argv)
 	int failed = draw(display, surface, &s);
 	if (!failed && argc == 4 && strcmp(argv[1], "--login") == 0)
 		failed = log_in(argv[2], argv[3]);
-	if (failed) {
-		fprintf(stderr, "greeter-probe: step %d failed\n", failed);
+	/* No message: a part has no standard error (MIKSPEC-0058.R11), and
+	 * its descriptor 2 may be one of the swapchain's memory objects. The
+	 * exit code, which the compositor logs, names the step. */
+	if (failed)
 		return failed;
-	}
 	while (wl_display_dispatch(display) >= 0)
 		;
 	return 0;
