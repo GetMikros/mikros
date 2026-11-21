@@ -11,6 +11,7 @@ mod check;
 mod cmake;
 mod components;
 mod console;
+mod dawn;
 mod debug;
 mod debug_build;
 mod debuginfo;
@@ -81,6 +82,8 @@ enum Command {
     Casefold(casefold::Args),
     /// Check formatting, lints and the commits since the base branch.
     Check(check::Args),
+    /// Build Dawn, the WebGPU library, for Mikros, as a static library.
+    Dawn(dawn::Args),
     /// Boot the disk image in QEMU halted and attach GDB to the kernel.
     Debug(debug::Args),
     /// Run a host fuzz target.
@@ -116,6 +119,7 @@ fn main() -> ExitCode {
         Command::Build(args) => build::run(&args),
         Command::Casefold(args) => casefold::run(&args),
         Command::Check(args) => check::run(&args),
+        Command::Dawn(args) => dawn::run(&args),
         Command::Debug(args) => debug::run(&args),
         Command::Fuzz(args) => fuzz::run(&args),
         Command::Image(args) => image::run(&args),
