@@ -219,6 +219,9 @@ impl Server {
             return;
         }
         self.keyboard.focus = new;
+        if let Some(new) = new {
+            self.clear_attention(new.surface);
+        }
         if let Some(old) = old.filter(|old| self.surfaces.contains_key(&old.surface)) {
             let serial = self.next_serial();
             for (keyboard, _) in self.keyboards_of(old.client) {

@@ -26,12 +26,17 @@ pub struct Window {
     /// Where the window lay before it was maximized or made fullscreen,
     /// which it goes back to.
     restore: Option<(i32, i32)>,
+    /// Whether the window demands attention: it was mapped below the
+    /// focused window, and has not had the keyboard focus since.
+    pub attention: bool,
 }
 
 /// The windows, bottom first.
 #[derive(Debug, Default)]
 pub(super) struct Windows {
     stack: RefCell<Vec<Window>>,
+    /// The windows that were mapped and are to get the keyboard focus.
+    to_focus: RefCell<Vec<SurfaceId>>,
 }
 
 impl Server {
@@ -123,19 +128,71 @@ impl Server {
             if stack.iter().any(|w| w.surface == id) {
                 continue;
             }
-            let parent = self
-                .parent_of(id)
+            let parent_id = self.parent_of(id);
+            let parent = parent_id
                 .and_then(|p| stack.iter().find(|w| w.surface == p))
                 .map(|w| w.frame);
             let frame = self.place(&stack, width, height, parent);
-            stack.push(Window {
+            // A new window gets the focus and the top when it was
+            // activated with a token, when it is a child of the focused
+            // window or when no window has the focus; otherwise it goes
+            // below the focused window, but above its parent, and demands
+            // attention (MIKSPEC-0074.R28).
+            let focused = self
+                .keyboard_focus()
+                .filter(|f| stack.iter().any(|w| w.surface == *f && !w.minimized));
+            let focus = self.activation.waiting.contains(&id)
+                || focused.is_none()
+                || (parent_id.is_some() && parent_id == focused);
+            let window = Window {
                 surface: id,
                 frame,
                 minimized,
                 restore: None,
-            });
+                attention: !focus,
+            };
+            if focus {
+                stack.push(window);
+                self.windows.to_focus.borrow_mut().push(id);
+            } else {
+                let focused_at = stack.iter().position(|w| Some(w.surface) == focused);
+                let parent_at = parent_id.and_then(|p| stack.iter().position(|w| w.surface == p));
+                let at = focused_at
+                    .unwrap_or(stack.len())
+                    .max(parent_at.map_or(0, |p| p + 1));
+                stack.insert(at, window);
+            }
         }
         stack.clone()
+    }
+
+    /// Gives the keyboard focus to the newest of the windows that were
+    /// mapped with a right to it since the last call.
+    pub(super) fn focus_new_windows(&mut self) {
+        self.windows();
+        let fresh = std::mem::take(&mut *self.windows.to_focus.borrow_mut());
+        for id in &fresh {
+            self.activation.waiting.remove(id);
+        }
+        let surfaces = &self.surfaces;
+        self.activation.waiting.retain(|s| surfaces.contains_key(s));
+        if let Some(&id) = fresh.last() {
+            self.focus_keyboard(Some(id));
+        }
+    }
+
+    /// Clears the attention that the window of `surface` demands, as it has
+    /// the keyboard focus now.
+    pub(super) fn clear_attention(&self, surface: SurfaceId) {
+        if let Some(w) = self
+            .windows
+            .stack
+            .borrow_mut()
+            .iter_mut()
+            .find(|w| w.surface == surface)
+        {
+            w.attention = false;
+        }
     }
 
     fn parent_of(&self, surface: SurfaceId) -> Option<SurfaceId> {
@@ -523,5 +580,78 @@ pub(super) mod tests {
         let area = server.work_area();
         assert!(area.width >= 0 && area.height >= 0);
         assert_eq!(server.windows().len(), 1);
+    }
+
+    fn attention(server: &Server) -> Vec<(SurfaceId, bool)> {
+        server
+            .windows()
+            .iter()
+            .map(|w| (w.surface, w.attention))
+            .collect()
+    }
+
+    #[test]
+    fn the_first_window_gets_the_focus_and_the_next_ones_wait_below_it() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        server.focus_new_windows();
+        assert_eq!(server.keyboard_focus(), Some(1));
+        toplevel(&mut server, 2, 11, (400, 300));
+        toplevel(&mut server, 3, 12, (400, 300));
+        server.focus_new_windows();
+        assert_eq!(server.keyboard_focus(), Some(1));
+        assert_eq!(order(&server), [2, 3, 1]);
+        assert_eq!(attention(&server), [(2, true), (3, true), (1, false)]);
+    }
+
+    #[test]
+    fn a_window_with_a_token_or_a_child_of_the_focused_window_gets_the_focus() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        server.focus_new_windows();
+        server.activation.waiting.insert(2);
+        toplevel(&mut server, 2, 11, (400, 300));
+        server.focus_new_windows();
+        assert_eq!(server.keyboard_focus(), Some(2));
+        assert!(server.activation.waiting.is_empty());
+        toplevel(&mut server, 3, 12, (200, 100));
+        child(&mut server, 3, 2);
+        server.focus_new_windows();
+        assert_eq!(server.keyboard_focus(), Some(3));
+        assert_eq!(order(&server), [1, 2, 3]);
+        assert_eq!(attention(&server), [(1, false), (2, false), (3, false)]);
+    }
+
+    #[test]
+    fn a_child_below_the_focused_window_stays_above_its_parent() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        toplevel(&mut server, 2, 11, (400, 300));
+        server.focus_new_windows();
+        server.focus_keyboard(Some(2));
+        assert_eq!(order(&server), [1, 2]);
+        // A child of window 1 while window 2 has the focus.
+        toplevel(&mut server, 3, 12, (200, 100));
+        child(&mut server, 3, 1);
+        server.focus_new_windows();
+        assert_eq!(server.keyboard_focus(), Some(2));
+        assert_eq!(order(&server), [1, 3, 2]);
+        assert_eq!(attention(&server), [(1, false), (3, true), (2, false)]);
+    }
+
+    #[test]
+    fn attention_ends_when_the_window_gets_the_focus() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        server.focus_new_windows();
+        toplevel(&mut server, 2, 11, (400, 300));
+        server.focus_new_windows();
+        assert_eq!(attention(&server), [(2, true), (1, false)]);
+        server.focus_keyboard(Some(2));
+        assert_eq!(attention(&server), [(2, false), (1, false)]);
     }
 }
