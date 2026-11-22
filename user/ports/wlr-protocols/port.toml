@@ -1,0 +1,8 @@
+# wlr-protocols, the protocol files of the wlroots project, from which the
+# compositor generates the code of the layer shell protocol that it
+# serves.
+
+[source]
+url = "https://gitlab.freedesktop.org/wlroots/wlr-protocols/-/archive/1106a4a1c57562ddd438c547da4c0d6dc150d624/wlr-protocols-1106a4a1c57562ddd438c547da4c0d6dc150d624.tar.gz"
+sha256 = "5fde895a8779d0b3f2e9262881ae744cd9da1aab124e83dc4aeac9b836da10e7"
+dir = "wlr-protocols-1106a4a1c57562ddd438c547da4c0d6dc150d624"

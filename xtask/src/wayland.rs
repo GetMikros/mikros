@@ -132,7 +132,12 @@ fn source(port: &crate::ports::Port) -> Result<PathBuf> {
     let dir = crate::workspace_root()
         .join("target/sources")
         .join(&port.name);
-    let archive = dir.join(format!("{}.tar.xz", port.source));
+    let extension = if port.url.ends_with(".tar.gz") {
+        "tar.gz"
+    } else {
+        "tar.xz"
+    };
+    let archive = dir.join(format!("{}.{extension}", port.source));
     let what = format!("{} source", port.name);
     crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
     crate::port::patched_source(&archive, &dir, &port.source, &port.dir.join("patches"), &[])
@@ -150,6 +155,10 @@ const PROTOCOLS: [&str; 7] = [
     "staging/cursor-shape/cursor-shape-v1.xml",
 ];
 
+/// The files of the wlr-protocols port that the compositor serves,
+/// relative to its source.
+const WLR_PROTOCOLS: [&str; 1] = ["unstable/wlr-layer-shell-unstable-v1.xml"];
+
 /// Puts the protocol files that the compositor serves in
 /// `target/wayland-protocols`, where its build script reads them, leaving
 /// no others there, and returns that directory. A file is written only
@@ -157,8 +166,10 @@ const PROTOCOLS: [&str; 7] = [
 pub fn protocols() -> Result<PathBuf> {
     let core = source(&crate::ports::load("wayland")?)?.join("protocol/wayland.xml");
     let others = source(&crate::ports::load("wayland-protocols")?)?;
+    let wlr = source(&crate::ports::load("wlr-protocols")?)?;
     let files: Vec<PathBuf> = std::iter::once(core)
         .chain(PROTOCOLS.iter().map(|p| others.join(p)))
+        .chain(WLR_PROTOCOLS.iter().map(|p| wlr.join(p)))
         .collect();
     let dir = crate::workspace_root().join("target/wayland-protocols");
     fs::create_dir_all(&dir)?;
