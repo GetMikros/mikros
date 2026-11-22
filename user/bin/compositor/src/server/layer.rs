@@ -533,7 +533,9 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::TestClient;
     use super::*;
+    use crate::wayland::protocols::{wl_callback, wl_compositor, wl_display, wl_registry};
 
     fn state(anchor: u32, size: (u32, u32)) -> State {
         State {
@@ -609,5 +611,190 @@ mod tests {
             (area.x, area.y, area.width, area.height),
             (0, 43, 1270, 757)
         );
+    }
+
+    /// A client with the compositor 3, the layer shell 4 and the surface 5.
+    fn connect(server: &mut Server) -> TestClient {
+        server.set_screen((1280, 800));
+        server.add_global(&shell::INTERFACE, VERSION, Resource::LayerShell);
+        let client = TestClient::new(server);
+        client.send(server, 1, 1, vec![Arg::NewId(NewId(2))]);
+        client.bind(server, 2, &wl_compositor::INTERFACE, 3);
+        client.bind(server, 2, &shell::INTERFACE, 4);
+        client.send(server, 3, 0, vec![Arg::NewId(NewId(5))]);
+        client
+    }
+
+    /// Makes the layer surface 7 of the surface 5, in `layer`.
+    fn get(server: &mut Server, client: &TestClient, layer: u32) {
+        let args = vec![
+            Arg::NewId(NewId(7)),
+            Arg::Object(Some(5)),
+            Arg::Object(None),
+            Arg::Uint(layer),
+            Arg::String(Some("test".into())),
+        ];
+        client.send(server, 4, 0, args);
+    }
+
+    fn events(server: &mut Server, client: &TestClient) -> Vec<(u16, Vec<Arg>)> {
+        let sent = client.events(server, &|id| match id {
+            1 => &wl_display::EVENTS,
+            2 => &wl_registry::EVENTS,
+            7 => &surface_v1::EVENTS,
+            _ => &wl_callback::EVENTS,
+        });
+        sent.into_iter()
+            .filter(|e| e.0 == 7)
+            .map(|e| (e.1, e.2))
+            .collect()
+    }
+
+    fn commit(server: &mut Server, client: &TestClient) {
+        client.send(server, 5, 6, vec![]);
+    }
+
+    #[test]
+    fn answers_the_first_commit_with_a_configure_and_another_when_the_size_changes() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 2);
+        client.send(&mut server, 7, 0, vec![Arg::Uint(0), Arg::Uint(40)]);
+        client.send(
+            &mut server,
+            7,
+            1,
+            vec![Arg::Uint(ANCHOR_ALL & !ANCHOR_BOTTOM)],
+        );
+        assert!(events(&mut server, &client).is_empty());
+        commit(&mut server, &client);
+        let sent = events(&mut server, &client);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1[1..], [Arg::Uint(1280), Arg::Uint(40)]);
+        // The same size is not sent again, a new one is.
+        commit(&mut server, &client);
+        assert!(events(&mut server, &client).is_empty());
+        client.send(&mut server, 7, 0, vec![Arg::Uint(0), Arg::Uint(60)]);
+        commit(&mut server, &client);
+        let sent = events(&mut server, &client);
+        assert_eq!(sent[0].1[1..], [Arg::Uint(1280), Arg::Uint(60)]);
+        assert_eq!(client.error(&mut server), None);
+    }
+
+    #[test]
+    fn refuses_what_the_protocol_does() {
+        // A layer that does not exist.
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 4);
+        assert_eq!(client.error(&mut server), Some(shell::error::INVALID_LAYER));
+        // A surface that has another role.
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        let id = *server.surfaces.keys().next().unwrap();
+        server.surfaces.get_mut(&id).unwrap().role = Role::Toplevel;
+        get(&mut server, &client, 2);
+        assert_eq!(client.error(&mut server), Some(shell::error::ROLE));
+        // A surface that has a buffer.
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        let id = *server.surfaces.keys().next().unwrap();
+        server.surfaces.get_mut(&id).unwrap().current.buffer = Some(1);
+        get(&mut server, &client, 2);
+        assert_eq!(
+            client.error(&mut server),
+            Some(shell::error::ALREADY_CONSTRUCTED)
+        );
+        // A size of 0 without anchors to both edges, at the commit.
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 2);
+        client.send(&mut server, 7, 0, vec![Arg::Uint(0), Arg::Uint(40)]);
+        commit(&mut server, &client);
+        assert_eq!(
+            client.error(&mut server),
+            Some(surface_v1::error::INVALID_SIZE)
+        );
+        // An anchor with a bit that is not an edge.
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 2);
+        client.send(&mut server, 7, 1, vec![Arg::Uint(16)]);
+        assert_eq!(
+            client.error(&mut server),
+            Some(surface_v1::error::INVALID_ANCHOR)
+        );
+        // An exclusive edge that it is not anchored to.
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 2);
+        client.send(&mut server, 7, 0, vec![Arg::Uint(10), Arg::Uint(10)]);
+        client.send(&mut server, 7, 1, vec![Arg::Uint(ANCHOR_LEFT)]);
+        client.send(&mut server, 7, 9, vec![Arg::Uint(ANCHOR_TOP)]);
+        commit(&mut server, &client);
+        let code = surface_v1::error::INVALID_EXCLUSIVE_EDGE;
+        assert_eq!(client.error(&mut server), Some(code));
+        // A serial that no configure sent.
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 2);
+        client.send(&mut server, 7, 6, vec![Arg::Uint(99)]);
+        let code = surface_v1::error::INVALID_SURFACE_STATE;
+        assert_eq!(client.error(&mut server), Some(code));
+    }
+
+    #[test]
+    fn a_buffer_before_the_configure_is_acknowledged_is_an_error_and_after_it_maps() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 2);
+        client.send(&mut server, 7, 0, vec![Arg::Uint(100), Arg::Uint(50)]);
+        commit(&mut server, &client);
+        events(&mut server, &client);
+        let id = *server.surfaces.keys().next().unwrap();
+        server.buffer_sizes.insert(1, (100, 50));
+        server.surfaces.get_mut(&id).unwrap().pending.buffer = Some(1);
+        server.surfaces.get_mut(&id).unwrap().attached = true;
+        commit(&mut server, &client);
+        let code = surface_v1::error::INVALID_SURFACE_STATE;
+        assert_eq!(client.error(&mut server), Some(code));
+        // Acknowledged, the commit maps it, centred.
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 2);
+        client.send(&mut server, 7, 0, vec![Arg::Uint(100), Arg::Uint(50)]);
+        commit(&mut server, &client);
+        let Arg::Uint(serial) = events(&mut server, &client)[0].1[0] else {
+            panic!("a serial");
+        };
+        client.send(&mut server, 7, 6, vec![Arg::Uint(serial)]);
+        let id = *server.surfaces.keys().next().unwrap();
+        server.buffer_sizes.insert(1, (100, 50));
+        server.surfaces.get_mut(&id).unwrap().pending.buffer = Some(1);
+        server.surfaces.get_mut(&id).unwrap().attached = true;
+        commit(&mut server, &client);
+        assert_eq!(client.error(&mut server), None);
+        let place = server.layer_place(id, (100, 50)).unwrap();
+        assert_eq!((place.x, place.y), (590, 375));
+        assert!(server.layers.surfaces[&id].mapped_at.is_some());
+    }
+
+    #[test]
+    fn a_destroyed_layer_surface_keeps_the_role_and_a_closed_one_is_not_served() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 2);
+        let id = *server.surfaces.keys().next().unwrap();
+        server.close_layer(id);
+        let sent = events(&mut server, &client);
+        assert_eq!(sent.iter().filter(|e| e.0 == 1).count(), 1);
+        client.send(&mut server, 7, 0, vec![Arg::Uint(1), Arg::Uint(1)]);
+        assert_eq!(server.layers.surfaces[&id].pending.size, (0, 0));
+        client.send(&mut server, 7, 7, vec![]);
+        assert!(server.layers.surfaces.is_empty());
+        assert_eq!(server.surfaces[&id].role, Role::Layer);
+        // It can have a layer surface again.
+        get(&mut server, &client, 3);
+        assert_eq!(client.error(&mut server), None);
     }
 }
