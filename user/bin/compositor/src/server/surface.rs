@@ -482,6 +482,9 @@ impl Server {
         self.check_points(id)?;
         self.check_viewport(id)?;
         let staged = self.stage(id);
+        let Some(staged) = self.hold_layer_commit(id, staged) else {
+            return Ok(());
+        };
         if let Some(staged) = self.hold_or_merge(id, staged) {
             self.apply(imports, request.client, id, staged);
         }

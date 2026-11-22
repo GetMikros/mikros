@@ -8,7 +8,14 @@
 //! acknowledged one and attached a buffer. In the layers `background` and
 //! `bottom` the exclusive zone counts as 0 and the keyboard interactivity
 //! as `none`.
+//!
+//! A client may have a layer surface in the layer `top` or `overlay` only
+//! with a permission (MIKSPEC-0076.R25), which the program asks for. Until
+//! it is answered, the commits of such a surface are held; when it is
+//! allowed they are applied in order, and when it is denied or revoked
+//! the surfaces are closed.
 
+use super::surface::Staged;
 use super::{ClientId, ProtocolError, Rect, Request, Resource, Role, Server, SurfaceId};
 use crate::wayland::protocols::{
     wl_output, wl_surface, zwlr_layer_shell_v1 as shell, zwlr_layer_surface_v1 as surface_v1,
@@ -20,6 +27,7 @@ pub const VERSION: u32 = 5;
 
 const LAYER_BACKGROUND: u32 = 0;
 const LAYER_BOTTOM: u32 = 1;
+const LAYER_TOP: u32 = 2;
 const LAYER_OVERLAY: u32 = 3;
 const ANCHOR_TOP: u32 = 1;
 const ANCHOR_BOTTOM: u32 = 2;
@@ -201,6 +209,9 @@ pub struct Layer {
     pub closed: bool,
     /// When it was mapped, for the order of surfaces in a layer.
     pub mapped_at: Option<u64>,
+    /// The commits that wait for the permission, with the state that each
+    /// carried.
+    held: Vec<(Staged, State)>,
 }
 
 /// The layer surfaces of every surface that has one.
@@ -208,6 +219,12 @@ pub struct Layer {
 pub(super) struct Layers {
     pub(super) surfaces: BTreeMap<SurfaceId, Layer>,
     mapped: u64,
+    /// The clients that hold the permission for the layers `top` and
+    /// `overlay`, and the clients whose question is open.
+    allowed: std::collections::BTreeSet<ClientId>,
+    asking: Vec<ClientId>,
+    /// The clients that the program has not been told to ask for yet.
+    questions: Vec<ClientId>,
 }
 
 impl Layers {
@@ -332,6 +349,7 @@ impl Server {
                 last: None,
                 closed: false,
                 mapped_at: None,
+                held: Vec::new(),
             },
         );
         Ok(())
@@ -507,6 +525,111 @@ impl Server {
         self.update_layer_focus();
     }
 
+    /// Holds a commit of the layer surface of `id`, which `staged` carries,
+    /// when it is in the layer `top` or `overlay`, or asks to be, and its
+    /// client does not hold the permission yet, and asks for the
+    /// permission once; returns the commit otherwise.
+    pub(super) fn hold_layer_commit(&mut self, id: SurfaceId, staged: Staged) -> Option<Staged> {
+        let Some(layer) = self.layers.surfaces.get_mut(&id).filter(|l| !l.closed) else {
+            return Some(staged);
+        };
+        let client = layer.client;
+        if layer.pending.layer < LAYER_TOP || self.layers.allowed.contains(&client) {
+            return Some(staged);
+        }
+        let state = layer.pending;
+        layer.held.push((staged, state));
+        if !self.layers.asking.contains(&client) {
+            self.layers.asking.push(client);
+            self.layers.questions.push(client);
+        }
+        None
+    }
+
+    /// The clients whose permission for the layers `top` and `overlay` the
+    /// program has to ask for, once each.
+    pub fn take_layer_questions(&mut self) -> Vec<ClientId> {
+        std::mem::take(&mut self.layers.questions)
+    }
+
+    /// The answer to the question of `client`: when it is allowed, the
+    /// commits that waited are applied in order, and the surfaces are
+    /// configured; when it is not, its layer surfaces in the layers `top`
+    /// and `overlay` are closed.
+    pub fn answer_layer_question(
+        &mut self,
+        imports: &mut dyn super::Imports,
+        client: ClientId,
+        allowed: bool,
+    ) {
+        self.layers.asking.retain(|&c| c != client);
+        if !allowed {
+            self.close_layers_of(client);
+            return;
+        }
+        self.layers.allowed.insert(client);
+        let ids: Vec<SurfaceId> = self
+            .layers
+            .surfaces
+            .iter()
+            .filter(|(_, l)| l.client == client && !l.held.is_empty())
+            .map(|(&id, _)| id)
+            .collect();
+        for id in ids {
+            let held = self
+                .layers
+                .surfaces
+                .get_mut(&id)
+                .map(|l| std::mem::take(&mut l.held))
+                .unwrap_or_default();
+            for (staged, state) in held {
+                let Some(layer) = self.layers.surfaces.get_mut(&id) else {
+                    break;
+                };
+                let newest = std::mem::replace(&mut layer.pending, state);
+                self.apply_state(client, id, staged);
+                if let Some(layer) = self.layers.surfaces.get_mut(&id) {
+                    layer.pending = newest;
+                }
+            }
+        }
+        self.collect(imports);
+    }
+
+    /// The permission of `client` was revoked: its layer surfaces in the
+    /// layers `top` and `overlay` are closed.
+    pub fn revoke_layer_permission(&mut self, client: ClientId) {
+        self.layers.allowed.remove(&client);
+        self.close_layers_of(client);
+    }
+
+    /// Closes the layer surfaces of `client` that are in the layer `top`
+    /// or `overlay`, or are held for it, and gives up what they held.
+    fn close_layers_of(&mut self, client: ClientId) {
+        let ids: Vec<SurfaceId> = self
+            .layers
+            .surfaces
+            .iter()
+            .filter(|(_, l)| {
+                l.client == client && l.current.layer.max(l.pending.layer) >= LAYER_TOP
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for id in ids {
+            let held = self
+                .layers
+                .surfaces
+                .get_mut(&id)
+                .map(|l| std::mem::take(&mut l.held))
+                .unwrap_or_default();
+            for (staged, _) in held {
+                self.releases.extend(staged.state.release);
+                self.discard_listed(staged.asked);
+            }
+            self.close_layer(id);
+        }
+    }
+
     /// Closes the layer surface of `id`: its client is told, and it is
     /// not shown or served any more.
     pub(super) fn close_layer(&mut self, id: SurfaceId) {
@@ -555,6 +678,9 @@ impl Server {
     /// Forgets the layer surfaces of `client`, which went.
     pub(super) fn forget_client_layers(&mut self, client: ClientId) {
         self.layers.surfaces.retain(|_, l| l.client != client);
+        self.layers.allowed.remove(&client);
+        self.layers.asking.retain(|&c| c != client);
+        self.layers.questions.retain(|&c| c != client);
     }
 
     /// The layer surface of `id` and its place on the output, when it is
@@ -651,8 +777,16 @@ mod tests {
         );
     }
 
-    /// A client with the compositor 3, the layer shell 4 and the surface 5.
+    /// A client with the compositor 3, the layer shell 4 and the surface 5,
+    /// which holds the permission for the layers `top` and `overlay`.
     fn connect(server: &mut Server) -> TestClient {
+        let client = connect_without_permission(server);
+        server.layers.allowed.insert(client.id);
+        client
+    }
+
+    /// As `connect`, for a client that does not hold the permission.
+    fn connect_without_permission(server: &mut Server) -> TestClient {
         server.set_screen((1280, 800));
         server.add_global(&shell::INTERFACE, VERSION, Resource::LayerShell);
         let client = TestClient::new(server);
@@ -1054,5 +1188,104 @@ mod tests {
         server.pointer_button(272, true, 2);
         assert_eq!(server.keyboard_focus(), Some(top));
         let _ = background;
+    }
+
+    /// The events that layer surfaces got, as (object, opcode).
+    fn layer_events(server: &mut Server, client: &TestClient) -> Vec<(u32, u16)> {
+        let sent = client.events(server, &|id| match id {
+            1 => &wl_display::EVENTS,
+            2 => &wl_registry::EVENTS,
+            id if id >= 10 => &surface_v1::EVENTS,
+            _ => &wl_callback::EVENTS,
+        });
+        sent.into_iter()
+            .filter(|e| e.0 >= 10)
+            .map(|e| (e.0, e.1))
+            .collect()
+    }
+
+    /// Makes the layer surface `object` of a new surface `surface` in
+    /// `layer` and commits, which needs no answer.
+    fn start(server: &mut Server, client: &TestClient, surface: u32, object: u32, layer: u32) {
+        client.send(server, 3, 0, vec![Arg::NewId(NewId(surface))]);
+        let args = vec![
+            Arg::NewId(NewId(object)),
+            Arg::Object(Some(surface)),
+            Arg::Object(None),
+            Arg::Uint(layer),
+            Arg::String(Some("test".into())),
+        ];
+        client.send(server, 4, 0, args);
+        client.send(server, object, 0, vec![Arg::Uint(50), Arg::Uint(50)]);
+        client.send(server, surface, 6, vec![]);
+    }
+
+    #[test]
+    fn the_commits_of_a_layer_above_the_windows_wait_for_the_permission() {
+        let mut server = Server::new();
+        let client = connect_without_permission(&mut server);
+        start(&mut server, &client, 20, 30, 2);
+        start(&mut server, &client, 21, 31, 3);
+        // No configure, and one question for the client.
+        assert!(layer_events(&mut server, &client).is_empty());
+        assert_eq!(server.take_layer_questions(), [client.id]);
+        assert!(server.take_layer_questions().is_empty());
+        // Allowed, the commits are applied in order and the surfaces
+        // configured.
+        let mut imports = super::super::tests::FakeImports::default();
+        server.answer_layer_question(&mut imports, client.id, true);
+        assert_eq!(layer_events(&mut server, &client), [(30, 0), (31, 0)]);
+        assert_eq!(client.error(&mut server), None);
+        // Later surfaces need no question.
+        start(&mut server, &client, 22, 32, 2);
+        assert_eq!(layer_events(&mut server, &client), [(32, 0)]);
+        assert!(server.take_layer_questions().is_empty());
+    }
+
+    #[test]
+    fn a_denied_permission_closes_the_layers_above_the_windows_only() {
+        let mut server = Server::new();
+        let client = connect_without_permission(&mut server);
+        start(&mut server, &client, 20, 30, 1);
+        assert_eq!(layer_events(&mut server, &client), [(30, 0)]);
+        assert!(server.take_layer_questions().is_empty());
+        start(&mut server, &client, 21, 31, 2);
+        assert_eq!(server.take_layer_questions(), [client.id]);
+        let mut imports = super::super::tests::FakeImports::default();
+        server.answer_layer_question(&mut imports, client.id, false);
+        assert_eq!(layer_events(&mut server, &client), [(31, 1)]);
+        // Another try is asked again.
+        start(&mut server, &client, 22, 32, 3);
+        assert_eq!(server.take_layer_questions(), [client.id]);
+    }
+
+    #[test]
+    fn moving_a_layer_surface_above_the_windows_waits_and_keeps_the_state_before() {
+        let mut server = Server::new();
+        let client = connect_without_permission(&mut server);
+        let id = map(&mut server, &client, 20, 30, 1, (0, (50, 50), 0));
+        client.send(&mut server, 30, 8, vec![Arg::Uint(2)]);
+        client.send(&mut server, 20, 6, vec![]);
+        assert_eq!(server.layers.surfaces[&id].current.layer, 1);
+        assert_eq!(server.take_layer_questions(), [client.id]);
+        let mut imports = super::super::tests::FakeImports::default();
+        server.answer_layer_question(&mut imports, client.id, true);
+        assert_eq!(server.layers.surfaces[&id].current.layer, 2);
+    }
+
+    #[test]
+    fn a_revoked_permission_closes_the_layers_above_the_windows() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        let top = map(&mut server, &client, 20, 30, 2, (0, (50, 50), 0));
+        let bottom = map(&mut server, &client, 21, 31, 1, (0, (50, 50), 0));
+        layer_events(&mut server, &client);
+        server.revoke_layer_permission(client.id);
+        assert_eq!(layer_events(&mut server, &client), [(30, 1)]);
+        assert!(server.layers.surfaces[&top].closed);
+        assert!(!server.layers.surfaces[&bottom].closed);
+        // Asked again for the next one.
+        start(&mut server, &client, 22, 32, 2);
+        assert_eq!(server.take_layer_questions(), [client.id]);
     }
 }
