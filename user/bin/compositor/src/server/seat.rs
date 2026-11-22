@@ -276,6 +276,7 @@ impl Server {
     pub fn refocus(&mut self) {
         self.focus_new_windows();
         self.keep_keyboard_focus();
+        self.update_toplevel_lists();
         if let Some(focus) = self.pointer.focus
             && !self.surfaces.contains_key(&focus.surface)
         {

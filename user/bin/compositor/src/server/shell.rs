@@ -112,6 +112,7 @@ impl Server {
                 c.create(id, interface, request.version, Resource::Panel(surface))?;
                 self.make_panel(request, id.0, surface, edge)
             }
+            mikros_shell_v1::Request::GetToplevelList { id } => self.get_toplevel_list(request, id),
             // Requests that are not served yet end the connection with
             // wl_display's error for that, rather than doing nothing.
             _ => Err(ProtocolError::new(

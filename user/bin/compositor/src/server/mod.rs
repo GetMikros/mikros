@@ -19,6 +19,7 @@ mod seat;
 mod shell;
 mod surface;
 mod theme;
+mod toplevels;
 mod windows;
 mod xdg;
 
@@ -84,6 +85,8 @@ pub enum Resource {
     CursorShape,
     Activation,
     ActivationToken,
+    ToplevelList,
+    ToplevelHandle(SurfaceId),
 }
 
 /// An object of a client.
@@ -135,6 +138,8 @@ pub struct Client {
     pub out: Outgoing,
     /// The protocol error that ended the connection, once one did.
     pub error: Option<ProtocolError>,
+    /// How many objects the compositor made for the client.
+    server_objects: u32,
 }
 
 impl Client {
@@ -193,9 +198,31 @@ impl Client {
         Ok(())
     }
 
-    /// Removes the object `id`, whose ID the client may then use again.
+    /// Adds an object that the compositor creates, with an ID of its own
+    /// range, and returns the ID.
+    fn create_server(
+        &mut self,
+        interface: &'static Interface,
+        version: u32,
+        resource: Resource,
+    ) -> ObjectId {
+        let id = SERVER_IDS + self.server_objects;
+        self.server_objects += 1;
+        self.objects.insert(
+            id,
+            Object {
+                interface,
+                version,
+                resource,
+            },
+        );
+        id
+    }
+
+    /// Removes the object `id`, whose ID the client may then use again,
+    /// unless the compositor made it.
     fn destroy(&mut self, id: ObjectId) {
-        if self.objects.remove(&id).is_some() {
+        if self.objects.remove(&id).is_some() && id < SERVER_IDS {
             wl_display::send_delete_id(&mut self.out, DISPLAY, id);
         }
     }
@@ -241,6 +268,8 @@ pub struct Server {
     windows: windows::Windows,
     /// Activation tokens and the input serials they may name.
     activation: activation::Activation,
+    /// The window lists of the shell's components.
+    toplevels: toplevels::Lists,
     /// The rectangles of each client's regions, added or, when false,
     /// taken away, in order.
     regions: BTreeMap<(ClientId, ObjectId), Vec<(bool, Rect)>>,
@@ -487,6 +516,9 @@ impl Server {
             }
             Resource::CursorShapes | Resource::CursorShape => {
                 self.cursor_shape_request(request, resource, args)?
+            }
+            Resource::ToplevelList | Resource::ToplevelHandle(_) => {
+                self.toplevel_request(request, resource, args)?
             }
             Resource::Activation | Resource::ActivationToken => {
                 self.activation_request(request, resource, args)?
