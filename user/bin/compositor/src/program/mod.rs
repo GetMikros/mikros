@@ -13,6 +13,7 @@
 mod host;
 mod imports;
 mod keys;
+mod layers;
 mod mouse;
 mod output;
 mod parts;
@@ -35,7 +36,7 @@ use mikros_rt::interfaces::mikros::gpu::{
     Capabilities, Device as Gpu, DeviceAsyncClient as GpuClient, DisplayAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
-use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::interfaces::mikros::service::{ClientIdentity, DirectoryAsyncClient};
 use mikros_rt::interfaces::mikros::session::{SeatAsyncServer, SeatRequest};
 use output::Output;
 use render::{Haze, Layer, Look, Renderer, Under};
@@ -133,6 +134,10 @@ pub struct Compositor {
     /// layout it was compiled from (`keys`).
     keymap: RefCell<Option<mikros_xkb::Keymap>>,
     layout: RefCell<Option<crate::keyboard::Layout>>,
+    /// The identities that the session manager forwarded with the
+    /// connections of the clients, which the permission broker is asked
+    /// about (`layers`).
+    identities: RefCell<BTreeMap<ClientId, ClientIdentity>>,
 }
 
 /// The startup handle `id` of the `USER` role, as mikros-rt's handle.
@@ -243,8 +248,9 @@ impl Compositor {
                     }
                     mikros_rt::log!(Info, "compositor: a client of {app_id} connected");
                     let this = self.clone();
-                    self.spawner
-                        .spawn(async move { this.serve_client(connect.client, app_id).await });
+                    self.spawner.spawn(async move {
+                        this.serve_client(connect.client, connect.identity).await
+                    });
                 }
                 CompositorRequest::ConnectOpener(connect) => {
                     let app_id = connect.identity.app_id;
@@ -267,8 +273,12 @@ impl Compositor {
 
     /// Serves the Wayland channel of the client of `app_id` until it
     /// closes or breaks the protocol.
-    async fn serve_client(self: Rc<Self>, channel: OwnedHandle, app_id: String) {
-        let client = self.server.borrow_mut().connect_client(app_id);
+    async fn serve_client(self: Rc<Self>, channel: OwnedHandle, identity: ClientIdentity) {
+        let client = self
+            .server
+            .borrow_mut()
+            .connect_client(identity.app_id.clone());
+        self.identities.borrow_mut().insert(client, identity);
         self.serve(client, channel).await;
     }
 
@@ -316,6 +326,7 @@ impl Compositor {
                 server.dispatch(&mut importer, client, &bytes, fds);
             }
             self.flush(client);
+            self.ask_layer_questions();
             self.changed.notify();
             let error = match self.server.borrow_mut().client(client) {
                 None => Some(String::from("the client is gone")),
@@ -330,6 +341,7 @@ impl Compositor {
             }
         }
         self.channels.borrow_mut().remove(&client);
+        self.identities.borrow_mut().remove(&client);
         let mut store = self.store.borrow_mut();
         let mut importer = Importer {
             renderer: &self.renderer,
@@ -936,6 +948,7 @@ pub fn main() {
         acquiring: RefCell::default(),
         keymap: RefCell::new(None),
         layout: RefCell::new(None),
+        identities: RefCell::default(),
     });
     let c = compositor.clone();
     executor.block_on(async move {
@@ -943,6 +956,7 @@ pub fn main() {
             c.server.borrow_mut().buffer_device = name;
         }
         c.spawner.spawn(c.clone().themes());
+        c.spawner.spawn(c.clone().watch_layer_permission());
         c.spawner.spawn(c.clone().frames());
         match login {
             Some(login) => c.spawner.spawn(c.clone().greet(login)),

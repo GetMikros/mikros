@@ -50,7 +50,8 @@ use crate::wayland::protocols::{
     mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, mikros_theme_v1, wl_callback,
     wl_compositor, wl_data_device_manager, wl_display, wl_output, wl_registry, wl_seat,
     wl_subcompositor, wp_cursor_shape_manager_v1, wp_fractional_scale_manager_v1, wp_presentation,
-    wp_viewporter, xdg_activation_v1, xdg_wm_base, zwp_keyboard_shortcuts_inhibit_manager_v1,
+    wp_viewporter, xdg_activation_v1, xdg_wm_base, zwlr_layer_shell_v1,
+    zwp_keyboard_shortcuts_inhibit_manager_v1,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -403,6 +404,11 @@ impl Server {
             &wl_subcompositor::INTERFACE,
             subsurface::VERSION,
             Resource::Subcompositor,
+        );
+        server.add_global(
+            &zwlr_layer_shell_v1::INTERFACE,
+            layer::VERSION,
+            Resource::LayerShell,
         );
         server
     }
@@ -934,7 +940,8 @@ pub(crate) mod tests {
                 &Arg::String(Some("wp_viewporter".into())),
                 &Arg::String(Some("wp_fractional_scale_manager_v1".into())),
                 &Arg::String(Some("xdg_activation_v1".into())),
-                &Arg::String(Some("wl_subcompositor".into()))
+                &Arg::String(Some("wl_subcompositor".into())),
+                &Arg::String(Some("zwlr_layer_shell_v1".into()))
             ]
         );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);

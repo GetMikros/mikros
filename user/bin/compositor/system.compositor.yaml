@@ -8,3 +8,5 @@ permissions:
   - system.identity.set
   - system.prompts.use
   - system.gpu_priority.use
+  - system.permissions.request
+  - system.permissions.read

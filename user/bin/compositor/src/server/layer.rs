@@ -788,7 +788,6 @@ mod tests {
     /// As `connect`, for a client that does not hold the permission.
     fn connect_without_permission(server: &mut Server) -> TestClient {
         server.set_screen((1280, 800));
-        server.add_global(&shell::INTERFACE, VERSION, Resource::LayerShell);
         let client = TestClient::new(server);
         client.send(server, 1, 1, vec![Arg::NewId(NewId(2))]);
         client.bind(server, 2, &wl_compositor::INTERFACE, 3);
