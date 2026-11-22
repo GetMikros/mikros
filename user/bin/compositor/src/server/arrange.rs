@@ -142,6 +142,11 @@ impl Server {
     /// it when it is maximized or snapped and minimize it otherwise, Super
     /// and Left or Right snap it, and Alt and F4 ask it to close.
     pub(super) fn shortcut(&mut self, key: u32, pressed: bool) -> bool {
+        // A client that inhibited them has the keys, and the release of a
+        // key whose press was a shortcut is still not its own.
+        if self.shortcuts_inhibited() {
+            return !pressed && self.keyboard.swallowed.remove(&key);
+        }
         // Alt let go ends the window switcher with its selection.
         if !pressed
             && (key == KEY_LEFTALT || key == KEY_RIGHTALT)

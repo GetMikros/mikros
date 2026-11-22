@@ -229,6 +229,7 @@ impl Server {
             self.clear_attention(new.surface);
         }
         if let Some(old) = old.filter(|old| self.surfaces.contains_key(&old.surface)) {
+            self.tell_inhibitor(old.surface, false);
             let serial = self.next_serial();
             for (keyboard, _) in self.keyboards_of(old.client) {
                 if let Some(c) = self.clients.get_mut(&old.client) {
@@ -239,6 +240,7 @@ impl Server {
         if let Some(new) = new {
             // The selection comes before the focus.
             self.announce_selection_to(new.client);
+            self.tell_inhibitor(new.surface, true);
             let serial = self.next_serial();
             for (keyboard, _) in self.keyboards_of(new.client) {
                 self.enter_keyboard(new, keyboard, serial);

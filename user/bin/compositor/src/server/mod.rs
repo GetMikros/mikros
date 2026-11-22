@@ -15,6 +15,7 @@ mod damage;
 mod data;
 mod fractional;
 mod grabs;
+mod inhibit;
 mod keyboard;
 mod material;
 mod panel;
@@ -46,7 +47,7 @@ use crate::wayland::protocols::{
     mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, mikros_theme_v1, wl_callback,
     wl_compositor, wl_data_device_manager, wl_display, wl_output, wl_registry, wl_seat,
     wp_cursor_shape_manager_v1, wp_fractional_scale_manager_v1, wp_viewporter, xdg_activation_v1,
-    xdg_wm_base,
+    xdg_wm_base, zwp_keyboard_shortcuts_inhibit_manager_v1,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -104,6 +105,8 @@ pub enum Resource {
     FractionalScale(SurfaceId),
     Viewporter,
     Viewport(SurfaceId),
+    InhibitManager,
+    Inhibitor(SurfaceId),
 }
 
 /// An object of a client.
@@ -293,6 +296,8 @@ pub struct Server {
     fractional: fractional::Fractional,
     /// The viewports of surfaces.
     viewports: viewport::Viewports,
+    /// The shortcut inhibitors of surfaces.
+    inhibitors: inhibit::Inhibitors,
     /// The windows in order of last focus, and the window switcher.
     switching: switcher::Switching,
     /// The rectangles of each client's regions, added or, when false,
@@ -353,6 +358,11 @@ impl Server {
             &wl_data_device_manager::INTERFACE,
             data::VERSION,
             Resource::DataManager,
+        );
+        server.add_global(
+            &zwp_keyboard_shortcuts_inhibit_manager_v1::INTERFACE,
+            inhibit::VERSION,
+            Resource::InhibitManager,
         );
         server.add_global(
             &wp_viewporter::INTERFACE,
@@ -432,6 +442,7 @@ impl Server {
         self.forget_client_data(client);
         self.forget_client_fractional(client);
         self.forget_client_viewports(client);
+        self.forget_client_inhibitors(client);
         self.collect(imports);
     }
 
@@ -565,6 +576,9 @@ impl Server {
             | Resource::DataSource
             | Resource::DataDevice
             | Resource::DataOffer => self.data_request(request, resource, args)?,
+            Resource::InhibitManager | Resource::Inhibitor(_) => {
+                self.inhibit_request(request, resource, args)?
+            }
             Resource::Viewporter | Resource::Viewport(_) => {
                 self.viewport_request(request, resource, args)?
             }
@@ -871,6 +885,7 @@ pub(crate) mod tests {
                 &Arg::String(Some("wl_seat".into())),
                 &Arg::String(Some("wp_cursor_shape_manager_v1".into())),
                 &Arg::String(Some("wl_data_device_manager".into())),
+                &Arg::String(Some("zwp_keyboard_shortcuts_inhibit_manager_v1".into())),
                 &Arg::String(Some("wp_viewporter".into())),
                 &Arg::String(Some("wp_fractional_scale_manager_v1".into())),
                 &Arg::String(Some("xdg_activation_v1".into()))
