@@ -20,6 +20,9 @@ use core::cell::{Cell, RefCell};
 use mikros_rt::exec::Spawner;
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::desktop::{
+    Compositor, CompositorAsyncClient, FilePicker, Opener,
+};
 use mikros_rt::interfaces::mikros::process::{
     HandleRole, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
 };
@@ -35,6 +38,7 @@ const COMPOSITOR_APP: &str = "system.compositor";
 const SHELL: &str = "/system/bin/msh";
 const PATH: &str = "PATH=/system/bin";
 /// The `USER` startup handle IDs of the compositor's channels.
+const CONNECTIONS_ID: u32 = 1;
 const SESSION_ID: u32 = 2;
 const SEAT_ID: u32 = 7;
 const FOREVER: i64 = i64::MAX;
@@ -52,6 +56,8 @@ pub struct Linked {
     pub leader: Option<u32>,
     /// The login session of the text session.
     pub text_session: u32,
+    /// The user of the desktop's session.
+    pub user: u32,
 }
 
 /// The state of desktops started from text logins.
@@ -64,6 +70,9 @@ pub struct Desktops {
     /// The `Session` server of the desktop's compositor, which its login
     /// session's questions are asked on.
     pub session: RefCell<Option<Rc<SessionAsyncServer>>>,
+    /// The desktop's compositor's `Compositor` channel, on which the
+    /// connections of clients are forwarded to it (MIKSPEC-0066.R35).
+    pub connections: RefCell<Option<Rc<CompositorAsyncClient>>>,
     /// Woken when the greeter's compositor or the desktop ended.
     pub changed: Waiters,
 }
@@ -141,10 +150,11 @@ pub async fn start_for(
     *desktops.linked.borrow_mut() = Some(Linked {
         leader: None,
         text_session,
+        user,
     });
     end_greeter(requests).await;
     let started = spawn(requests, user, &name).await;
-    let (pid, seat, session) = match started {
+    let (pid, seat, session, connections) = match started {
         Ok(started) => started,
         Err(status) => {
             mikros_rt::log!(
@@ -163,6 +173,10 @@ pub async fn start_for(
         Info,
         "sessionmgr: started the desktop of {name} for console {console} as pid {pid}"
     );
+    *desktops.connections.borrow_mut() = Some(Rc::new(CompositorAsyncClient::new(
+        connections,
+        requests.reactor.clone(),
+    )));
     let seat = Rc::new(SeatAsyncClient::new(seat, requests.reactor.clone()));
     spawner.spawn(seats.clone().switches(seat.clone()));
     seats.set_compositor(seat.clone()).await;
@@ -175,6 +189,7 @@ pub async fn start_for(
         seats
             .release_compositor(&seat, seats.console_screen(console))
             .await;
+        *q.desktops.connections.borrow_mut() = None;
         *q.desktops.linked.borrow_mut() = None;
         q.desktops.changed.wake_all();
     });
@@ -213,10 +228,13 @@ async fn spawn(
         u32,
         mikros_rt::interfaces::__midl::ClientEnd<Seat>,
         ServerEnd<Session>,
+        mikros_rt::interfaces::__midl::ClientEnd<Compositor>,
     ),
     Status,
 > {
     let (seat, seat_server) = endpoints::<Seat>().map_err(|_| Status::NoResources)?;
+    let (connections, connections_server) =
+        endpoints::<Compositor>().map_err(|_| Status::NoResources)?;
     let (session_client, session) = endpoints::<Session>().map_err(|_| Status::NoResources)?;
     let environment = [
         format!("HOME=/users/{name}"),
@@ -230,6 +248,11 @@ async fn spawn(
         path: COMPOSITOR.into(),
         arguments,
         handles: vec![
+            StartupHandle {
+                role: HandleRole::User,
+                id: CONNECTIONS_ID,
+                handle: connections_server.into_handle(),
+            },
             StartupHandle {
                 role: HandleRole::User,
                 id: SESSION_ID,
@@ -249,7 +272,7 @@ async fn spawn(
         umask: u32::MAX,
     };
     match requests.launcher.spawn(request).await {
-        Ok(Ok(spawned)) => Ok((spawned.pid, seat, session)),
+        Ok(Ok(spawned)) => Ok((spawned.pid, seat, session, connections)),
         Ok(Err(status)) => Err(status),
         Err(_) => Err(Status::PeerClosed),
     }
@@ -332,4 +355,45 @@ async fn serve_session(
         };
     }
     *requests.desktops.session.borrow_mut() = None;
+}
+
+/// The protocols that the session manager provides for the desktop's
+/// clients, which it forwards to the compositor (MIKSPEC-0066.R35).
+pub const WAYLAND: &str = "wayland";
+pub const OPENER: &str = "mikros.desktop.Opener";
+pub const FILE_PICKER: &str = "mikros.desktop.FilePicker";
+
+/// Forwards the connection `server` of the client `identity` to `protocol`
+/// to the compositor of the user's session, and closes it instead when no
+/// desktop of the client's user runs.
+pub async fn forward(
+    requests: &Requests,
+    protocol: &str,
+    server: mikros_rt::interfaces::__midl::OwnedHandle,
+    identity: ClientIdentity,
+) {
+    let linked = *requests.desktops.linked.borrow();
+    let connections = requests.desktops.connections.borrow().clone();
+    let (Some(linked), Some(connections)) = (linked, connections) else {
+        return;
+    };
+    if linked.user != identity.user {
+        return;
+    }
+    let sent = match protocol {
+        WAYLAND => connections.connect(server, identity).is_ok(),
+        OPENER => connections
+            .connect_opener(ServerEnd::<Opener>::new(server), identity)
+            .is_ok(),
+        FILE_PICKER => connections
+            .connect_file_picker(ServerEnd::<FilePicker>::new(server), identity)
+            .is_ok(),
+        _ => false,
+    };
+    if !sent {
+        mikros_rt::log!(
+            Error,
+            "sessionmgr: forwarding a {protocol} connection failed"
+        );
+    }
 }

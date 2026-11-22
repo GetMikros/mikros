@@ -169,6 +169,13 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             spawner.clone(),
                         );
                         spawner.spawn(serving);
+                    } else if [desktop::WAYLAND, desktop::OPENER, desktop::FILE_PICKER]
+                        .contains(&c.protocol.as_str())
+                    {
+                        let (requests, protocol) = (requests.clone(), c.protocol);
+                        spawner.spawn(async move {
+                            desktop::forward(&requests, &protocol, c.server, c.client).await;
+                        });
                     } else if c.protocol == ELEVATION {
                         let end = ServerEnd::new(c.server);
                         let client = c.client;

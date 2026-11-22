@@ -33,3 +33,9 @@ provides:
   - protocol: mikros.session.Elevation
   # For every process; StartDesktop checks the caller's login session.
   - protocol: mikros.session.Desktop
+  # For every app: the Wayland connections, the opener and the file picker,
+  # which are forwarded to the compositor of the user's session
+  # (MIKSPEC-0066.R35).
+  - protocol: wayland
+  - protocol: mikros.desktop.Opener
+  - protocol: mikros.desktop.FilePicker
