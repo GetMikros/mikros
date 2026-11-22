@@ -448,6 +448,10 @@ impl Server {
                 return;
             }
         }
+        // A press on a layer surface that takes the keyboard gives it.
+        if pressed && self.layer_takes_focus(top) {
+            self.focus_keyboard(Some(top));
+        }
         let serial = self.next_serial();
         if pressed {
             self.record_press(focus.client, serial);

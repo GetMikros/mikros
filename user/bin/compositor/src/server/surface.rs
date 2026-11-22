@@ -358,6 +358,7 @@ impl Server {
                 }
                 self.forget_surface_subsurfaces(imports, id);
                 self.layers.surfaces.remove(&id);
+                self.update_layer_focus();
                 self.client_mut(request).destroy(request.object);
                 self.collect(imports);
                 return Ok(());

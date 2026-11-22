@@ -209,6 +209,12 @@ impl Server {
     /// Gives the keyboard focus to the window `surface`, or to none,
     /// with `leave` to the window that had it and `enter` to the new one.
     pub(super) fn focus_keyboard(&mut self, surface: Option<SurfaceId>) {
+        // A layer surface that has the keyboard exclusively keeps it
+        // (MIKSPEC-0076.R26).
+        let surface = match (surface, self.exclusive_layer()) {
+            (Some(_), Some(layer)) => Some(layer),
+            _ => surface,
+        };
         let new = surface.and_then(|id| {
             let s = self.surfaces.get(&id)?;
             Some(Focus {
@@ -271,7 +277,7 @@ impl Server {
                 .is_some_and(|s| s.role == Role::Toplevel)
         });
         let windows: Vec<SurfaceId> = windows.map(|s| s.surface).collect();
-        if !windows.contains(&focus.surface) {
+        if !windows.contains(&focus.surface) && !self.layer_takes_focus(focus.surface) {
             self.focus_keyboard(windows.last().copied());
         }
     }

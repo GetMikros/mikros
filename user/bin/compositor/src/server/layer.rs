@@ -26,6 +26,7 @@ const ANCHOR_BOTTOM: u32 = 2;
 const ANCHOR_LEFT: u32 = 4;
 const ANCHOR_RIGHT: u32 = 8;
 const ANCHOR_ALL: u32 = 15;
+const KEYBOARD_EXCLUSIVE: u32 = 1;
 const KEYBOARD_ON_DEMAND: u32 = 2;
 
 /// The state that requests set and a commit applies.
@@ -351,6 +352,7 @@ impl Server {
             self.client_mut(request).destroy(request.object);
             if live {
                 self.layers.surfaces.remove(&surface);
+                self.update_layer_focus();
             }
             return Ok(());
         }
@@ -491,6 +493,7 @@ impl Server {
         }
         let size = layer.current.size_on(screen);
         if layer.started && layer.last == Some(size) {
+            self.update_layer_focus();
             return;
         }
         layer.started = true;
@@ -501,6 +504,7 @@ impl Server {
         if let Some(c) = self.clients.get_mut(&client) {
             surface_v1::send_configure(&mut c.out, object, serial, size.0, size.1);
         }
+        self.update_layer_focus();
     }
 
     /// Closes the layer surface of `id`: its client is told, and it is
@@ -514,6 +518,37 @@ impl Server {
         let (object, client) = (layer.object, layer.client);
         if let Some(c) = self.clients.get_mut(&client) {
             surface_v1::send_closed(&mut c.out, object);
+        }
+        self.update_layer_focus();
+    }
+
+    /// The layer surface that has the exclusive keyboard focus: of those
+    /// that are mapped and ask for it in the layers `top` and `overlay`,
+    /// the one in the highest layer, and in it the one mapped last.
+    pub(super) fn exclusive_layer(&self) -> Option<SurfaceId> {
+        let asking = self.layers.surfaces.iter().filter(|(_, l)| {
+            !l.closed && l.mapped_at.is_some() && l.current.keyboard() == KEYBOARD_EXCLUSIVE
+        });
+        let best = asking.max_by_key(|(_, l)| (l.current.layer, l.mapped_at));
+        best.map(|(&id, _)| id)
+    }
+
+    /// Whether the layer surface `surface` may have the keyboard focus, as
+    /// a click gives it for the interactivity `on_demand`.
+    pub(super) fn layer_takes_focus(&self, surface: SurfaceId) -> bool {
+        let layer = self.layers.surfaces.get(&surface);
+        layer.is_some_and(|l| !l.closed && l.mapped_at.is_some() && l.current.keyboard() != 0)
+    }
+
+    /// Gives the keyboard focus to the layer surface that has it
+    /// exclusively, or takes it from a layer surface that cannot keep it.
+    pub(super) fn update_layer_focus(&mut self) {
+        match self.exclusive_layer() {
+            Some(layer) if self.keyboard_focus() != Some(layer) => {
+                self.focus_keyboard(Some(layer));
+            }
+            Some(_) => {}
+            None => self.keep_keyboard_focus(),
         }
     }
 
@@ -938,5 +973,86 @@ mod tests {
         server.close_layer(id);
         let area = server.work_area();
         assert_eq!(area.y, 40);
+    }
+
+    /// Sets the keyboard interactivity of the layer surface `object`, of
+    /// the surface `surface`, and commits.
+    fn interactivity(
+        server: &mut Server,
+        client: &TestClient,
+        surface: u32,
+        object: u32,
+        value: u32,
+    ) {
+        client.send(server, object, 4, vec![Arg::Uint(value)]);
+        client.send(server, surface, 6, vec![]);
+    }
+
+    #[test]
+    fn a_layer_surface_that_asks_for_the_keyboard_exclusively_keeps_it_while_mapped() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        let window = *server.surfaces.keys().next().unwrap();
+        {
+            let s = server.surfaces.get_mut(&window).unwrap();
+            s.role = Role::Toplevel;
+            s.current.buffer = Some(99);
+            server.buffer_sizes.insert(99, (100, 50));
+        }
+        server.focus_keyboard(Some(window));
+        let top = map(&mut server, &client, 21, 31, 2, (0, (50, 50), 0));
+        // Without the interactivity, it does not take the focus.
+        assert_eq!(server.keyboard_focus(), Some(window));
+        interactivity(&mut server, &client, 21, 31, 1);
+        assert_eq!(server.keyboard_focus(), Some(top));
+        // Nobody else gets it, the window that is clicked included.
+        server.focus_keyboard(Some(window));
+        assert_eq!(server.keyboard_focus(), Some(top));
+        // The overlay layer wins over the top one, and then the last mapped.
+        let overlay_a = map(&mut server, &client, 22, 32, 3, (0, (50, 50), 0));
+        interactivity(&mut server, &client, 22, 32, 1);
+        assert_eq!(server.keyboard_focus(), Some(overlay_a));
+        let overlay_b = map(&mut server, &client, 23, 33, 3, (0, (50, 50), 0));
+        interactivity(&mut server, &client, 23, 33, 1);
+        assert_eq!(server.keyboard_focus(), Some(overlay_b));
+        // When it goes, the next one has it, and after the last, a window.
+        server.close_layer(overlay_b);
+        assert_eq!(server.keyboard_focus(), Some(overlay_a));
+        client.send(&mut server, 32, 7, vec![]);
+        assert_eq!(server.keyboard_focus(), Some(top));
+        client.send(&mut server, 21, 0, vec![]);
+        assert_eq!(server.keyboard_focus(), Some(window));
+        assert_eq!(client.error(&mut server), None);
+    }
+
+    #[test]
+    fn layers_below_the_windows_never_take_the_keyboard_and_a_click_gives_it_on_demand() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        let window = *server.surfaces.keys().next().unwrap();
+        {
+            let s = server.surfaces.get_mut(&window).unwrap();
+            s.role = Role::Toplevel;
+            s.current.buffer = Some(99);
+            server.buffer_sizes.insert(99, (100, 50));
+        }
+        server.focus_keyboard(Some(window));
+        let background = map(&mut server, &client, 20, 30, 0, (ANCHOR_ALL, (0, 0), 0));
+        interactivity(&mut server, &client, 20, 30, 1);
+        assert_eq!(server.keyboard_focus(), Some(window));
+        // A layer surface that asks on demand has it after a click on it.
+        let top = map(&mut server, &client, 21, 31, 2, (0, (50, 50), 0));
+        interactivity(&mut server, &client, 21, 31, 2);
+        assert_eq!(server.keyboard_focus(), Some(window));
+        let at = server
+            .shown()
+            .iter()
+            .find(|s| s.surface == top)
+            .map(|s| (s.x, s.y))
+            .unwrap();
+        server.pointer_motion(f64::from(at.0 + 5), f64::from(at.1 + 5), 1);
+        server.pointer_button(272, true, 2);
+        assert_eq!(server.keyboard_focus(), Some(top));
+        let _ = background;
     }
 }
