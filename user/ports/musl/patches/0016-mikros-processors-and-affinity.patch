@@ -1,0 +1,93 @@
+--- a/src/conf/sysconf.c
++++ b/src/conf/sysconf.c
+@@ -1,4 +1,6 @@
+ #include <unistd.h>
++
++extern long __mikros_cpu_count(void);
+ #include <limits.h>
+ #include <errno.h>
+ #include <sys/resource.h>
+@@ -201,12 +203,14 @@
+ 		return DELAYTIMER_MAX;
+ 	case JT_NPROCESSORS_CONF & 255:
+ 	case JT_NPROCESSORS_ONLN & 255: ;
+-		unsigned char set[128] = {1};
+-		int i, cnt;
+-		__syscall(SYS_sched_getaffinity, 0, sizeof set, set);
+-		for (i=cnt=0; i<sizeof set; i++)
+-			for (; set[i]; set[i]&=set[i]-1, cnt++);
+-		return cnt;
++		/* Mikros: the number of processors, not the calling thread's
++		 * affinity. */
++		long cpus = __mikros_cpu_count();
++		if (cpus < 0) {
++			errno = -cpus;
++			return -1;
++		}
++		return cpus;
+ 	case JT_PHYS_PAGES & 255:
+ 	case JT_AVPHYS_PAGES & 255: ;
+ 		unsigned long long mem;
+--- a/src/sched/affinity.c
++++ b/src/sched/affinity.c
+@@ -4,30 +4,28 @@
+ #include "pthread_impl.h"
+ #include "syscall.h"
+ 
++/* Mikros: the thread of `pid`, or of the thread ID `tid`, as the C
++ * library's thread table knows it; each returns 0 or a negated error
++ * number. A thread is named by its pthread_t. */
++extern long __mikros_sched_affinity(int pid, int set, size_t size, void *mask);
++extern long __mikros_thread_affinity(void *thread, int set, size_t size, void *mask);
++
+ int sched_setaffinity(pid_t tid, size_t size, const cpu_set_t *set)
+ {
+-	return syscall(SYS_sched_setaffinity, tid, size, set);
++	return __syscall_ret(__mikros_sched_affinity(tid, 1, size, (void *)set));
+ }
+ 
+ int pthread_setaffinity_np(pthread_t td, size_t size, const cpu_set_t *set)
+ {
+-	return -__syscall(SYS_sched_setaffinity, td->tid, size, set);
+-}
+-
+-static int do_getaffinity(pid_t tid, size_t size, cpu_set_t *set)
+-{
+-	long ret = __syscall(SYS_sched_getaffinity, tid, size, set);
+-	if (ret < 0) return ret;
+-	if (ret < size) memset((char *)set+ret, 0, size-ret);
+-	return 0;
++	return -__mikros_thread_affinity(td, 1, size, (void *)set);
+ }
+ 
+ int sched_getaffinity(pid_t tid, size_t size, cpu_set_t *set)
+ {
+-	return __syscall_ret(do_getaffinity(tid, size, set));
++	return __syscall_ret(__mikros_sched_affinity(tid, 0, size, set));
+ }
+ 
+ int pthread_getaffinity_np(pthread_t td, size_t size, cpu_set_t *set)
+ {
+-	return -do_getaffinity(td->tid, size, set);
++	return -__mikros_thread_affinity(td, 0, size, set);
+ }
+--- a/src/thread/pthread_join.c
++++ b/src/thread/pthread_join.c
+@@ -2,6 +2,9 @@
+ #include "pthread_impl.h"
+ #include <sys/mman.h>
+ 
++/* Mikros: the thread table lets go of the joined thread's handle. */
++extern void __mikros_thread_joined(void *thread);
++
+ static void dummy1(pthread_t t)
+ {
+ }
+@@ -21,6 +24,7 @@
+ 	if (r == ETIMEDOUT || r == EINVAL) return r;
+ 	__tl_sync(t);
+ 	if (res) *res = t->result;
++	__mikros_thread_joined(t);
+ 	if (t->map_base) __munmap(t->map_base, t->map_size);
+ 	return 0;
+ }

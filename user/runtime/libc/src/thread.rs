@@ -38,6 +38,9 @@ struct Thread {
     tls: usize,
     /// The address to clear and wake when the thread ends, or 0.
     clear: usize,
+    /// Whether the thread ended without anyone having joined it: only its
+    /// handle is kept, until `joined`.
+    ended: bool,
 }
 
 static THREADS: Lock<Vec<Thread>> = Lock::new(Vec::new());
@@ -66,7 +69,7 @@ fn tls() -> usize {
 pub fn set_tid_address(clear: usize, first: u32) -> i64 {
     let tp = tls();
     let mut threads = THREADS.lock();
-    if let Some(t) = threads.iter_mut().find(|t| t.tls == tp) {
+    if let Some(t) = threads.iter_mut().find(|t| t.tls == tp && !t.ended) {
         t.clear = clear;
         // The dynamic linker first calls it before the startup transfer
         // gave the first thread's ID and handle.
@@ -84,6 +87,7 @@ pub fn set_tid_address(clear: usize, first: u32) -> i64 {
         start: 0,
         tls: tp,
         clear,
+        ended: false,
     });
     i64::from(first)
 }
@@ -95,6 +99,37 @@ pub fn handle_of(tid: u32) -> Option<Handle> {
         .iter()
         .find(|t| t.tid == tid)
         .map(|t| t.handle)
+}
+
+/// The handle of the first thread, which is the process's main thread.
+pub fn first() -> Option<Handle> {
+    match FIRST.load(Ordering::Relaxed) {
+        0 => None,
+        handle => Some(handle),
+    }
+}
+
+/// The handle of the thread whose `pthread_t` is `thread`, which is its
+/// thread pointer, also when it ended and was not joined yet.
+pub fn handle_of_pthread(thread: usize) -> Option<Handle> {
+    THREADS
+        .lock()
+        .iter()
+        .find(|t| t.tls == thread)
+        .map(|t| t.handle)
+}
+
+/// `pthread_join` has joined the thread `thread`, a `pthread_t`, or
+/// `pthread_detach` has found it ended: its handle is not needed any more.
+#[unsafe(no_mangle)]
+extern "C" fn __mikros_thread_joined(thread: usize) {
+    let mut threads = THREADS.lock();
+    let Some(at) = threads.iter().position(|t| t.ended && t.tls == thread) else {
+        return;
+    };
+    let thread = threads.swap_remove(at);
+    // SAFETY: closing takes no pointers; the thread has ended.
+    unsafe { sys::handle_close(thread.handle) };
 }
 
 /// The handle of the thread that started with a stack pointer at most a
@@ -115,7 +150,7 @@ pub fn current() -> Option<Handle> {
     THREADS
         .lock()
         .iter()
-        .find(|t| t.tls == tp)
+        .find(|t| t.tls == tp && !t.ended)
         .map(|t| t.handle)
 }
 
@@ -125,14 +160,14 @@ pub fn altstack() -> (u64, u64) {
     let threads = THREADS.lock();
     threads
         .iter()
-        .find(|t| t.tls == tp)
+        .find(|t| t.tls == tp && !t.ended)
         .map_or((0, 0), |t| t.altstack)
 }
 
 /// Records the alternate signal stack of the calling thread.
 pub fn set_altstack(altstack: (u64, u64)) {
     let tp = tls();
-    if let Some(t) = THREADS.lock().iter_mut().find(|t| t.tls == tp) {
+    if let Some(t) = THREADS.lock().iter_mut().find(|t| t.tls == tp && !t.ended) {
         t.altstack = altstack;
     }
 }
@@ -143,7 +178,7 @@ pub fn gettid() -> i64 {
     let threads = THREADS.lock();
     threads
         .iter()
-        .find(|t| t.tls == tp)
+        .find(|t| t.tls == tp && !t.ended)
         .map_or(-errno::ESRCH, |t| i64::from(t.tid))
 }
 
@@ -191,6 +226,7 @@ extern "C" fn __mikros_clone(
         start: sp,
         tls,
         clear,
+        ended: false,
     });
     // SAFETY: musl's stack for the thread is mapped and unused below
     // `stack`.
@@ -238,14 +274,25 @@ extern "C" fn thread_return(_code: i32) -> ! {
     exit()
 }
 
-/// Removes the calling thread from the table, closes its handle and
-/// returns its clear-on-exit address.
-fn forget() -> usize {
+/// Takes the calling thread out of the thread pointer lookups and returns
+/// its clear-on-exit address. When `detached`, which it is when musl
+/// unmaps the thread's own stack, the handle is closed and the thread
+/// forgotten; otherwise the thread was not joined, and its handle is kept
+/// until `__mikros_thread_joined`.
+fn forget(detached: bool) -> usize {
     let tp = tls();
     let mut threads = THREADS.lock();
-    let Some(at) = threads.iter().position(|t| t.tls == tp) else {
+    let Some(at) = threads.iter().position(|t| t.tls == tp && !t.ended) else {
         return 0;
     };
+    if !detached && threads[at].owned {
+        // The thread pointer, which is the thread's `pthread_t`, stays: the
+        // join and the affinity calls name the thread by it, and the
+        // lookups of the calling thread skip an ended entry.
+        let thread = &mut threads[at];
+        thread.ended = true;
+        return core::mem::take(&mut thread.clear);
+    }
     let thread = threads.swap_remove(at);
     if thread.owned {
         // SAFETY: closing takes no pointers; the thread runs on.
@@ -256,7 +303,7 @@ fn forget() -> usize {
 
 /// Ends the calling thread.
 pub fn exit() -> ! {
-    let clear = forget();
+    let clear = forget(false);
     // SAFETY: nothing of the thread is used after the clear.
     unsafe { finish(0, 0, clear) }
 }
@@ -265,7 +312,7 @@ pub fn exit() -> ! {
 /// calling thread's stack, and ends the thread.
 #[unsafe(no_mangle)]
 extern "C" fn __mikros_unmapself(base: usize, size: usize) -> ! {
-    let clear = forget();
+    let clear = forget(true);
     // SAFETY: nothing of the thread is used after the unmapping.
     unsafe { finish(base, size, clear) }
 }

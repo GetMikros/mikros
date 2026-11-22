@@ -7,6 +7,7 @@
 extern crate alloc;
 
 mod abi;
+mod affinity;
 mod clock;
 mod dir;
 mod epoll;

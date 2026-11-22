@@ -26,6 +26,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sched.h>
 #include <sys/sysinfo.h>
 #include <sys/timerfd.h>
 #include <sys/utsname.h>
@@ -442,6 +443,113 @@ static int stack_sizes(void)
 /* Threads have their own thread-local storage and share a mutex, hand
    over through a condition variable, end detached, and are created and
    joined many times. */
+/* The processor count and the affinity of threads: the count is the
+   kernel's whatever a thread is restricted to; sched_setaffinity and
+   sched_getaffinity act on the calling thread for pid 0 and on the main
+   thread for the process ID, and fail with ESRCH for any other; the
+   pthread versions work for the main thread and for a thread that
+   pthread_create made, until it is joined; a mask that selects no
+   processor and a buffer that is too small are EINVAL. */
+/* Says on standard error which check of the affinity test failed. */
+static int affinity_failed(int line, int err)
+{
+	fprintf(stderr, "hello: the affinity check at line %d failed, errno %d\n", line, err);
+	return 0;
+}
+
+static pthread_t main_thread;
+static volatile int affinity_ok;
+
+static int one_cpu_only(const cpu_set_t *set)
+{
+	return CPU_COUNT(set) == 1 && CPU_ISSET(0, set);
+}
+
+static void *affinity_worker(void *arg)
+{
+	(void)arg;
+	cpu_set_t want, got;
+	CPU_ZERO(&want);
+	CPU_SET(0, &want);
+	/* The main thread, by the process ID, and by its pthread. */
+	if (sched_setaffinity(getpid(), sizeof want, &want)) {
+		affinity_failed(__LINE__, errno);
+		return 0;
+	}
+	if (pthread_getaffinity_np(main_thread, sizeof got, &got) || !one_cpu_only(&got)) {
+		affinity_failed(__LINE__, errno);
+		return 0;
+	}
+	/* A thread ID that is not the process's. */
+	if (sched_getaffinity(getpid() + 1000, sizeof got, &got) != -1 || errno != ESRCH) {
+		affinity_failed(__LINE__, errno);
+		return 0;
+	}
+	affinity_ok = 1;
+	return 0;
+}
+
+static int affinity_run(void)
+{
+	uint32_t cpus = 0;
+	if (mikros_system_get_cpu_count(&cpus) != 0 || cpus < 1)
+		return affinity_failed(__LINE__, errno);
+	if (sysconf(_SC_NPROCESSORS_CONF) != (long)cpus
+	    || sysconf(_SC_NPROCESSORS_ONLN) != (long)cpus
+	    || get_nprocs() != (int)cpus || get_nprocs_conf() != (int)cpus)
+		return affinity_failed(__LINE__, errno);
+	main_thread = pthread_self();
+	cpu_set_t all, got, want;
+	CPU_ZERO(&all);
+	/* A thread that never had its affinity set is allowed everywhere. */
+	if (sched_getaffinity(0, sizeof all, &all) || CPU_COUNT(&all) != (int)cpus)
+		return affinity_failed(__LINE__, errno);
+	CPU_ZERO(&want);
+	CPU_SET(0, &want);
+	if (sched_setaffinity(0, sizeof want, &want) || sched_getaffinity(0, sizeof got, &got)
+	    || !one_cpu_only(&got))
+		return affinity_failed(__LINE__, errno);
+	/* The count does not follow the affinity. */
+	if (sysconf(_SC_NPROCESSORS_ONLN) != (long)cpus)
+		return affinity_failed(__LINE__, errno);
+	if (pthread_getaffinity_np(pthread_self(), sizeof got, &got) || !one_cpu_only(&got))
+		return affinity_failed(__LINE__, errno);
+	/* A mask that selects no processor, a buffer that is too small. */
+	cpu_set_t none;
+	CPU_ZERO(&none);
+	if (sched_setaffinity(0, sizeof none, &none) != -1 || errno != EINVAL)
+		return affinity_failed(__LINE__, errno);
+	if (cpus > 8 && (sched_getaffinity(0, 1, &got) != -1 || errno != EINVAL))
+		return affinity_failed(__LINE__, errno);
+	if (pthread_setaffinity_np(pthread_self(), sizeof none, &none) != EINVAL)
+		return affinity_failed(__LINE__, errno);
+	if (sched_getaffinity(getpid() + 1000, sizeof got, &got) != -1 || errno != ESRCH)
+		return affinity_failed(__LINE__, errno);
+	/* Another thread restricts the main thread and its own. */
+	pthread_t w;
+	if (pthread_create(&w, 0, affinity_worker, 0))
+		return affinity_failed(__LINE__, errno);
+	cpu_set_t everywhere;
+	CPU_ZERO(&everywhere);
+	for (uint32_t i = 0; i < cpus && i < CPU_SETSIZE; i++)
+		CPU_SET(i, &everywhere);
+	/* The worker, which can be read while it lives or after it ended
+	   and before it is joined. */
+	for (int tries = 0; tries < 1000 && !affinity_ok; tries++)
+		usleep(1000);
+	if (pthread_getaffinity_np(w, sizeof got, &got) != 0 && !affinity_ok)
+		return affinity_failed(__LINE__, errno);
+	if (pthread_setaffinity_np(w, sizeof everywhere, &everywhere) != 0)
+		return affinity_failed(__LINE__, errno);
+	if (pthread_join(w, 0) || !affinity_ok)
+		return affinity_failed(__LINE__, errno);
+	/* The main thread, restricted by the worker, is restored. */
+	if (sched_setaffinity(0, sizeof everywhere, &everywhere)
+	    || sched_getaffinity(0, sizeof got, &got) || CPU_COUNT(&got) != (int)cpus)
+		return affinity_failed(__LINE__, errno);
+	return 1;
+}
+
 static int threads_run(void)
 {
 	pthread_t t[4];
@@ -1443,6 +1551,8 @@ int main(int argc, char **argv)
 		return 40;
 	if (!standard_descriptors_are_reserved())
 		return 41;
+	if (!affinity_run())
+		return 42;
 	char *copy = malloc(64);
 	if (!copy)
 		return 34;
