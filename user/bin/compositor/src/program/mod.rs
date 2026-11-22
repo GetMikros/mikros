@@ -22,6 +22,7 @@ mod render;
 mod session;
 mod themes;
 
+use crate::connections;
 use crate::haze;
 use crate::restarts::{LIMIT, Restarts};
 use crate::server::{ClientId, Cursor, Point, Rect, Server, shape_name};
@@ -39,7 +40,7 @@ use mikros_rt::interfaces::mikros::session::{SeatAsyncServer, SeatRequest};
 use output::Output;
 use render::{Haze, Layer, Look, Renderer, Under};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::{Future, poll_fn};
 use std::os::mikros::startup;
 use std::pin::{Pin, pin};
@@ -93,6 +94,10 @@ impl Notify {
 }
 
 pub struct Compositor {
+    /// Whether the compositor runs in greeter mode, and the app IDs of the
+    /// parts it started, which are the clients it serves there.
+    greeter_mode: bool,
+    started: RefCell<BTreeSet<String>>,
     reactor: Reactor,
     spawner: Spawner,
     /// The compositor's `Launcher` client, which starts the shell's parts
@@ -229,6 +234,13 @@ impl Compositor {
             match request {
                 CompositorRequest::Connect(connect) => {
                     let app_id = connect.identity.app_id.clone();
+                    if !connections::accepts(self.greeter_mode, &self.started.borrow(), &app_id) {
+                        mikros_rt::log!(
+                            Info,
+                            "compositor: refused a client of {app_id}, which greeter mode does not serve"
+                        );
+                        continue;
+                    }
                     mikros_rt::log!(Info, "compositor: a client of {app_id} connected");
                     let this = self.clone();
                     self.spawner
@@ -781,6 +793,7 @@ impl Compositor {
             }
         };
         mikros_rt::log!(Info, "compositor: started {name} as pid {pid}");
+        self.started.borrow_mut().insert(part.app_id.clone());
         let launcher = self.launcher.clone();
         let name = name.to_owned();
         let exited = async move {
@@ -884,6 +897,8 @@ pub fn main() {
     }
     server.seed_tokens(u64::from_ne_bytes(seed));
     let compositor = Rc::new_cyclic(|me| Compositor {
+        greeter_mode: login.is_some(),
+        started: RefCell::default(),
         me: me.clone(),
         flushing: RefCell::default(),
         reactor: reactor.clone(),

@@ -17,6 +17,7 @@ use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::files::{self, Failure};
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::desktop::{Compositor, CompositorAsyncClient};
 use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient};
 use mikros_rt::interfaces::mikros::process::{
     HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
@@ -37,6 +38,7 @@ const MANIFEST: &str = "programs/system.compositor.yaml";
 const SETTINGS: &str = "session.yaml";
 const CONTROL: &str = "mikros.service.Control";
 /// The `USER` startup handle IDs of the compositor's channels.
+const CONNECTIONS_ID: u32 = 1;
 const LOGIN_ID: u32 = 3;
 const SEAT_ID: u32 = 7;
 /// How many exits within how long make the console take over.
@@ -45,7 +47,7 @@ const EXIT_WINDOW: i64 = 60 * SECOND;
 const FOREVER: i64 = i64::MAX;
 /// The user ID of the greeter account, which the compositor in greeter
 /// mode runs as.
-const GREETER_USER: u32 = 1;
+pub const GREETER_USER: u32 = 1;
 
 /// Whether a desktop is installed, from the files under `system` and
 /// `config`, the directories of `/system` and `/system/config`.
@@ -140,6 +142,9 @@ pub async fn run(
         else {
             return;
         };
+        let Ok((connections, connections_server)) = endpoints::<Compositor>() else {
+            return;
+        };
         let Some(arguments) = block(&[COMPOSITOR], &[]) else {
             return;
         };
@@ -147,6 +152,11 @@ pub async fn run(
             path: COMPOSITOR.into(),
             arguments,
             handles: vec![
+                StartupHandle {
+                    role: HandleRole::User,
+                    id: CONNECTIONS_ID,
+                    handle: connections_server.into_handle(),
+                },
                 StartupHandle {
                     role: HandleRole::User,
                     id: LOGIN_ID,
@@ -180,6 +190,10 @@ pub async fn run(
             "sessionmgr: started the compositor in greeter mode as pid {pid}"
         );
         desktops.greeter.set(Some(pid));
+        *desktops.greeter_connections.borrow_mut() = Some(Rc::new(CompositorAsyncClient::new(
+            connections,
+            reactor.clone(),
+        )));
         let seat = Rc::new(SeatAsyncClient::new(seat, reactor.clone()));
         spawner.spawn(seats.clone().switches(seat.clone()));
         seats.set_compositor(seat.clone()).await;
@@ -189,6 +203,7 @@ pub async fn run(
         let (q, s) = (requests.clone(), seats.clone());
         spawner.spawn(async move { serve(login, &d, &a, &q, &s, &r).await });
         exited(&launcher, pid).await;
+        *desktops.greeter_connections.borrow_mut() = None;
         desktops.greeter.set(None);
         desktops.changed.wake_all();
         seats

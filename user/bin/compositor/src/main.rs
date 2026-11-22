@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 mod accessibility;
+mod connections;
 mod haze;
 mod keyboard;
 #[cfg(target_os = "mikros")]

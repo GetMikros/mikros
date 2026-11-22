@@ -73,6 +73,8 @@ pub struct Desktops {
     /// The desktop's compositor's `Compositor` channel, on which the
     /// connections of clients are forwarded to it (MIKSPEC-0066.R35).
     pub connections: RefCell<Option<Rc<CompositorAsyncClient>>>,
+    /// The same of the greeter's compositor while it runs.
+    pub greeter_connections: RefCell<Option<Rc<CompositorAsyncClient>>>,
     /// Woken when the greeter's compositor or the desktop ended.
     pub changed: Waiters,
 }
@@ -372,12 +374,21 @@ pub async fn forward(
     server: mikros_rt::interfaces::__midl::OwnedHandle,
     identity: ClientIdentity,
 ) {
+    // The desktop of a user's session, or else the greeter's compositor,
+    // with the user that may connect to it.
     let linked = *requests.desktops.linked.borrow();
-    let connections = requests.desktops.connections.borrow().clone();
-    let (Some(linked), Some(connections)) = (linked, connections) else {
-        return;
+    let desktop = requests.desktops.connections.borrow().clone();
+    let greeter = requests.desktops.greeter_connections.borrow().clone();
+    let (connections, user) = match (linked, desktop, greeter) {
+        (Some(linked), Some(connections), _) => (connections, linked.user),
+        // In greeter mode only `wayland` is forwarded; the opener and the
+        // file picker are closed here.
+        (None, _, Some(connections)) if protocol == WAYLAND => {
+            (connections, crate::greeter::GREETER_USER)
+        }
+        _ => return,
     };
-    if linked.user != identity.user {
+    if user != identity.user {
         return;
     }
     let sent = match protocol {
