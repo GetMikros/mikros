@@ -16,8 +16,8 @@
 //! wallpaper that its desktop part hands the compositor covers the
 //! screen, until the haze of that wallpaper shows under its taskbar
 //! part's transparent panel, until its switcher part's SDL window fills
-//! the corner at the top left, with the pointer's arrow in the middle
-//! of the screen, until the arrow follows QEMU's mouse onto the
+//! the middle of the screen, where the compositor places it, with the
+//! pointer's arrow over it, until the arrow follows QEMU's mouse onto the
 //! wallpaper and turns into the hand that the panel asks for on the
 //! panel, and until its start-menu part connected to the service
 //! manager's `Control`, whose question the compositor cancels, and was
@@ -88,12 +88,15 @@ const TOLERANCE: u8 = 2;
 /// that it may still cover on a text console's screen.
 const COVERED: f64 = 0.9;
 const GONE: f64 = 0.1;
+/// The share of its window that the window's colour must cover: all of
+/// it but the pointer's arrow.
+const WINDOW_SHARE: f64 = 0.97;
 /// How often the screen is dumped while the run waits for the colour.
 const DUMP_EVERY: Duration = Duration::from_secs(1);
 
 /// The window that the shell probe's switcher part shows, which the
-/// compositor puts at the top left corner of the screen: its colour, its
-/// size, and what the run is waiting for while it is not shown.
+/// compositor centres on the screen: its colour, its size, and what the
+/// run is waiting for while it is not shown.
 pub struct Window {
     pub colour: [u8; 3],
     pub size: (usize, usize),
@@ -126,24 +129,30 @@ fn colour_share(ppm: &[u8], colour: [u8; 3], part: f64) -> Option<f64> {
     Some(shown as f64 / pixels.len() as f64)
 }
 
-/// The share of the pixels of the `width` by `height` corner at the top
-/// left of the screen dump `ppm` that show `colour`, or None when it is
-/// not a PPM image or has no such corner.
-fn corner_share(ppm: &[u8], colour: [u8; 3], (width, height): (usize, usize)) -> Option<f64> {
+/// The share of the pixels of the `width` by `height` rectangle in the
+/// middle of the screen dump `ppm`, where the compositor places the first
+/// window of a screen whose work area is all of it, that show `colour`,
+/// or None when it is not a PPM image or has no such rectangle.
+fn window_share(ppm: &[u8], colour: [u8; 3], (width, height): (usize, usize)) -> Option<f64> {
     let head = &ppm[..ppm.len().min(32)];
     let text = String::from_utf8_lossy(head);
     let screen_width: usize = text.split_ascii_whitespace().nth(1)?.parse().ok()?;
     let all = scenario::ppm_pixels(ppm)?;
-    if width == 0 || height == 0 || width > screen_width || all.len() < height * screen_width {
+    if width == 0 || height == 0 || screen_width == 0 || all.len() % screen_width != 0 {
         return None;
     }
+    let screen_height = all.len() / screen_width;
+    if width > screen_width || height > screen_height {
+        return None;
+    }
+    let (left, top) = ((screen_width - width) / 2, (screen_height - height) / 2);
     let near = |p: &[u8; 3]| {
         p.iter()
             .zip(colour)
             .all(|(&a, b)| a.abs_diff(b) <= TOLERANCE)
     };
-    let shown = (0..height)
-        .flat_map(|row| &all[row * screen_width..row * screen_width + width])
+    let shown = (top..top + height)
+        .flat_map(|row| &all[row * screen_width + left..row * screen_width + left + width])
         .filter(|p| near(p))
         .count();
     Some(shown as f64 / (width * height) as f64)
@@ -234,11 +243,11 @@ impl Screen<'_> {
         }
     }
 
-    /// Dumps the screen until the `window` corner at its top left shows
+    /// Dumps the screen until the `window` in the middle of the screen shows
     /// `colour` all over, which `what` names, while `qemu` runs,
     /// and fails at once if `log` says that the part that shows it ended,
     /// which `ended` is the line of.
-    fn until_corner(
+    fn until_window(
         &mut self,
         qemu: &mut std::process::Child,
         log: &Path,
@@ -249,11 +258,12 @@ impl Screen<'_> {
     ) -> Result<()> {
         loop {
             let ppm = scenario::screen_dump(self.socket, self.dump)?;
-            let share = corner_share(&ppm, colour, window)
-                .context("the screen dump is not a PPM image with that corner")?;
-            // The whole corner: the client clears all of its window, so a
-            // pixel of another colour is a fault and no slack.
-            if share >= 1.0 {
+            let share = window_share(&ppm, colour, window)
+                .context("the screen dump is not a PPM image with that window")?;
+            // The client clears all of its window, so a pixel of another
+            // colour is a fault, except for the pointer's arrow, which
+            // starts in the middle of the screen, over the window.
+            if share >= WINDOW_SHARE {
                 return Ok(());
             }
             let serial = fs::read_to_string(log).unwrap_or_default();
@@ -265,7 +275,7 @@ impl Screen<'_> {
             }
             if Instant::now() > self.deadline {
                 bail!(
-                    "timed out before {what}, with the colour on {:.0}% of the corner",
+                    "timed out before {what}, with the colour on {:.0}% of the window",
                     share * 100.0
                 );
             }
@@ -331,7 +341,7 @@ pub fn run_with(
         let what = "the taskbar's haze showed";
         screen.until_below(&mut qemu, HAZE, HAZE_PART, &covered, what)?;
         let Window { colour, size, what } = *window;
-        screen.until_corner(&mut qemu, &log, SDL_EXITED, colour, size, what)?;
+        screen.until_window(&mut qemu, &log, SDL_EXITED, colour, size, what)?;
         let shown = pixel(&fs::read(&dump)?, ARROW_PIXEL);
         if shown != Some([0, 0, 0]) {
             bail!("the pointer's arrow is not in the middle of the screen: {shown:?}");
@@ -403,20 +413,24 @@ mod tests {
     }
 
     #[test]
-    fn counts_the_pixels_of_the_corner() {
+    fn counts_the_pixels_of_the_window_in_the_middle() {
         let (c, w) = (SDL.colour, WALLPAPER);
-        // A screen of 4 by 3 pixels, whose 2 by 2 corner has one pixel of
-        // the wrong colour, and a window colour elsewhere that does not
-        // count.
-        let rows = [[c, c, c, c], [c, w, w, w], [c, c, c, c]];
-        let mut screen = b"P6\n4 3\n255\n".to_vec();
+        // A screen of 6 by 4 pixels, whose 2 by 2 middle, from (2, 1),
+        // has one pixel of the wrong colour, and a window colour elsewhere
+        // that does not count.
+        let rows = [
+            [c, w, w, w, w, c],
+            [c, w, c, c, w, c],
+            [c, w, c, w, w, c],
+            [c, w, w, w, w, c],
+        ];
+        let mut screen = b"P6\n6 4\n255\n".to_vec();
         screen.extend(rows.iter().flatten().flatten());
-        assert_eq!(corner_share(&screen, SDL.colour, (2, 2)), Some(0.75));
-        assert_eq!(corner_share(&screen, SDL.colour, (1, 3)), Some(1.0));
-        assert_eq!(corner_share(&screen, WALLPAPER, (2, 2)), Some(0.25));
-        assert_eq!(corner_share(&screen, SDL.colour, (5, 1)), None);
-        assert_eq!(corner_share(&screen, SDL.colour, (2, 4)), None);
-        assert_eq!(corner_share(&screen, SDL.colour, (0, 2)), None);
-        assert_eq!(corner_share(b"not a picture", SDL.colour, (1, 1)), None);
+        assert_eq!(window_share(&screen, SDL.colour, (2, 2)), Some(0.75));
+        assert_eq!(window_share(&screen, WALLPAPER, (2, 2)), Some(0.25));
+        assert_eq!(window_share(&screen, SDL.colour, (7, 1)), None);
+        assert_eq!(window_share(&screen, SDL.colour, (2, 5)), None);
+        assert_eq!(window_share(&screen, SDL.colour, (0, 2)), None);
+        assert_eq!(window_share(b"not a picture", SDL.colour, (1, 1)), None);
     }
 }
