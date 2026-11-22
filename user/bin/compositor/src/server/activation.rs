@@ -214,7 +214,7 @@ impl Server {
     }
 
     /// The client whose window has the keyboard focus.
-    fn keyboard_client(&self) -> Option<ClientId> {
+    pub(super) fn keyboard_client(&self) -> Option<ClientId> {
         self.surfaces.get(&self.keyboard_focus()?).map(|s| s.client)
     }
 

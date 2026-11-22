@@ -237,6 +237,8 @@ impl Server {
             }
         }
         if let Some(new) = new {
+            // The selection comes before the focus.
+            self.announce_selection_to(new.client);
             let serial = self.next_serial();
             for (keyboard, _) in self.keyboards_of(new.client) {
                 self.enter_keyboard(new, keyboard, serial);

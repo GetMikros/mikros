@@ -12,6 +12,7 @@ mod arrange;
 mod buffer;
 mod cursor_shape;
 mod damage;
+mod data;
 mod grabs;
 mod keyboard;
 mod material;
@@ -40,8 +41,8 @@ pub use surface::{Rect, Role, Surface, SurfaceId};
 
 use crate::wayland::protocols::{
     mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, mikros_theme_v1, wl_callback,
-    wl_compositor, wl_display, wl_output, wl_registry, wl_seat, wp_cursor_shape_manager_v1,
-    xdg_activation_v1, xdg_wm_base,
+    wl_compositor, wl_data_device_manager, wl_display, wl_output, wl_registry, wl_seat,
+    wp_cursor_shape_manager_v1, xdg_activation_v1, xdg_wm_base,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -91,6 +92,10 @@ pub enum Resource {
     ActivationToken,
     ToplevelList,
     ToplevelHandle(SurfaceId),
+    DataManager,
+    DataSource,
+    DataDevice,
+    DataOffer,
 }
 
 /// An object of a client.
@@ -274,6 +279,8 @@ pub struct Server {
     activation: activation::Activation,
     /// The window lists of the shell's components.
     toplevels: toplevels::Lists,
+    /// The clipboard.
+    data: data::Data,
     /// The windows in order of last focus, and the window switcher.
     switching: switcher::Switching,
     /// The rectangles of each client's regions, added or, when false,
@@ -329,6 +336,11 @@ impl Server {
             &wp_cursor_shape_manager_v1::INTERFACE,
             cursor_shape::VERSION,
             Resource::CursorShapes,
+        );
+        server.add_global(
+            &wl_data_device_manager::INTERFACE,
+            data::VERSION,
+            Resource::DataManager,
         );
         server.add_global(
             &xdg_activation_v1::INTERFACE,
@@ -395,6 +407,7 @@ impl Server {
         });
         self.regions.retain(|(c, _), _| *c != client);
         self.forget_client_lists(client);
+        self.forget_client_data(client);
         self.collect(imports);
     }
 
@@ -524,6 +537,10 @@ impl Server {
             Resource::CursorShapes | Resource::CursorShape => {
                 self.cursor_shape_request(request, resource, args)?
             }
+            Resource::DataManager
+            | Resource::DataSource
+            | Resource::DataDevice
+            | Resource::DataOffer => self.data_request(request, resource, args)?,
             Resource::ToplevelList | Resource::ToplevelHandle(_) => {
                 self.toplevel_request(request, resource, args)?
             }
@@ -823,6 +840,7 @@ pub(crate) mod tests {
                 &Arg::String(Some("mikros_theme_v1".into())),
                 &Arg::String(Some("wl_seat".into())),
                 &Arg::String(Some("wp_cursor_shape_manager_v1".into())),
+                &Arg::String(Some("wl_data_device_manager".into())),
                 &Arg::String(Some("xdg_activation_v1".into()))
             ]
         );
