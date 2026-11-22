@@ -449,6 +449,54 @@ mod tests {
     }
 
     #[test]
+    fn presentation_feedback_follows_the_buffer_that_waits_for_its_acquire_point() {
+        use crate::wayland::protocols::{wl_registry, wp_presentation, wp_presentation_feedback};
+        let mut server = Server::new();
+        let client = with_sync(&mut server);
+        server.surfaces.values_mut().next().unwrap().role = Role::Toplevel;
+        client.bind(&mut server, 2, &wp_presentation::INTERFACE, 20);
+        let events = |server: &mut Server| {
+            client
+                .events(server, &|id| match id {
+                    1 => &wl_display::EVENTS,
+                    2 => &wl_registry::EVENTS,
+                    20 => &wp_presentation::EVENTS,
+                    21 | 22 => &wp_presentation_feedback::EVENTS,
+                    _ => &mikros_buffer_v1::EVENTS,
+                })
+                .into_iter()
+                .filter(|e| e.0 >= 21)
+                .map(|e| (e.0, e.1))
+                .collect::<Vec<_>>()
+        };
+        // The feedback of the commit that attaches a buffer that waits is
+        // neither presented nor discarded before the buffer is shown.
+        points(&mut server, &client, 1, 2);
+        let feedback = |server: &mut Server, id| {
+            let args = vec![Arg::Object(Some(4)), Arg::NewId(NewId(id))];
+            client.send(server, 20, 1, args);
+        };
+        feedback(&mut server, 21);
+        attach(&mut server, &client, 6);
+        server.settle(|_| false);
+        server.frame_presented(1_000_000_000);
+        assert!(events(&mut server).is_empty());
+        // Another buffer waits; the first is shown at its point, and a
+        // frame presents its feedback while the second still waits.
+        client.send(&mut server, 5, 0, token(9, 42));
+        points(&mut server, &client, 3, 4);
+        feedback(&mut server, 22);
+        attach(&mut server, &client, 9);
+        server.settle(|p| p.value <= 1);
+        server.frame_presented(2_000_000_000);
+        assert_eq!(events(&mut server), [(21, 1)]);
+        // Reached, the second is shown and its feedback presented.
+        server.settle(|p| p.value <= 3);
+        server.frame_presented(3_000_000_000);
+        assert_eq!(events(&mut server), [(22, 1)]);
+    }
+
+    #[test]
     fn shows_buffers_once_their_acquire_points_are_reached() {
         let mut server = Server::new();
         let client = with_sync(&mut server);

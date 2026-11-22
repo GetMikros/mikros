@@ -652,16 +652,23 @@ impl Compositor {
             for point in releases {
                 self.store.borrow().reach(point);
             }
-            if let Some(changed) = &changed
-                && let Err(e) = output.show(changed.as_deref()).await
-            {
-                mikros_rt::log!(Error, "compositor: showing a frame: {e:?}");
+            let mut presented = false;
+            if let Some(changed) = &changed {
+                match output.show(changed.as_deref()).await {
+                    Ok(()) => presented = true,
+                    Err(e) => mikros_rt::log!(Error, "compositor: showing a frame: {e:?}"),
+                }
             }
             // Unless the display was given again meanwhile.
             if self.output.borrow().is_none() {
                 *self.output.borrow_mut() = Some(output);
             }
             self.server.borrow_mut().frames_done(milliseconds());
+            if presented {
+                self.server
+                    .borrow_mut()
+                    .frame_presented(mikros_rt::objects::now().max(0) as u64);
+            }
             self.flush_all();
             // While the haze fades in, frames follow each other, and an
             // animated cursor asks for a frame when its next one is due.

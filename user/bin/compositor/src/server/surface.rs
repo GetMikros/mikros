@@ -116,6 +116,8 @@ pub(super) struct Waiting {
     pub acquire: Point,
     pub release: Option<Point>,
     pub damage: Vec<Rect>,
+    /// The presentation feedback of its commit.
+    pub feedback: Vec<(super::ClientId, ObjectId)>,
 }
 
 /// The most buffers that wait for their acquire points on a surface; a
@@ -461,6 +463,11 @@ impl Server {
         self.check_panel_commit(id)?;
         self.check_points(id)?;
         self.check_viewport(id)?;
+        // The feedback that waits for this commit's content to be shown, and
+        // that of content that it gives up.
+        let mut asked = self.presentation.take_asked(id);
+        let mut discarded = Vec::new();
+        let mut replaced = false;
         let surface = self.surfaces.get_mut(&id).expect("a checked surface");
         let pending = &mut surface.pending;
         let current = &mut surface.current;
@@ -482,19 +489,24 @@ impl Server {
                         let oldest = surface.waiting.remove(0);
                         self.releases.extend(oldest.release);
                         surface.waiting[0].damage.extend(oldest.damage);
+                        discarded.extend(oldest.feedback);
                     }
                     surface.waiting.push(Waiting {
                         buffer,
                         acquire,
                         release: pending.release.take(),
                         damage: Vec::new(),
+                        feedback: std::mem::take(&mut asked),
                     });
                     waits = true;
                 }
                 (buffer, _) => {
                     self.releases.extend(current.release.take());
-                    let waited = surface.waiting.drain(..);
-                    self.releases.extend(waited.filter_map(|w| w.release));
+                    for w in surface.waiting.drain(..) {
+                        self.releases.extend(w.release);
+                        discarded.extend(w.feedback);
+                    }
+                    replaced = true;
                     current.buffer = buffer;
                     current.acquire = None;
                     current.release = pending.release.take();
@@ -517,6 +529,7 @@ impl Server {
         self.committed(request, id);
         self.panel_committed(id);
         self.commit_damage(id, changed, waits);
+        self.presentation_committed(id, replaced, asked, discarded);
         self.collect(imports);
         Ok(())
     }
@@ -526,23 +539,28 @@ impl Server {
     /// commit and those before it, and gives up the buffers that it
     /// replaces.
     pub fn settle(&mut self, reached: impl Fn(Point) -> bool) {
+        let mut discarded = Vec::new();
+        let mut shown_now = Vec::new();
         for (&id, s) in self.surfaces.iter_mut() {
             let Some(newest) = s.waiting.iter().rposition(|w| reached(w.acquire)) else {
                 continue;
             };
-            let settled: Vec<Waiting> = s.waiting.drain(..=newest).collect();
+            let mut settled: Vec<Waiting> = s.waiting.drain(..=newest).collect();
             self.releases.extend(s.current.release.take());
             let damage = self.committed.entry(id).or_default();
-            for w in &settled[..newest] {
+            for w in &mut settled[..newest] {
                 self.releases.extend(w.release);
                 damage.extend(&w.damage);
+                discarded.extend(std::mem::take(&mut w.feedback));
             }
-            let shown = &settled[newest];
+            let shown = &mut settled[newest];
             damage.extend(&shown.damage);
             s.current.buffer = Some(shown.buffer);
             s.current.acquire = Some(shown.acquire);
             s.current.release = shown.release;
+            shown_now.push((id, std::mem::take(&mut shown.feedback)));
         }
+        self.presentation_settled(discarded, shown_now);
     }
 
     /// The acquire points that buffers wait for.
