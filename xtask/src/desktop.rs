@@ -50,6 +50,13 @@ const SHELL_EXITED: &str = "compositor: the part start-menu of system.mikros.she
 /// What the compositor logs when it starts that part again, as it does
 /// each time the part exits, and when the part has exited too often
 /// within a minute, which the probe, that exits at once, does.
+/// What the compositor logs when the session manager forwards the
+/// connection of an ordinary client, and what the run types to start one in
+/// the user's text session: the greeter probe, which is the shell probe's
+/// program, in its client mode, at the system apps' path.
+const CLIENT_CONNECTED: &str = "compositor: a client of ";
+const CLIENT_COMMAND: &str = "slash s y s t e m slash a p p s slash s y s t e m dot m i k r o s dot \
+    s h e l l shift-minus p r o b e slash g r e e t e r minus p r o b e spc minus minus c l i e n t ret";
 const SHELL_RESTARTED: &str =
     "compositor: starting the part start-menu of system.mikros.shell_probe again";
 const SHELL_GAVE_UP: &str = "compositor: the part start-menu of system.mikros.shell_probe stopped more than 5 times within a minute; leaving its roles empty";
@@ -391,6 +398,14 @@ pub fn run_with(
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
         let what = "the console showed from dee's desktop";
         screen.until(&mut qemu, WALLPAPER, &gone, what)?;
+        crate::console::type_keys(&socket, CLIENT_COMMAND)?;
+        // The console after the command, which `client.ppm` keeps.
+        std::thread::sleep(Duration::from_secs(5));
+        fs::write(
+            dir.join("client.ppm"),
+            scenario::screen_dump(&socket, &dump)?,
+        )?;
+        scenario::wait_for_line(&log, CLIENT_CONNECTED, &mut qemu, deadline)?;
         crate::console::type_keys(&socket, "e x i t ret")?;
         scenario::wait_for_line(&log, DESKTOP_ENDED, &mut qemu, deadline).map(drop)
     })();

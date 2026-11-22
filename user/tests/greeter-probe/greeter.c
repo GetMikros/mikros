@@ -27,7 +27,9 @@
 #include <mikros/services.h>
 #include <mikros/startup.h>
 #include <mikros/syscalls.h>
+#include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -428,6 +430,26 @@ static int control(void)
 	return connected == 0 ? 70 : 0;
 }
 
+/* Connects to the compositor as an ordinary client, through the session
+ * manager's `wayland` protocol, and reads its globals: 0 when it did, 10
+ * when there is no connection and 11 when the registry cannot be read. */
+static int client(void)
+{
+	struct wl_display *display = wl_display_connect(NULL);
+	if (!display) {
+		fprintf(stderr, "greeter-probe: no connection (errno %d)\n", errno);
+		return 10;
+	}
+	struct wl_registry *registry = wl_display_get_registry(display);
+	if (!registry || wl_display_roundtrip(display) < 0) {
+		fprintf(stderr, "greeter-probe: no registry (errno %d)\n", errno);
+		return 11;
+	}
+	wl_registry_destroy(registry);
+	wl_display_disconnect(display);
+	return 0;
+}
+
 int wallpaper(const char *file);
 int panel(void);
 
@@ -435,6 +457,8 @@ int main(int argc, char **argv)
 {
 	if (argc == 2 && strcmp(argv[1], "--control") == 0)
 		return control();
+	if (argc == 2 && strcmp(argv[1], "--client") == 0)
+		return client();
 	if (argc >= 2 && strcmp(argv[1], "--wallpaper") == 0)
 		return wallpaper(argc >= 3 ? argv[2] : NULL);
 	if (argc == 2 && strcmp(argv[1], "--panel") == 0)
