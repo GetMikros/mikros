@@ -24,6 +24,7 @@ mod resize;
 mod scene;
 mod seat;
 mod shell;
+mod subsurface;
 mod surface;
 mod switcher;
 mod theme;
@@ -47,8 +48,8 @@ pub use viewport::Viewport;
 use crate::wayland::protocols::{
     mikros_buffer_v1, mikros_material_v1, mikros_shell_v1, mikros_theme_v1, wl_callback,
     wl_compositor, wl_data_device_manager, wl_display, wl_output, wl_registry, wl_seat,
-    wp_cursor_shape_manager_v1, wp_fractional_scale_manager_v1, wp_presentation, wp_viewporter,
-    xdg_activation_v1, xdg_wm_base, zwp_keyboard_shortcuts_inhibit_manager_v1,
+    wl_subcompositor, wp_cursor_shape_manager_v1, wp_fractional_scale_manager_v1, wp_presentation,
+    wp_viewporter, xdg_activation_v1, xdg_wm_base, zwp_keyboard_shortcuts_inhibit_manager_v1,
 };
 use crate::wayland::wire::{self, Fd, Interface, NewId, ObjectId, Outgoing};
 use std::collections::BTreeSet;
@@ -110,6 +111,8 @@ pub enum Resource {
     Inhibitor(SurfaceId),
     Presentation,
     Feedback,
+    Subcompositor,
+    Subsurface(SurfaceId),
 }
 
 /// An object of a client.
@@ -301,6 +304,8 @@ pub struct Server {
     viewports: viewport::Viewports,
     /// The shortcut inhibitors of surfaces.
     inhibitors: inhibit::Inhibitors,
+    /// The subsurfaces and their stacks.
+    subsurfaces: subsurface::Subsurfaces,
     /// The presentation feedback that waits for a frame.
     presentation: presentation::Presentation,
     /// The windows in order of last focus, and the window switcher.
@@ -389,6 +394,11 @@ impl Server {
             activation::VERSION,
             Resource::Activation,
         );
+        server.add_global(
+            &wl_subcompositor::INTERFACE,
+            subsurface::VERSION,
+            Resource::Subcompositor,
+        );
         server
     }
 
@@ -454,6 +464,7 @@ impl Server {
         self.forget_client_viewports(client);
         self.forget_client_inhibitors(client);
         self.forget_client_presentation(client);
+        self.forget_client_subsurfaces(client);
         self.collect(imports);
     }
 
@@ -587,6 +598,9 @@ impl Server {
             | Resource::DataSource
             | Resource::DataDevice
             | Resource::DataOffer => self.data_request(request, resource, args)?,
+            Resource::Subcompositor | Resource::Subsurface(_) => {
+                self.subsurface_request(request, resource, args)?
+            }
             Resource::Presentation => self.presentation_request(request, args)?,
             Resource::Feedback => {
                 return Err(ProtocolError::invalid_method(
@@ -910,7 +924,8 @@ pub(crate) mod tests {
                 &Arg::String(Some("zwp_keyboard_shortcuts_inhibit_manager_v1".into())),
                 &Arg::String(Some("wp_viewporter".into())),
                 &Arg::String(Some("wp_fractional_scale_manager_v1".into())),
-                &Arg::String(Some("xdg_activation_v1".into()))
+                &Arg::String(Some("xdg_activation_v1".into())),
+                &Arg::String(Some("wl_subcompositor".into()))
             ]
         );
         client.bind(&mut server, 2, &wl_compositor::INTERFACE, 3);

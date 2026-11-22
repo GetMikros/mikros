@@ -27,6 +27,8 @@ pub enum Role {
     Panel,
     /// The cursor of its client's pointer.
     Cursor,
+    /// A surface within a parent (`wl_subsurface`).
+    Subsurface,
 }
 
 /// The state of a surface that its requests set and a commit applies.
@@ -352,6 +354,7 @@ impl Server {
                 if let Some(surface) = self.surfaces.remove(&id) {
                     self.releases.extend(surface.releases());
                 }
+                self.forget_surface_subsurfaces(id);
                 self.client_mut(request).destroy(request.object);
                 self.collect(imports);
                 return Ok(());
@@ -583,6 +586,7 @@ impl Server {
         self.panel_committed(id);
         self.commit_damage(id, changed, waits);
         self.presentation_committed(id, replaced, asked, discarded);
+        self.subsurfaces.apply_family(id);
         self.collect(imports);
     }
 
