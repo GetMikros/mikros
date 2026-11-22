@@ -513,7 +513,12 @@ pub fn run_with(
         std::thread::sleep(Duration::from_secs(4));
         // An ordinary client's window, from the text session.
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
-        screen.until(&mut qemu, WALLPAPER, &gone, "the console showed from the desktop")?;
+        screen.until(
+            &mut qemu,
+            WALLPAPER,
+            &gone,
+            "the console showed from the desktop",
+        )?;
         crate::console::type_keys(&socket, WINDOW_COMMAND)?;
         std::thread::sleep(Duration::from_secs(2));
         scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
