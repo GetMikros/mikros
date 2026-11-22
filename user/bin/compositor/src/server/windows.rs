@@ -164,6 +164,7 @@ impl Server {
             // attention (MIKSPEC-0074.R28).
             let focused = self
                 .keyboard_focus()
+                .or_else(|| self.switching.before())
                 .filter(|f| stack.iter().any(|w| w.surface == *f && !w.minimized));
             let focus = self.activation.waiting.contains(&id)
                 || focused.is_none()

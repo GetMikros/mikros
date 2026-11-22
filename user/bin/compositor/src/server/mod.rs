@@ -21,6 +21,7 @@ mod scene;
 mod seat;
 mod shell;
 mod surface;
+mod switcher;
 mod theme;
 mod toplevels;
 mod windows;
@@ -273,6 +274,8 @@ pub struct Server {
     activation: activation::Activation,
     /// The window lists of the shell's components.
     toplevels: toplevels::Lists,
+    /// The windows in order of last focus, and the window switcher.
+    switching: switcher::Switching,
     /// The rectangles of each client's regions, added or, when false,
     /// taken away, in order.
     regions: BTreeMap<(ClientId, ObjectId), Vec<(bool, Rect)>>,

@@ -217,6 +217,9 @@ impl Server {
                 object: s.object,
             })
         });
+        if let Some(new) = new {
+            self.remember_focus(new.surface);
+        }
         let old = self.keyboard.focus;
         if new == old {
             return;

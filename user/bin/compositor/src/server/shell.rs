@@ -113,6 +113,13 @@ impl Server {
                 self.make_panel(request, id.0, surface, edge)
             }
             mikros_shell_v1::Request::GetToplevelList { id } => self.get_toplevel_list(request, id),
+            mikros_shell_v1::Request::SwitcherChoose { index } => {
+                if !self.client_mut(request).has_role("switcher") {
+                    return Err(forbidden("switcher_choose needs the role switcher"));
+                }
+                self.choose_in_switcher(index);
+                Ok(())
+            }
             // Requests that are not served yet end the connection with
             // wl_display's error for that, rather than doing nothing.
             _ => Err(ProtocolError::new(

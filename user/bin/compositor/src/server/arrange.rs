@@ -7,6 +7,12 @@
 use super::{Rect, Server, SurfaceId};
 
 /// The evdev codes of the keys of the shortcuts (MIKSPEC-0074.R13).
+const KEY_ESC: u32 = 1;
+const KEY_TAB: u32 = 15;
+const KEY_LEFTSHIFT: u32 = 42;
+const KEY_RIGHTSHIFT: u32 = 54;
+const KEY_LEFTMETA: u32 = 125;
+const KEY_RIGHTMETA: u32 = 126;
 const KEY_F4: u32 = 62;
 const KEY_UP: u32 = 103;
 const KEY_LEFT: u32 = 105;
@@ -136,6 +142,39 @@ impl Server {
     /// it when it is maximized or snapped and minimize it otherwise, Super
     /// and Left or Right snap it, and Alt and F4 ask it to close.
     pub(super) fn shortcut(&mut self, key: u32, pressed: bool) -> bool {
+        // Alt let go ends the window switcher with its selection.
+        if !pressed
+            && (key == KEY_LEFTALT || key == KEY_RIGHTALT)
+            && self.switching.is_open()
+            && !self.alt_held()
+        {
+            self.end_switcher(true);
+        }
+        // A Super key alone asks for the start menu.
+        if key == KEY_LEFTMETA || key == KEY_RIGHTMETA {
+            self.super_pressed(pressed);
+            return false;
+        }
+        if pressed {
+            self.other_key_pressed();
+        }
+        if pressed && self.switching.is_open() && key == KEY_ESC {
+            self.end_switcher(false);
+            self.keyboard.swallowed.insert(key);
+            return true;
+        }
+        if pressed
+            && key == KEY_TAB
+            && self.alt_held()
+            && !self.keyboard_pressed(KEY_LEFTCTRL)
+            && !self.keyboard_pressed(KEY_RIGHTCTRL)
+        {
+            let backwards =
+                self.keyboard_pressed(KEY_LEFTSHIFT) || self.keyboard_pressed(KEY_RIGHTSHIFT);
+            self.switch_windows(backwards);
+            self.keyboard.swallowed.insert(key);
+            return true;
+        }
         if !pressed {
             // The release of a key whose press was a shortcut is not a
             // client's either.

@@ -405,6 +405,10 @@ impl Server {
             (false, true) => self.pointer.pressed.retain(|&b| b != button),
             _ => return,
         }
+        // A Super key before a button was not alone.
+        if pressed {
+            self.other_key_pressed();
+        }
         // The release of the button that moves a window ends the move.
         if !pressed && (self.end_move(button) || self.end_resize(button)) {
             self.refocus();
