@@ -184,6 +184,10 @@ impl Tables for LowTables {
         memory::alloc_contiguous(1, 1, 1 << 32)
     }
 
+    fn free(&mut self, phys: u64) {
+        free_frame(phys);
+    }
+
     fn table(&mut self, phys: u64) -> &mut [u64; 512] {
         // SAFETY: the frame came from the allocator for a page table, so
         // nothing else uses it, and the direct map covers it.

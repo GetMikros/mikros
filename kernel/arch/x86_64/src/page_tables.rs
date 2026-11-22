@@ -122,6 +122,10 @@ impl Tables for Frames<'_> {
         (self.0)()
     }
 
+    fn free(&mut self, phys: u64) {
+        free_frame(phys);
+    }
+
     fn table(&mut self, phys: u64) -> &mut [u64; 512] {
         // SAFETY: the frame holds a table of an address space, whose
         // owner keeps other changes out, and the direct map covers it.

@@ -64,6 +64,12 @@ impl Tables for FrameTables {
         memory::alloc_frame()
     }
 
+    fn free(&mut self, phys: u64) {
+        if let Some(frames) = FRAMES.lock().as_mut() {
+            frames.free(phys, 1);
+        }
+    }
+
     fn table(&mut self, phys: u64) -> &mut [u64; 512] {
         // SAFETY: the frame came from the allocator for a page table, so
         // nothing else uses it, and the direct map covers it.

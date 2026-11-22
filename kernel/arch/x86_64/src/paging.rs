@@ -1,6 +1,7 @@
 //! x86_64 page tables.
 
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const PAGE_SIZE: u64 = 4096;
 const MIB_2: u64 = 2 << 20;
@@ -72,6 +73,8 @@ impl Flags {
 pub trait Tables {
     /// A free frame, which need not be zeroed.
     fn alloc(&mut self) -> Option<u64>;
+    /// Gives back a frame from `alloc` that no table uses.
+    fn free(&mut self, phys: u64);
     /// The table in the frame at `phys`.
     fn table(&mut self, phys: u64) -> &mut [u64; 512];
 }
@@ -171,8 +174,30 @@ impl<'t, T: Tables> Mapper<'t, T> {
             table = if entry & PRESENT == 0 {
                 let next = Self::new_table(self.tables)?;
                 let user = if flags.user { USER } else { 0 };
-                self.tables.table(table)[i] = next | PRESENT | WRITABLE | user;
-                next
+                let slot = &mut self.tables.table(table)[i];
+                // SAFETY: an `AtomicU64` has the size and alignment of the
+                // entry, which only this slot's owner and the processors that
+                // share the hierarchy's tables use.
+                let atomic = unsafe { &*(slot as *mut u64).cast::<AtomicU64>() };
+                // Another processor that maps into the same missing table
+                // may install one first, in the kernel's tables, whose
+                // mappings must not be lost with the table that this one
+                // overwrote.
+                match atomic.compare_exchange(
+                    entry,
+                    next | PRESENT | WRITABLE | user,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => next,
+                    Err(other) => {
+                        self.tables.free(next);
+                        if other & HUGE != 0 {
+                            return Err(Error::AlreadyMapped(virt));
+                        }
+                        other & ADDR_MASK
+                    }
+                }
             } else if entry & HUGE != 0 {
                 return Err(Error::AlreadyMapped(virt));
             } else {
@@ -481,6 +506,7 @@ mod tests {
                 BASE + (self.0.len() as u64 - 1) * PAGE_SIZE
             })
         }
+        fn free(&mut self, _phys: u64) {}
         fn table(&mut self, phys: u64) -> &mut [u64; 512] {
             &mut self.0[((phys - BASE) / PAGE_SIZE) as usize]
         }
@@ -884,5 +910,60 @@ mod tests {
         assert_eq!(freed.len(), 6);
         assert!(!freed.contains(&root) && !freed.contains(&kernel));
         assert!(pool.table(root)[..256].iter().all(|&e| e == 0));
+    }
+    /// Tables whose next allocation is followed by another processor's
+    /// installing a table of its own in the entry that the first is for.
+    struct Racing {
+        pool: Pool,
+        /// The table and entry that the other processor fills, and what it
+        /// installs, once the next table is allocated.
+        rival: Option<(u64, usize, u64)>,
+        freed: Vec<u64>,
+    }
+
+    impl Tables for Racing {
+        fn alloc(&mut self) -> Option<u64> {
+            let phys = self.pool.alloc()?;
+            if let Some((table, i, rival)) = self.rival.take() {
+                self.pool.table(table)[i] = rival | PRESENT | WRITABLE;
+            }
+            Some(phys)
+        }
+        fn free(&mut self, phys: u64) {
+            self.freed.push(phys);
+        }
+        fn table(&mut self, phys: u64) -> &mut [u64; 512] {
+            self.pool.table(phys)
+        }
+    }
+
+    #[test]
+    fn a_table_that_another_processor_installed_first_is_used_and_ours_given_back() {
+        let mut pool = Pool(Vec::new());
+        let mut m = Mapper::new(&mut pool, true).unwrap();
+        let root = m.root();
+        // The page before a 2 MiB boundary makes the tables down to the
+        // page table below it; the one after it needs a table of its own.
+        let virt = 0xFFFF_C000_0200_0000u64;
+        m.map(virt - PAGE_SIZE, 0x5000, PAGE_SIZE, KERNEL_DATA)
+            .unwrap();
+        let (directory, level) = m.deepest_table(virt);
+        assert_eq!(level, 1);
+        // The other processor's table, with its own page in it.
+        let rival = pool.alloc().unwrap();
+        pool.table(rival).fill(0);
+        pool.table(rival)[index(virt, 0)] = 0x9000 | PRESENT | WRITABLE;
+        let mut racing = Racing {
+            pool,
+            rival: Some((directory, index(virt, 1), rival)),
+            freed: Vec::new(),
+        };
+        let mut m = Mapper::existing(&mut racing, root, true);
+        m.map(virt + PAGE_SIZE, 0x7000, PAGE_SIZE, KERNEL_DATA)
+            .unwrap();
+        // Both pages are reachable, and the table that lost is given back.
+        assert_eq!(m.translate(virt), Some(0x9000));
+        assert_eq!(m.translate(virt + PAGE_SIZE), Some(0x7000));
+        assert_eq!(racing.freed.len(), 1);
     }
 }
