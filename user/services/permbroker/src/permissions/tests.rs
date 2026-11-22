@@ -55,7 +55,10 @@ fn lists_names_page_by_page() {
 #[test]
 fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
-    assert_eq!(PERMISSIONS.len(), 62);
+    assert_eq!(PERMISSIONS.len(), 65);
+    assert_eq!(scope("user.layer_surfaces.use"), Some(Scope::User));
+    assert_eq!(scope("user.shares.use"), Some(Scope::User));
+    assert_eq!(scope("admin.devices.read"), Some(Scope::Admin));
     assert_eq!(scope("user.camera.use"), Some(Scope::User));
     assert_eq!(scope("user.developer.access"), Some(Scope::User));
     assert_eq!(scope("system.diagnostics.read"), Some(Scope::System));
@@ -122,6 +125,7 @@ fn admin_permissions_are_these() {
             "admin.accounts.manage",
             "admin.acls.manage",
             "admin.apps.write",
+            "admin.devices.read",
             "admin.grants.manage",
             "admin.logs.read",
             "admin.packages.install",

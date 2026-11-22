@@ -19,6 +19,7 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("admin.accounts.manage", Scope::Admin),
     ("admin.acls.manage", Scope::Admin),
     ("admin.apps.write", Scope::Admin),
+    ("admin.devices.read", Scope::Admin),
     ("admin.grants.manage", Scope::Admin),
     ("admin.logs.read", Scope::Admin),
     ("admin.packages.install", Scope::Admin),
@@ -67,6 +68,7 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("user.full_disk.access", Scope::User),
     ("user.global_shortcuts.use", Scope::User),
     ("user.input.read", Scope::User),
+    ("user.layer_surfaces.use", Scope::User),
     ("user.local_network.use", Scope::User),
     ("user.location.read", Scope::User),
     ("user.microphone.use", Scope::User),
@@ -76,6 +78,7 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("user.power.control", Scope::User),
     ("user.raw_hid.use", Scope::User),
     ("user.screen.read", Scope::User),
+    ("user.shares.use", Scope::User),
     ("user.videos.access", Scope::User),
     ("user.volumes.access", Scope::User),
 ];
