@@ -20,6 +20,7 @@ mod keyboard;
 mod layer;
 mod material;
 mod panel;
+mod popup;
 mod presentation;
 mod resize;
 mod scene;
@@ -312,6 +313,8 @@ pub struct Server {
     subsurfaces: subsurface::Subsurfaces,
     /// The layer surfaces.
     layers: layer::Layers,
+    /// The positioners and the popups.
+    popups: popup::Popups,
     /// The presentation feedback that waits for a frame.
     presentation: presentation::Presentation,
     /// The windows in order of last focus, and the window switcher.
@@ -477,6 +480,7 @@ impl Server {
         self.forget_client_presentation(client);
         self.forget_client_subsurfaces(client);
         self.forget_client_layers(client);
+        self.forget_client_popups(client);
         self.collect(imports);
     }
 

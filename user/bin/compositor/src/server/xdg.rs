@@ -73,14 +73,7 @@ impl Server {
                 request,
                 xdg_wm_base::Request::decode(request.opcode, args).map_err(decoded)?,
             ),
-            Resource::Positioner => {
-                if let xdg_positioner::Request::Destroy =
-                    xdg_positioner::Request::decode(request.opcode, args).map_err(decoded)?
-                {
-                    self.client_mut(request).destroy(request.object);
-                }
-                Ok(())
-            }
+            Resource::Positioner => self.positioner_request(request, args),
             Resource::XdgSurface(id) => self.xdg_surface(
                 request,
                 id,
@@ -110,6 +103,7 @@ impl Server {
                     request.version,
                     Resource::Positioner,
                 )?;
+                self.new_positioner(request.client, id.0);
             }
             xdg_wm_base::Request::GetXdgSurface { id, surface } => {
                 let c = self.client_mut(request);
