@@ -11,6 +11,7 @@ use crate::server::Rect;
 const KEY_LEFTMETA: u32 = 125;
 const KEY_RIGHTMETA: u32 = 126;
 pub(super) const BTN_LEFT: u32 = 0x110;
+pub(super) const BTN_RIGHT: u32 = 0x111;
 
 /// How much of a window's top edge stays inside the work area.
 const KEPT: i32 = 32;

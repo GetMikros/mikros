@@ -35,6 +35,14 @@ pub struct XdgState {
     /// whether the toplevel is minimized.
     pub parent: Option<SurfaceId>,
     pub minimized: bool,
+    /// Whether the pointer resizes the window, the size that a resize
+    /// asks of the client, the serial of the configure with a size that the
+    /// client has not answered with a commit yet and whether it
+    /// acknowledged it, and the latest size asked since (MIKSPEC-0074.R16).
+    pub resizing: bool,
+    pub(super) outstanding: Option<u32>,
+    pub(super) acked: bool,
+    pub(super) latest: Option<(i32, i32)>,
 }
 
 #[cfg(test)]
@@ -209,6 +217,9 @@ impl Server {
                 };
                 xdg.sent.drain(..=at);
                 xdg.configured = true;
+                if xdg.outstanding.is_some_and(|o| serial >= o) {
+                    xdg.acked = true;
+                }
             }
         }
         Ok(())
@@ -264,6 +275,17 @@ impl Server {
             self.request_move(request.client, id, serial);
             return Ok(());
         }
+        if let xdg_toplevel::Request::Resize { serial, edges, .. } = decoded {
+            if !super::resize::valid_edges(edges) {
+                return Err(ProtocolError::new(
+                    request.object,
+                    xdg_toplevel::error::INVALID_RESIZE_EDGE,
+                    "an edge that xdg_toplevel does not name",
+                ));
+            }
+            self.request_resize(request.client, id, serial, edges);
+            return Ok(());
+        }
         let xdg = self.xdg_mut(id)?;
         let mut changed = false;
         match decoded {
@@ -294,8 +316,8 @@ impl Server {
             xdg_toplevel::Request::SetParent { .. } => unreachable!("handled before"),
             // Menus and resizes come with the rest of window management.
             xdg_toplevel::Request::Move { .. } => unreachable!("handled before"),
-            xdg_toplevel::Request::ShowWindowMenu { .. } | xdg_toplevel::Request::Resize { .. } => {
-            }
+            xdg_toplevel::Request::Resize { .. } => unreachable!("handled before"),
+            xdg_toplevel::Request::ShowWindowMenu { .. } => {}
         }
         if changed && xdg.initialized {
             self.configure(request.client, id);
@@ -340,21 +362,29 @@ impl Server {
             xdg.initialized = true;
             self.configure(request.client, id);
         }
+        self.resize_committed(id);
     }
 
     /// Sends a toplevel's state to its client: the size, which is the
     /// screen's for a fullscreen toplevel, the work area's for a maximized
     /// one and otherwise the client's choice, and its states, and then the serial to acknowledge.
-    fn configure(&mut self, client: super::ClientId, id: SurfaceId) {
+    pub(super) fn configure(&mut self, client: super::ClientId, id: SurfaceId) -> Option<u32> {
+        self.configure_with(client, id, None)
+    }
+
+    /// As `configure`, asking the client for `size` unless the window is
+    /// fullscreen or maximized.
+    pub(super) fn configure_with(
+        &mut self,
+        client: super::ClientId,
+        id: SurfaceId,
+        size: Option<(i32, i32)>,
+    ) -> Option<u32> {
         let serial = self.next_serial();
         let screen = self.screen;
         let area = self.work_area();
-        let Some(xdg) = self.surfaces.get_mut(&id).and_then(|s| s.xdg.as_mut()) else {
-            return;
-        };
-        let Some(toplevel) = xdg.toplevel else {
-            return;
-        };
+        let xdg = self.surfaces.get_mut(&id).and_then(|s| s.xdg.as_mut())?;
+        let toplevel = xdg.toplevel?;
         let mut states = vec![xdg_toplevel::state::ACTIVATED];
         let (mut width, mut height) = (0, 0);
         if xdg.fullscreen {
@@ -363,6 +393,11 @@ impl Server {
         } else if xdg.maximized {
             states.push(xdg_toplevel::state::MAXIMIZED);
             (width, height) = (area.width, area.height);
+        } else if let Some(size) = size {
+            (width, height) = size;
+        }
+        if xdg.resizing {
+            states.push(xdg_toplevel::state::RESIZING);
         }
         xdg.sent.push(serial);
         let object = xdg.object;
@@ -373,6 +408,7 @@ impl Server {
             .expect("a client with surfaces");
         xdg_toplevel::send_configure(&mut c.out, toplevel, width, height, &states);
         xdg_surface::send_configure(&mut c.out, object, serial);
+        Some(serial)
     }
 }
 
@@ -485,6 +521,78 @@ mod tests {
             &sent[0].2[..],
             [Arg::Int(1280), Arg::Int(752), Arg::Array(a)] if *a == states
         ));
+    }
+
+    /// The `configure` events in `events`, as the size and the serial.
+    fn configures(events: &[(ObjectId, u16, Vec<Arg>)]) -> Vec<((i32, i32), u32)> {
+        let mut found = Vec::new();
+        let mut size = (0, 0);
+        for (object, opcode, args) in events {
+            match (*object, *opcode, &args[..]) {
+                (7, 0, [Arg::Int(w), Arg::Int(h), _]) => size = (*w, *h),
+                (6, 0, [Arg::Uint(serial)]) => found.push((size, *serial)),
+                _ => {}
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn asks_for_one_size_at_a_time_until_the_client_answers_with_a_commit() {
+        let mut server = Server::new();
+        server.screen = Some((1280, 800));
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 4, 6, vec![]);
+        let first = configures(&events(&client, &mut server));
+        client.send(&mut server, 6, 4, vec![Arg::Uint(first[0].1)]);
+        let surface = *server.surfaces().next().unwrap().0;
+        server.surfaces.get_mut(&surface).unwrap().current.buffer = Some(99);
+        // The first size goes out; the sizes after it wait.
+        server.ask_size(surface, (300, 200));
+        let sent = configures(&events(&client, &mut server));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, (300, 200));
+        server.ask_size(surface, (310, 210));
+        server.ask_size(surface, (320, 220));
+        assert!(events(&client, &mut server).is_empty());
+        // An acknowledgement alone is not an answer.
+        client.send(&mut server, 6, 4, vec![Arg::Uint(sent[0].1)]);
+        assert!(configures(&events(&client, &mut server)).is_empty());
+        // After a commit, the latest size goes out, and none between.
+        client.send(&mut server, 4, 6, vec![]);
+        let later = configures(&events(&client, &mut server));
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].0, (320, 220));
+    }
+
+    #[test]
+    fn a_resize_tells_the_client_it_is_resizing_and_the_end_clears_it() {
+        let mut server = Server::new();
+        server.screen = Some((1280, 800));
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 4, 6, vec![]);
+        let first = configures(&events(&client, &mut server));
+        client.send(&mut server, 6, 4, vec![Arg::Uint(first[0].1)]);
+        let surface = *server.surfaces().next().unwrap().0;
+        server.surfaces.get_mut(&surface).unwrap().current.buffer = Some(99);
+        server
+            .surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .xdg
+            .as_mut()
+            .unwrap()
+            .resizing = true;
+        server.ask_size(surface, (300, 200));
+        let all = events(&client, &mut server);
+        let Some((_, _, args)) = all.iter().find(|e| (e.0, e.1) == (7, 0)) else {
+            panic!("a configure: {all:?}");
+        };
+        let Arg::Array(states) = &args[2] else {
+            panic!("states");
+        };
+        let resizing = xdg_toplevel::state::RESIZING.to_ne_bytes();
+        assert!(states.chunks(4).any(|s| s == resizing));
     }
 
     #[test]

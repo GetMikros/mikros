@@ -344,6 +344,17 @@ impl Server {
         self.pointer.pressed.last().copied()
     }
 
+    /// Whether any surface has the pointer.
+    pub(super) fn pointer_has_surface(&self) -> bool {
+        self.pointer.focus.is_some()
+    }
+
+    /// The toplevel that has the pointer, if one has it.
+    pub(super) fn toplevel_under_pointer(&self) -> Option<SurfaceId> {
+        let focus = self.pointer.focus?;
+        (self.surfaces.get(&focus.surface)?.role == Role::Toplevel).then_some(focus.surface)
+    }
+
     /// Whether the surface `surface` has the pointer.
     pub(super) fn pointer_in(&self, surface: SurfaceId) -> bool {
         self.pointer.focus.is_some_and(|f| f.surface == surface)
@@ -370,7 +381,7 @@ impl Server {
         self.pointer.x = x.clamp(0.0, f64::from(width.max(1) - 1));
         self.pointer.y = y.clamp(0.0, f64::from(height.max(1) - 1));
         // A window that is moved follows the pointer, which no client sees.
-        if self.move_with_pointer() {
+        if self.move_with_pointer() || self.resize_with_pointer() {
             return;
         }
         self.refocus();
@@ -395,8 +406,12 @@ impl Server {
             _ => return,
         }
         // The release of the button that moves a window ends the move.
-        if !pressed && self.end_move(button) {
+        if !pressed && (self.end_move(button) || self.end_resize(button)) {
             self.refocus();
+            return;
+        }
+        // A press that starts a resize is not the client's.
+        if pressed && self.press_resizes(button) {
             return;
         }
         let Some(focus) = self.pointer.focus else {
@@ -409,7 +424,11 @@ impl Server {
             self.focus_keyboard(Some(focus.surface));
             // Super and the primary button move the window, whose client
             // does not get the press.
-            if button == super::grabs::BTN_LEFT && self.super_held() {
+            if button == super::grabs::BTN_LEFT
+                && self.super_held()
+                && self.pointer.moving.is_none()
+                && self.pointer.resizing.is_none()
+            {
                 self.start_move(focus.surface, button);
                 return;
             }
@@ -639,6 +658,92 @@ mod tests {
         // Beyond the buffer, inside the frame, it is still the window.
         assert!(server.surface_at(199, 99).is_some());
         assert!(server.surface_at(200, 50).is_none());
+    }
+
+    fn frame(server: &Server) -> (i32, i32, i32, i32) {
+        let f = server.windows().into_iter().next().unwrap().frame;
+        (f.x, f.y, f.width, f.height)
+    }
+
+    #[test]
+    fn the_band_around_a_window_resizes_it_with_the_primary_button() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        server.move_window(surface, 100, 100);
+        pointer_events(&mut server, &client);
+        // The window is 100 by 50 at (100, 100); the left band is 8 wide.
+        server.pointer_motion(95.0, 125.0, 1);
+        server.pointer_button(0x110, true, 2);
+        assert_eq!(button_events(&mut server, &client), 0);
+        server.pointer_motion(75.0, 125.0, 3);
+        assert_eq!(frame(&server), (80, 100, 120, 50));
+        server.pointer_motion(60.0, 200.0, 4);
+        assert_eq!(frame(&server), (65, 100, 135, 50));
+        server.pointer_button(0x110, false, 5);
+        // The pointer is the client's again afterwards.
+        server.pointer_motion(500.0, 500.0, 6);
+        assert_eq!(frame(&server), (65, 100, 135, 50));
+        // Outside the band nothing resizes.
+        server.pointer_motion(40.0, 125.0, 7);
+        server.pointer_button(0x110, true, 8);
+        server.pointer_motion(10.0, 125.0, 9);
+        assert_eq!(frame(&server), (65, 100, 135, 50));
+    }
+
+    #[test]
+    fn a_resize_from_the_top_edge_keeps_the_top_edge_in_the_work_area() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        // A panel of 40 pixels at the top leaves the work area below it.
+        super::super::windows::tests::panel(
+            &mut server,
+            900,
+            super::super::panel::Edge::Top,
+            40,
+            true,
+        );
+        let surface = *server.surfaces.keys().next().unwrap();
+        server.move_window(surface, 100, 100);
+        pointer_events(&mut server, &client);
+        server.pointer_motion(150.0, 95.0, 1);
+        server.pointer_button(0x110, true, 2);
+        // Dragging the top edge up to y = 10 would put it above the work area.
+        server.pointer_motion(150.0, 10.0, 3);
+        assert_eq!(frame(&server), (100, 40, 100, 110));
+    }
+
+    #[test]
+    fn one_grab_at_a_time() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        server.move_window(surface, 100, 100);
+        pointer_events(&mut server, &client);
+        server.pointer_motion(150.0, 120.0, 1);
+        server.keyboard_key(125, true, 2, Default::default());
+        server.pointer_button(0x110, true, 3);
+        // The secondary button during the move starts no resize.
+        server.pointer_button(0x111, true, 4);
+        server.pointer_motion(250.0, 220.0, 5);
+        assert_eq!(frame(&server), (200, 200, 100, 50));
+    }
+
+    #[test]
+    fn super_and_the_secondary_button_resize_from_the_nearest_corner() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        server.move_window(surface, 100, 100);
+        pointer_events(&mut server, &client);
+        // Near the bottom right corner of the window.
+        server.pointer_motion(190.0, 145.0, 1);
+        server.keyboard_key(125, true, 2, Default::default());
+        server.pointer_button(0x111, true, 3);
+        server.pointer_motion(230.0, 175.0, 4);
+        assert_eq!(frame(&server), (100, 100, 140, 80));
+        server.pointer_button(0x111, false, 5);
+        assert_eq!(button_events(&mut server, &client), 0);
     }
 
     #[test]
