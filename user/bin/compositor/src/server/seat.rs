@@ -427,6 +427,11 @@ impl Server {
         if pressed && self.press_resizes(button) {
             return;
         }
+        // A press outside the client of a popup that grabbed ends the grab.
+        if pressed {
+            let under = self.pointer.focus.map(|f| f.client);
+            self.dismiss_grabs_outside(under);
+        }
         let Some(focus) = self.pointer.focus else {
             return;
         };

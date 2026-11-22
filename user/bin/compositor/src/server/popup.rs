@@ -10,7 +10,7 @@
 //! brings, and until its parent goes or the popup is dismissed.
 
 use super::{ClientId, ProtocolError, Rect, Request, Resource, Role, Server, SurfaceId};
-use crate::wayland::protocols::{xdg_popup, xdg_positioner, xdg_surface, xdg_wm_base};
+use crate::wayland::protocols::{wl_seat, xdg_popup, xdg_positioner, xdg_surface, xdg_wm_base};
 use crate::wayland::wire::{Arg, NewId, ObjectId};
 use std::collections::BTreeMap;
 
@@ -160,6 +160,8 @@ pub(super) struct Popup {
     pub(super) rect: Rect,
     /// Whether the compositor dismissed it with `popup_done`.
     pub(super) dismissed: bool,
+    /// Whether it grabbed the seat: a press outside its client dismisses it.
+    grabbed: bool,
 }
 
 /// The positioners of every client, and the popups.
@@ -325,6 +327,7 @@ impl Server {
                     height: 0,
                 },
                 dismissed: false,
+                grabbed: false,
             },
         );
         Ok(())
@@ -351,7 +354,24 @@ impl Server {
                     self.popups.popups.remove(&surface);
                 }
             }
-            xdg_popup::Request::Grab { .. } => {}
+            xdg_popup::Request::Grab { seat, .. } => {
+                let c = self.client_mut(request);
+                c.resource(request.object, seat, &wl_seat::INTERFACE)?;
+                let mapped = self
+                    .surfaces
+                    .get(&surface)
+                    .is_some_and(|s| s.current.buffer.is_some());
+                if live && mapped {
+                    return Err(ProtocolError::new(
+                        request.object,
+                        xdg_popup::error::INVALID_GRAB,
+                        "a grab after the popup was mapped",
+                    ));
+                }
+                if let Some(popup) = self.popups.popups.get_mut(&surface).filter(|_| live) {
+                    popup.grabbed = true;
+                }
+            }
             xdg_popup::Request::Reposition { positioner, token } => {
                 let c = self.client_mut(request);
                 c.resource(request.object, positioner, &xdg_positioner::INTERFACE)?;
@@ -498,6 +518,23 @@ impl Server {
                 self.dismiss_popup(id);
                 work.push(id);
             }
+        }
+    }
+
+    /// Ends the grabs of the popups that grabbed, and are not of the client
+    /// whose surface was pressed, `under`, or of no surface at all: each
+    /// is dismissed with the popups below it.
+    pub(super) fn dismiss_grabs_outside(&mut self, under: Option<ClientId>) {
+        let outside: Vec<SurfaceId> = self
+            .popups
+            .popups
+            .iter()
+            .filter(|(_, p)| p.grabbed && !p.dismissed && Some(p.client) != under)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in outside {
+            self.dismiss_popup(id);
+            self.dismiss_popups_of(id);
         }
     }
 
@@ -685,6 +722,7 @@ mod tests {
             2 => &wl_registry::EVENTS,
             9 => &xdg_surface::EVENTS,
             11 => &xdg_popup::EVENTS,
+            14 => &wl_seat::EVENTS,
             _ => &wl_callback::EVENTS,
         });
         sent.into_iter().filter(|e| e.0 == 9 || e.0 == 11).collect()
@@ -805,5 +843,84 @@ mod tests {
         client.send(&mut server, 5, 0, vec![]);
         let sent = popup_events(&mut server, &client);
         assert!(sent.iter().any(|e| (e.0, e.1) == (11, 1)));
+    }
+
+    #[test]
+    fn a_press_outside_the_client_of_a_popup_that_grabbed_dismisses_it() {
+        let mut server = Server::new();
+        let (client, _) = parent(&mut server);
+        client.bind(
+            &mut server,
+            2,
+            &crate::wayland::protocols::wl_seat::INTERFACE,
+            14,
+        );
+        popup_with_grab(&mut server, &client);
+        let sent = popup_events(&mut server, &client);
+        assert!(!sent.iter().any(|e| (e.0, e.1) == (11, 1)));
+        // A press on a surface of its own client leaves it.
+        let window = *server.surfaces.keys().next().unwrap();
+        server.move_window(window, 0, 0);
+        server.pointer_motion(5.0, 5.0, 1);
+        server.pointer_button(272, true, 2);
+        server.pointer_button(272, false, 3);
+        assert!(
+            !popup_events(&mut server, &client)
+                .iter()
+                .any(|e| (e.0, e.1) == (11, 1))
+        );
+        // A press on no surface ends the grab.
+        server.pointer_motion(1200.0, 700.0, 4);
+        server.pointer_button(272, true, 5);
+        assert!(
+            popup_events(&mut server, &client)
+                .iter()
+                .any(|e| (e.0, e.1) == (11, 1))
+        );
+    }
+
+    /// Makes the popup 11 of the surface 8 with a grab, which the first
+    /// commit comes after.
+    fn popup_with_grab(server: &mut Server, client: &TestClient) {
+        client.send(server, 3, 0, vec![Arg::NewId(NewId(8))]);
+        client.send(
+            server,
+            4,
+            2,
+            vec![Arg::NewId(NewId(9)), Arg::Object(Some(8))],
+        );
+        let args = vec![
+            Arg::NewId(NewId(11)),
+            Arg::Object(Some(6)),
+            Arg::Object(Some(10)),
+        ];
+        client.send(server, 9, 2, args);
+        client.send(server, 11, 1, vec![Arg::Object(Some(14)), Arg::Uint(1)]);
+        client.send(server, 8, 6, vec![]);
+    }
+
+    #[test]
+    fn a_grab_after_the_popup_was_mapped_is_an_error() {
+        let mut server = Server::new();
+        let (client, _) = parent(&mut server);
+        client.bind(
+            &mut server,
+            2,
+            &crate::wayland::protocols::wl_seat::INTERFACE,
+            14,
+        );
+        popup(&mut server, &client, 6);
+        let id = *server.popups.popups.keys().next().unwrap();
+        server.surfaces.get_mut(&id).unwrap().current.buffer = Some(98);
+        client.send(
+            &mut server,
+            11,
+            1,
+            vec![Arg::Object(Some(14)), Arg::Uint(1)],
+        );
+        assert_eq!(
+            client.error(&mut server),
+            Some(xdg_popup::error::INVALID_GRAB)
+        );
     }
 }
