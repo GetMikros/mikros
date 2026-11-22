@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <mikros/abi.h>
 #include <mikros/syscalls.h>
 #include <poll.h>
@@ -388,6 +389,56 @@ static void *nothing(void *arg)
 	return arg;
 }
 
+/* Touches `depth` bytes of the calling thread's stack, in pages, and gives
+   back the address of the lowest. */
+static void *touch_stack(void *arg)
+{
+	size_t depth = (size_t)arg;
+	volatile char *frame = __builtin_alloca(depth);
+	for (size_t i = 0; i < depth; i += 4096)
+		frame[i] = 1;
+	frame[depth - 1] = 1;
+	return (void *)(long)(frame[0] + frame[depth - 1]);
+}
+
+/* The default stack of a thread is 8 MiB, of which one that is created
+   without attributes can use a few; the size that is set is rounded up to
+   whole pages, a size that is too small or cannot be rounded is refused,
+   and a stack of the size that was set can be used. */
+static int stack_sizes(void)
+{
+	pthread_attr_t attr;
+	size_t size;
+	if (pthread_attr_init(&attr) || pthread_attr_getstacksize(&attr, &size)
+	    || size != (size_t)8 << 20)
+		return 0;
+	pthread_t t;
+	void *ret;
+	if (pthread_create(&t, 0, touch_stack, (void *)(size_t)(4 << 20))
+	    || pthread_join(t, &ret) || ret != (void *)2)
+		return 0;
+	if (pthread_attr_setstacksize(&attr, 8193) || pthread_attr_getstacksize(&attr, &size)
+	    || size != 12288)
+		return 0;
+	if (pthread_attr_setstacksize(&attr, 16384) || pthread_attr_getstacksize(&attr, &size)
+	    || size != 16384)
+		return 0;
+	if (pthread_attr_setstacksize(&attr, 0) != EINVAL
+	    || pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN - 1) != EINVAL
+	    || pthread_attr_setstacksize(&attr, SIZE_MAX) != EINVAL
+	    || pthread_attr_setstacksize(&attr, SIZE_MAX - 100) != EINVAL)
+		return 0;
+	/* A failed call leaves the size as it was. */
+	if (pthread_attr_getstacksize(&attr, &size) || size != 16384)
+		return 0;
+	/* A stack that was set is used. */
+	pthread_attr_setstacksize(&attr, 1 << 20);
+	if (pthread_create(&t, &attr, touch_stack, (void *)(size_t)(512 << 10))
+	    || pthread_join(t, &ret) || ret != (void *)2)
+		return 0;
+	return 1;
+}
+
 /* Threads have their own thread-local storage and share a mutex, hand
    over through a condition variable, end detached, and are created and
    joined many times. */
@@ -428,6 +479,8 @@ static int threads_run(void)
 	void *unmapped;
 	if (pthread_create(&g, 0, guard_unmapped, 0) || pthread_join(g, &unmapped)
 	    || !unmapped)
+		return 0;
+	if (!stack_sizes())
 		return 0;
 	for (long i = 0; i < 200; i++) {
 		pthread_t n;
