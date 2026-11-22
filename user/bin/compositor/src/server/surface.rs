@@ -31,6 +31,8 @@ pub enum Role {
     Subsurface,
     /// A layer surface (`zwlr_layer_surface_v1`).
     Layer,
+    /// A popup (`xdg_popup`).
+    Popup,
 }
 
 /// The state of a surface that its requests set and a commit applies.
@@ -358,6 +360,8 @@ impl Server {
                 }
                 self.forget_surface_subsurfaces(imports, id);
                 self.layers.surfaces.remove(&id);
+                self.dismiss_popups_of(id);
+                self.popups.popups.remove(&id);
                 self.update_layer_focus();
                 self.client_mut(request).destroy(request.object);
                 self.collect(imports);

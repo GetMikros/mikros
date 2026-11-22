@@ -3,11 +3,15 @@
 //! rectangle and the point of it that the popup is anchored to, the
 //! direction in which the popup extends from that point, an offset, and
 //! what to do when the popup would lie beyond the output: flip to the
-//! other side, slide along the edge, or shrink, in that order.
+//! other side, slide along the edge, or shrink, in that order. And
+//! `xdg_popup`: a surface with the role of a popup lies at the place that
+//! its positioner gives, against the window geometry of its parent, above
+//! it, once its client acknowledged the configure that the initial commit
+//! brings, and until its parent goes or the popup is dismissed.
 
-use super::{ClientId, ProtocolError, Rect, Request, Server};
-use crate::wayland::protocols::xdg_positioner;
-use crate::wayland::wire::{Arg, ObjectId};
+use super::{ClientId, ProtocolError, Rect, Request, Resource, Role, Server, SurfaceId};
+use crate::wayland::protocols::{xdg_popup, xdg_positioner, xdg_surface, xdg_wm_base};
+use crate::wayland::wire::{Arg, NewId, ObjectId};
 use std::collections::BTreeMap;
 
 const SLIDE_X: u32 = 1;
@@ -142,10 +146,27 @@ impl Positioner {
     }
 }
 
-/// The positioners of every client.
+/// A popup.
+#[derive(Debug)]
+pub(super) struct Popup {
+    client: ClientId,
+    /// Its xdg_popup object.
+    object: ObjectId,
+    /// What it is a popup of, once that is known: an xdg_surface that has
+    /// a role, or a layer surface.
+    pub(super) parent: Option<SurfaceId>,
+    positioner: Positioner,
+    /// Where it lies, relative to the window geometry of its parent.
+    pub(super) rect: Rect,
+    /// Whether the compositor dismissed it with `popup_done`.
+    pub(super) dismissed: bool,
+}
+
+/// The positioners of every client, and the popups.
 #[derive(Debug, Default)]
 pub(super) struct Popups {
     positioners: BTreeMap<(ClientId, ObjectId), Positioner>,
+    pub(super) popups: BTreeMap<SurfaceId, Popup>,
 }
 
 impl Server {
@@ -234,15 +255,276 @@ impl Server {
         Ok(())
     }
 
-    /// Forgets the positioners of `client`, which went.
+    /// Makes the popup `object` of the surface `surface`, which is a popup
+    /// of `parent` (an xdg_surface object) if that is given, placed by
+    /// `positioner`.
+    pub(super) fn get_popup(
+        &mut self,
+        request: Request,
+        surface: SurfaceId,
+        id: NewId,
+        parent: Option<ObjectId>,
+        positioner: ObjectId,
+    ) -> Result<(), ProtocolError> {
+        let error = |code, message: &str| ProtocolError::new(request.object, code, message);
+        let c = self.client_mut(request);
+        let Resource::Positioner =
+            c.resource(request.object, positioner, &xdg_positioner::INTERFACE)?
+        else {
+            unreachable!("positioners are xdg_positioner objects");
+        };
+        let parent = match parent {
+            None => None,
+            Some(object) => {
+                let Resource::XdgSurface(parent) =
+                    c.resource(request.object, object, &xdg_surface::INTERFACE)?
+                else {
+                    unreachable!("xdg surfaces are xdg_surface objects");
+                };
+                let has_role = self
+                    .surfaces
+                    .get(&parent)
+                    .is_some_and(|s| matches!(s.role, Role::Toplevel | Role::Popup));
+                if !has_role {
+                    return Err(error(
+                        xdg_wm_base::error::INVALID_POPUP_PARENT,
+                        "a parent that is no toplevel or popup",
+                    ));
+                }
+                Some(parent)
+            }
+        };
+        let Some(positioner) = self.positioner(request.client, positioner) else {
+            unreachable!("a positioner object has its state");
+        };
+        if !positioner.is_complete() {
+            return Err(error(
+                xdg_wm_base::error::INVALID_POSITIONER,
+                "a positioner without a size or an anchor rectangle",
+            ));
+        }
+        let c = self.client_mut(request);
+        c.create(
+            id,
+            &xdg_popup::INTERFACE,
+            request.version,
+            Resource::Popup(surface),
+        )?;
+        self.surface_mut(surface)?.role = Role::Popup;
+        self.popups.popups.insert(
+            surface,
+            Popup {
+                client: request.client,
+                object: id.0,
+                parent,
+                positioner,
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                },
+                dismissed: false,
+            },
+        );
+        Ok(())
+    }
+
+    pub(super) fn popup_request(
+        &mut self,
+        request: Request,
+        surface: SurfaceId,
+        args: Vec<Arg>,
+    ) -> Result<(), ProtocolError> {
+        let decoded = xdg_popup::Request::decode(request.opcode, args)
+            .map_err(|e| ProtocolError::invalid_method(request.object, format!("{e:?}")))?;
+        let live = self
+            .popups
+            .popups
+            .get(&surface)
+            .is_some_and(|p| p.object == request.object);
+        match decoded {
+            xdg_popup::Request::Destroy => {
+                self.client_mut(request).destroy(request.object);
+                if live {
+                    self.dismiss_popups_of(surface);
+                    self.popups.popups.remove(&surface);
+                }
+            }
+            xdg_popup::Request::Grab { .. } => {}
+            xdg_popup::Request::Reposition { positioner, token } => {
+                let c = self.client_mut(request);
+                c.resource(request.object, positioner, &xdg_positioner::INTERFACE)?;
+                let Some(new) = self.positioner(request.client, positioner) else {
+                    return Ok(());
+                };
+                if !new.is_complete() {
+                    return Err(ProtocolError::new(
+                        request.object,
+                        xdg_wm_base::error::INVALID_POSITIONER,
+                        "a positioner without a size or an anchor rectangle",
+                    ));
+                }
+                if live && let Some(popup) = self.popups.popups.get_mut(&surface) {
+                    popup.positioner = new;
+                    let object = popup.object;
+                    let c = self.client_mut(request);
+                    xdg_popup::send_repositioned(&mut c.out, object, token);
+                    self.configure_popup(surface);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The origin of the surface `id` on the output, which a window, a
+    /// layer surface and a popup have.
+    pub(super) fn surface_origin(&self, id: SurfaceId) -> Option<(i32, i32)> {
+        let mut at = id;
+        let mut origin = (0, 0);
+        // A popup lies against its parent's window geometry; the chain
+        // of parents is no longer than the popups there are.
+        for _ in 0..=self.popups.popups.len() {
+            if let Some(popup) = self.popups.popups.get(&at) {
+                let parent = popup.parent?;
+                let geometry = self.geometry_offset(at);
+                origin = (
+                    origin.0 + popup.rect.x - geometry.0,
+                    origin.1 + popup.rect.y - geometry.1,
+                );
+                let (px, py) = self.geometry_offset(parent);
+                origin = (origin.0 + px, origin.1 + py);
+                at = parent;
+                continue;
+            }
+            let base = if let Some(window) = self.windows().iter().find(|w| w.surface == at) {
+                (window.frame.x, window.frame.y)
+            } else {
+                let extent = self.extent(self.surfaces.get(&at)?);
+                let place = self.layer_place(at, extent)?;
+                (place.x, place.y)
+            };
+            return Some((origin.0 + base.0, origin.1 + base.1));
+        }
+        None
+    }
+
+    /// The top left corner of the window geometry of `id` within its
+    /// surface.
+    fn geometry_offset(&self, id: SurfaceId) -> (i32, i32) {
+        self.surfaces
+            .get(&id)
+            .and_then(|s| s.xdg.as_ref())
+            .and_then(|x| x.geometry)
+            .map_or((0, 0), |g| (g.x, g.y))
+    }
+
+    /// Places the popup of `id` against its parent, and sends its client
+    /// `configure` with the rectangle, and the serial to acknowledge.
+    pub(super) fn configure_popup(&mut self, id: SurfaceId) {
+        let screen = self.screen.unwrap_or((0, 0));
+        let Some(popup) = self.popups.popups.get(&id) else {
+            return;
+        };
+        let Some(parent) = popup.parent else {
+            return;
+        };
+        let (positioner, client, object) = (popup.positioner, popup.client, popup.object);
+        // The output, in the coordinates of the parent's window geometry.
+        let (ox, oy) = self.surface_origin(parent).unwrap_or((0, 0));
+        let (gx, gy) = self.geometry_offset(parent);
+        let bounds = Rect {
+            x: -(ox + gx),
+            y: -(oy + gy),
+            width: screen.0,
+            height: screen.1,
+        };
+        let rect = positioner.place(bounds);
+        if let Some(popup) = self.popups.popups.get_mut(&id) {
+            popup.rect = rect;
+        }
+        let serial = self.next_serial();
+        let Some(xdg) = self.surfaces.get_mut(&id).and_then(|s| s.xdg.as_mut()) else {
+            return;
+        };
+        xdg.sent.push(serial);
+        let surface_object = xdg.object;
+        if let Some(c) = self.clients.get_mut(&client) {
+            xdg_popup::send_configure(&mut c.out, object, rect.x, rect.y, rect.width, rect.height);
+            xdg_surface::send_configure(&mut c.out, surface_object, serial);
+        }
+    }
+
+    /// Makes `parent` the parent of the popup `popup` that has none; says
+    /// whether it had none.
+    pub(super) fn set_popup_parent(&mut self, popup: SurfaceId, parent: SurfaceId) -> bool {
+        match self.popups.popups.get_mut(&popup) {
+            Some(p) if p.parent.is_none() => {
+                p.parent = Some(parent);
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
+    }
+
+    /// The popups of `parent` that are shown: made, configured, mapped
+    /// and not dismissed, oldest first.
+    pub(super) fn popups_of(&self, parent: SurfaceId) -> Vec<SurfaceId> {
+        let shown = |id: &SurfaceId| {
+            let s = self.surfaces.get(id);
+            s.is_some_and(|s| {
+                s.current.buffer.is_some() && s.xdg.as_ref().is_some_and(|x| x.configured)
+            })
+        };
+        let popups = self.popups.popups.iter();
+        let mine = popups.filter(|(_, p)| p.parent == Some(parent) && !p.dismissed);
+        mine.map(|(&id, _)| id).filter(shown).collect()
+    }
+
+    /// Dismisses the popups of `parent`, and theirs: each is told
+    /// `popup_done` and is not shown any more.
+    pub(super) fn dismiss_popups_of(&mut self, parent: SurfaceId) {
+        let mut work = vec![parent];
+        while let Some(at) = work.pop() {
+            let children: Vec<SurfaceId> = self
+                .popups
+                .popups
+                .iter()
+                .filter(|(_, p)| p.parent == Some(at) && !p.dismissed)
+                .map(|(&id, _)| id)
+                .collect();
+            for id in children {
+                self.dismiss_popup(id);
+                work.push(id);
+            }
+        }
+    }
+
+    /// Tells the popup of `id` that it is done, and stops showing it.
+    pub(super) fn dismiss_popup(&mut self, id: SurfaceId) {
+        let Some(popup) = self.popups.popups.get_mut(&id).filter(|p| !p.dismissed) else {
+            return;
+        };
+        popup.dismissed = true;
+        let (client, object) = (popup.client, popup.object);
+        if let Some(c) = self.clients.get_mut(&client) {
+            xdg_popup::send_popup_done(&mut c.out, object);
+        }
+    }
+
+    /// Forgets the positioners and popups of `client`, which went.
     pub(super) fn forget_client_popups(&mut self, client: ClientId) {
         self.popups.positioners.retain(|(c, _), _| *c != client);
+        self.popups.popups.retain(|_, p| p.client != client);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::TestClient;
     use super::*;
+    use crate::wayland::protocols::{wl_callback, wl_compositor, wl_display, wl_registry};
 
     fn rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
         Rect {
@@ -339,5 +621,189 @@ mod tests {
         assert!(!p.is_complete());
         p.anchor_rect = Some(rect(0, 0, 1, 1));
         assert!(p.is_complete());
+    }
+
+    /// A client with the compositor 3 and xdg_wm_base 4, the toplevel
+    /// surface 5 with the xdg_surface 6, mapped, and the positioner 10
+    /// that places a popup of 100 by 50 below a 20 by 10 rectangle at
+    /// (30, 40) of it.
+    fn parent(server: &mut Server) -> (TestClient, SurfaceId) {
+        server.set_screen((1280, 800));
+        let client = TestClient::new(server);
+        client.send(server, 1, 1, vec![Arg::NewId(NewId(2))]);
+        client.bind(server, 2, &wl_compositor::INTERFACE, 3);
+        client.bind(
+            server,
+            2,
+            &crate::wayland::protocols::xdg_wm_base::INTERFACE,
+            4,
+        );
+        client.send(server, 3, 0, vec![Arg::NewId(NewId(5))]);
+        client.send(
+            server,
+            4,
+            2,
+            vec![Arg::NewId(NewId(6)), Arg::Object(Some(5))],
+        );
+        client.send(server, 6, 1, vec![Arg::NewId(NewId(7))]);
+        let id = *server.surfaces.keys().next().unwrap();
+        server.buffer_sizes.insert(99, (300, 200));
+        let s = server.surfaces.get_mut(&id).unwrap();
+        s.current.buffer = Some(99);
+        s.xdg.as_mut().unwrap().configured = true;
+        client.send(server, 4, 1, vec![Arg::NewId(NewId(10))]);
+        client.send(server, 10, 1, vec![Arg::Int(100), Arg::Int(50)]);
+        let anchor_rect = [30, 40, 20, 10].map(Arg::Int);
+        client.send(server, 10, 2, Vec::from(anchor_rect));
+        client.send(server, 10, 3, vec![Arg::Uint(6)]);
+        client.send(server, 10, 4, vec![Arg::Uint(8)]);
+        (client, id)
+    }
+
+    /// Makes the popup 11 of the surface 8, whose xdg_surface is 9, of the
+    /// xdg_surface `parent`, and makes the first commit.
+    fn popup(server: &mut Server, client: &TestClient, parent: u32) {
+        client.send(server, 3, 0, vec![Arg::NewId(NewId(8))]);
+        client.send(
+            server,
+            4,
+            2,
+            vec![Arg::NewId(NewId(9)), Arg::Object(Some(8))],
+        );
+        let args = vec![
+            Arg::NewId(NewId(11)),
+            Arg::Object(Some(parent)),
+            Arg::Object(Some(10)),
+        ];
+        client.send(server, 9, 2, args);
+        client.send(server, 8, 6, vec![]);
+    }
+
+    fn popup_events(server: &mut Server, client: &TestClient) -> Vec<(u32, u16, Vec<Arg>)> {
+        let sent = client.events(server, &|id| match id {
+            1 => &wl_display::EVENTS,
+            2 => &wl_registry::EVENTS,
+            9 => &xdg_surface::EVENTS,
+            11 => &xdg_popup::EVENTS,
+            _ => &wl_callback::EVENTS,
+        });
+        sent.into_iter().filter(|e| e.0 == 9 || e.0 == 11).collect()
+    }
+
+    #[test]
+    fn the_first_commit_of_a_popup_is_answered_with_its_place_and_a_serial() {
+        let mut server = Server::new();
+        let (client, _) = parent(&mut server);
+        popup(&mut server, &client, 6);
+        assert_eq!(client.error(&mut server), None);
+        let sent = popup_events(&mut server, &client);
+        let kinds: Vec<(u32, u16)> = sent.iter().map(|e| (e.0, e.1)).collect();
+        assert_eq!(kinds, [(11, 0), (9, 0)]);
+        // Below the anchor rectangle's bottom left corner.
+        assert_eq!(
+            sent[0].2,
+            [Arg::Int(30), Arg::Int(50), Arg::Int(100), Arg::Int(50)]
+        );
+    }
+
+    #[test]
+    fn a_mapped_popup_is_shown_above_its_parent_at_its_place() {
+        let mut server = Server::new();
+        let (client, parent) = parent(&mut server);
+        popup(&mut server, &client, 6);
+        let Arg::Uint(serial) = popup_events(&mut server, &client)[1].2[0] else {
+            panic!("a serial");
+        };
+        client.send(&mut server, 9, 4, vec![Arg::Uint(serial)]);
+        let id = *server.popups.popups.keys().next().unwrap();
+        server.buffer_sizes.insert(98, (100, 50));
+        let s = server.surfaces.get_mut(&id).unwrap();
+        s.pending.buffer = Some(98);
+        s.attached = true;
+        client.send(&mut server, 8, 6, vec![]);
+        assert_eq!(client.error(&mut server), None);
+        let shown = server.shown();
+        let ids: Vec<SurfaceId> = shown.iter().map(|s| s.surface).collect();
+        assert_eq!(ids, [parent, id]);
+        assert_eq!((shown[1].x - shown[0].x, shown[1].y - shown[0].y), (30, 50));
+        assert!(shown.iter().all(|s| s.root == parent));
+        // A pointer over the popup is in the popup.
+        server.pointer_motion(f64::from(shown[1].x + 5), f64::from(shown[1].y + 5), 1);
+        assert_eq!(server.pointer_surface(), Some(id));
+    }
+
+    #[test]
+    fn refuses_a_popup_without_a_complete_positioner_or_a_parent_with_a_role() {
+        let mut server = Server::new();
+        let (client, _) = parent(&mut server);
+        client.send(&mut server, 4, 1, vec![Arg::NewId(NewId(12))]);
+        client.send(&mut server, 3, 0, vec![Arg::NewId(NewId(8))]);
+        client.send(
+            &mut server,
+            4,
+            2,
+            vec![Arg::NewId(NewId(9)), Arg::Object(Some(8))],
+        );
+        let args = vec![
+            Arg::NewId(NewId(11)),
+            Arg::Object(Some(6)),
+            Arg::Object(Some(12)),
+        ];
+        client.send(&mut server, 9, 2, args);
+        let code = xdg_wm_base::error::INVALID_POSITIONER;
+        assert_eq!(client.error(&mut server), Some(code));
+        // A parent that is an xdg_surface without a role.
+        let mut server = Server::new();
+        let (client, _) = parent(&mut server);
+        client.send(&mut server, 3, 0, vec![Arg::NewId(NewId(13))]);
+        client.send(
+            &mut server,
+            4,
+            2,
+            vec![Arg::NewId(NewId(14)), Arg::Object(Some(13))],
+        );
+        client.send(&mut server, 3, 0, vec![Arg::NewId(NewId(8))]);
+        client.send(
+            &mut server,
+            4,
+            2,
+            vec![Arg::NewId(NewId(9)), Arg::Object(Some(8))],
+        );
+        let args = vec![
+            Arg::NewId(NewId(11)),
+            Arg::Object(Some(14)),
+            Arg::Object(Some(10)),
+        ];
+        client.send(&mut server, 9, 2, args);
+        let code = xdg_wm_base::error::INVALID_POPUP_PARENT;
+        assert_eq!(client.error(&mut server), Some(code));
+    }
+
+    #[test]
+    fn a_parent_that_goes_dismisses_its_popups_and_a_reposition_places_again() {
+        let mut server = Server::new();
+        let (client, _) = parent(&mut server);
+        popup(&mut server, &client, 6);
+        popup_events(&mut server, &client);
+        // A reposition with another positioner is answered with the token
+        // and a new place.
+        client.send(&mut server, 4, 1, vec![Arg::NewId(NewId(12))]);
+        client.send(&mut server, 12, 1, vec![Arg::Int(10), Arg::Int(10)]);
+        client.send(&mut server, 12, 2, Vec::from([0, 0, 5, 5].map(Arg::Int)));
+        client.send(
+            &mut server,
+            11,
+            2,
+            vec![Arg::Object(Some(12)), Arg::Uint(77)],
+        );
+        let sent = popup_events(&mut server, &client);
+        let kinds: Vec<(u32, u16)> = sent.iter().map(|e| (e.0, e.1)).collect();
+        assert_eq!(kinds, [(11, 2), (11, 0), (9, 0)]);
+        assert_eq!(sent[0].2, [Arg::Uint(77)]);
+        assert_eq!(client.error(&mut server), None);
+        // The parent's surface is destroyed: the popup is done.
+        client.send(&mut server, 5, 0, vec![]);
+        let sent = popup_events(&mut server, &client);
+        assert!(sent.iter().any(|e| (e.0, e.1) == (11, 1)));
     }
 }

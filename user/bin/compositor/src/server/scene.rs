@@ -50,39 +50,49 @@ impl Server {
         }
         let root = own.surface;
         let mut own = Some(own);
-        let mut work = vec![Work::Visit(
-            root,
-            (
-                own.as_ref().map_or(0, |o| o.x),
-                own.as_ref().map_or(0, |o| o.y),
-            ),
-        )];
-        while let Some(item) = work.pop() {
-            match item {
-                Work::Emit(entry) => out.push(entry),
-                Work::Visit(id, at) => {
-                    let mut paint = Vec::new();
-                    for member in self.subsurfaces.stack(id) {
-                        if member == id {
-                            let entry = if id == root {
-                                own.take()
-                            } else {
-                                self.surfaces.get(&id).and_then(|s| {
-                                    Some(make(id, root, s.current.buffer?, at.0, at.1, None, s))
-                                })
-                            };
-                            paint.extend(entry.map(Work::Emit));
-                        } else if self
-                            .surfaces
-                            .get(&member)
-                            .is_some_and(|s| s.current.buffer.is_some())
-                        {
-                            let (dx, dy) = self.subsurfaces.position(member);
-                            paint.push(Work::Visit(member, (at.0 + dx, at.1 + dy)));
+        let first = (
+            own.as_ref().map_or(0, |o| o.x),
+            own.as_ref().map_or(0, |o| o.y),
+        );
+        let mut work = vec![Work::Visit(root, first)];
+        // The popups of each surface of the tree, and then of those
+        // popups, lie above all of it.
+        let mut popups = std::collections::VecDeque::new();
+        loop {
+            while let Some(item) = work.pop() {
+                match item {
+                    Work::Emit(entry) => out.push(entry),
+                    Work::Visit(id, at) => {
+                        popups.extend(self.popups_of(id));
+                        let mut paint = Vec::new();
+                        for member in self.subsurfaces.stack(id) {
+                            if member == id {
+                                let entry = if id == root {
+                                    own.take()
+                                } else {
+                                    self.surfaces.get(&id).and_then(|s| {
+                                        Some(make(id, root, s.current.buffer?, at.0, at.1, None, s))
+                                    })
+                                };
+                                paint.extend(entry.map(Work::Emit));
+                            } else if self
+                                .surfaces
+                                .get(&member)
+                                .is_some_and(|s| s.current.buffer.is_some())
+                            {
+                                let (dx, dy) = self.subsurfaces.position(member);
+                                paint.push(Work::Visit(member, (at.0 + dx, at.1 + dy)));
+                            }
                         }
+                        work.extend(paint.into_iter().rev());
                     }
-                    work.extend(paint.into_iter().rev());
                 }
+            }
+            let Some(popup) = popups.pop_front() else {
+                break;
+            };
+            if let Some(origin) = self.surface_origin(popup) {
+                work.push(Work::Visit(popup, origin));
             }
         }
     }

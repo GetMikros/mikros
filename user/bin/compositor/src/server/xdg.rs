@@ -17,13 +17,13 @@ pub struct XdgState {
     pub toplevel: Option<ObjectId>,
     /// The serials of the configure events that the client has not yet
     /// acknowledged, oldest first.
-    sent: Vec<u32>,
+    pub(super) sent: Vec<u32>,
     /// Whether the client acknowledged a configure event, and so may
     /// commit a buffer.
     pub configured: bool,
     /// Whether the initial commit was made, after which every change of
     /// the toplevel's state is configured.
-    initialized: bool,
+    pub(super) initialized: bool,
     pub title: String,
     pub app_id: String,
     pub fullscreen: bool,
@@ -180,12 +180,18 @@ impl Server {
                     Resource::Toplevel(id),
                 )?;
             }
-            xdg_surface::Request::GetPopup { .. } => {
-                return Err(ProtocolError::new(
-                    request.object,
-                    crate::wayland::protocols::wl_display::error::IMPLEMENTATION,
-                    "popups are not served yet",
-                ));
+            xdg_surface::Request::GetPopup {
+                id: popup,
+                parent,
+                positioner,
+            } => {
+                if xdg.toplevel.is_some() || self.popups.popups.contains_key(&id) {
+                    return Err(error(
+                        xdg_surface::error::ALREADY_CONSTRUCTED,
+                        "a role already",
+                    ));
+                }
+                self.get_popup(request, id, popup, parent, positioner)?;
             }
             xdg_surface::Request::SetWindowGeometry {
                 x,
@@ -326,6 +332,11 @@ impl Server {
         request: Request,
         id: SurfaceId,
     ) -> Result<(), ProtocolError> {
+        let orphan = self
+            .popups
+            .popups
+            .get(&id)
+            .is_some_and(|p| p.parent.is_none());
         let s = self.surface_mut(id)?;
         let Some(xdg) = &s.xdg else {
             return Ok(());
@@ -335,6 +346,12 @@ impl Server {
             return Err(error(
                 xdg_surface::error::NOT_CONSTRUCTED,
                 "an xdg_surface without a role",
+            ));
+        }
+        if !xdg.initialized && orphan {
+            return Err(error(
+                xdg_surface::error::NOT_CONSTRUCTED,
+                "a popup without a parent at its first commit",
             ));
         }
         if s.pending.buffer.is_some() && !xdg.configured {
@@ -356,6 +373,9 @@ impl Server {
         if xdg.toplevel.is_some() && !xdg.initialized {
             xdg.initialized = true;
             self.configure(client, id);
+        } else if !xdg.initialized && self.popups.popups.contains_key(&id) {
+            xdg.initialized = true;
+            self.configure_popup(id);
         }
         self.resize_committed(id);
     }

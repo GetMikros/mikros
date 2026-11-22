@@ -118,6 +118,7 @@ pub enum Resource {
     Subsurface(SurfaceId),
     LayerShell,
     LayerSurface(SurfaceId),
+    Popup(SurfaceId),
 }
 
 /// An object of a client.
@@ -361,7 +362,7 @@ impl Server {
             wl_compositor::VERSION,
             Resource::Compositor,
         );
-        server.add_global(&xdg_wm_base::INTERFACE, 1, Resource::WmBase);
+        server.add_global(&xdg_wm_base::INTERFACE, 3, Resource::WmBase);
         server.add_global(&mikros_buffer_v1::INTERFACE, 1, Resource::BufferFactory);
         server.add_global(&wl_output::INTERFACE, 3, Resource::Output);
         server.add_global(&mikros_shell_v1::INTERFACE, 1, Resource::Shell);
@@ -614,6 +615,7 @@ impl Server {
             | Resource::DataSource
             | Resource::DataDevice
             | Resource::DataOffer => self.data_request(request, resource, args)?,
+            Resource::Popup(surface) => self.popup_request(request, surface, args)?,
             Resource::LayerShell | Resource::LayerSurface(_) => {
                 self.layer_request(request, resource, args)?
             }
