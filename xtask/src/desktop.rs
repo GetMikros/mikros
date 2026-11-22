@@ -511,6 +511,14 @@ pub fn run_with(
         screen.until_colour_at(&mut qemu, colour, size, left + DRAG as usize, what)?;
         // Super is let go after its hold.
         std::thread::sleep(Duration::from_secs(4));
+        // Super and Up maximize the window, which goes to the corner of the
+        // work area, and Super and Down give it back where it was dragged.
+        scenario::monitor(&socket, "sendkey meta_l-up")?;
+        let what = "the window was maximized with Super and Up";
+        screen.until_colour_at(&mut qemu, colour, size, 0, what)?;
+        scenario::monitor(&socket, "sendkey meta_l-down")?;
+        let what = "the window was restored with Super and Down";
+        screen.until_colour_at(&mut qemu, colour, size, left + DRAG as usize, what)?;
         // An ordinary client's window, from the text session.
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
         screen.until(
