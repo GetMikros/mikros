@@ -3,7 +3,9 @@
  * and fully transparent and whose whole surface has the material haze,
  * so that the screen shows the compositor's haze there. Whenever the
  * pointer enters the panel, it asks for the cursor shape `pointer`, a
- * hand. Once the compositor configured the panel and the buffer is
+ * hand. It also reads the window list and tells on its standard error the
+ * app ID and focus of the first window, and a press of the pointer on it
+ * activates that window and says so once the compositor answered. Once the compositor configured the panel and the buffer is
  * committed, it serves the connection until the compositor closes it.
  * It exits with the number of the step that failed, if one does. */
 
@@ -11,6 +13,7 @@
 #include <fcntl.h>
 #include <mikros/startup.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -29,6 +32,8 @@ enum {
 	BOTTOM = 2,
 	THICKNESS = 48,
 	HAZE = 1,
+	/* The value of the focused state in a window handle's state array. */
+	STATE_FOCUSED = 1,
 };
 
 struct bar {
@@ -40,8 +45,93 @@ struct bar {
 	struct wl_seat *seat;
 	struct wp_cursor_shape_manager_v1 *shapes;
 	struct wp_cursor_shape_device_v1 *shape;
+	struct wl_display *display;
+	struct mikros_toplevel_handle_v1 *window;
 	uint32_t serial, width, height;
-	int configured;
+	int configured, focused, told;
+	char app_id[129];
+};
+
+/* The window list: the probe keeps the first window's handle, and whether
+ * its state says that it is minimized. */
+static void handle_title(void *data, struct mikros_toplevel_handle_v1 *h, const char *title)
+{
+	(void)data, (void)h, (void)title;
+}
+
+static void handle_app_id(void *data, struct mikros_toplevel_handle_v1 *h, const char *app_id)
+{
+	struct bar *b = data;
+	(void)h;
+	strncpy(b->app_id, app_id, sizeof b->app_id - 1);
+}
+
+static void handle_state(void *data, struct mikros_toplevel_handle_v1 *h, struct wl_array *state)
+{
+	struct bar *b = data;
+	(void)h;
+	b->focused = 0;
+	uint32_t *s;
+	wl_array_for_each(s, state) if (*s == STATE_FOCUSED) b->focused = 1;
+}
+
+static void handle_output(void *data, struct mikros_toplevel_handle_v1 *h, struct wl_output *o)
+{
+	(void)data, (void)h, (void)o;
+}
+
+static void handle_parent(void *data, struct mikros_toplevel_handle_v1 *h,
+			  struct mikros_toplevel_handle_v1 *parent)
+{
+	(void)data, (void)h, (void)parent;
+}
+
+static void handle_done(void *data, struct mikros_toplevel_handle_v1 *h)
+{
+	struct bar *b = data;
+	(void)h;
+	if (b->focused && !b->told) {
+		b->told = 1;
+		fprintf(stderr, "greeter-probe: the window of %s has the focus\n", b->app_id);
+	}
+}
+
+static void handle_closed(void *data, struct mikros_toplevel_handle_v1 *h)
+{
+	struct bar *b = data;
+	if (b->window == h)
+		b->window = NULL;
+}
+
+static const struct mikros_toplevel_handle_v1_listener handle_listener = {
+	.title = handle_title,
+	.app_id = handle_app_id,
+	.state = handle_state,
+	.output = handle_output,
+	.parent = handle_parent,
+	.done = handle_done,
+	.closed = handle_closed,
+};
+
+static void listed(void *data, struct mikros_toplevel_list_v1 *list,
+		   struct mikros_toplevel_handle_v1 *handle)
+{
+	struct bar *b = data;
+	(void)list;
+	if (!b->window) {
+		b->window = handle;
+		mikros_toplevel_handle_v1_add_listener(handle, &handle_listener, b);
+	}
+}
+
+static void finished(void *data, struct mikros_toplevel_list_v1 *list)
+{
+	(void)data, (void)list;
+}
+
+static const struct mikros_toplevel_list_v1_listener list_listener = {
+	.toplevel = listed,
+	.finished = finished,
 };
 
 static void global(void *data, struct wl_registry *registry, uint32_t name,
@@ -118,10 +208,26 @@ static void motion(void *data, struct wl_pointer *pointer, uint32_t time, wl_fix
 	(void)data, (void)pointer, (void)time, (void)x, (void)y;
 }
 
+/* The compositor handled the activation: it answers requests in order. */
+static void activated(void *data, struct wl_callback *callback, uint32_t time)
+{
+	struct bar *b = data;
+	(void)time;
+	wl_callback_destroy(callback);
+	fprintf(stderr, "greeter-probe: activated the window of %s\n", b->app_id);
+}
+
+static const struct wl_callback_listener activated_listener = {.done = activated};
+
 static void button(void *data, struct wl_pointer *pointer, uint32_t serial, uint32_t time,
 		   uint32_t button, uint32_t state)
 {
-	(void)data, (void)pointer, (void)serial, (void)time, (void)button, (void)state;
+	struct bar *b = data;
+	(void)pointer, (void)serial, (void)time, (void)button;
+	if (state != WL_POINTER_BUTTON_STATE_PRESSED || !b->window)
+		return;
+	mikros_toplevel_handle_v1_activate(b->window, b->seat);
+	wl_callback_add_listener(wl_display_sync(b->display), &activated_listener, b);
 }
 
 static void axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis,
@@ -171,6 +277,7 @@ int panel(void)
 	struct wl_display *display = fd < 0 ? NULL : wl_display_connect_to_fd(fd);
 	if (!display)
 		return 90;
+	b.display = display;
 	struct wl_registry *registry = wl_display_get_registry(display);
 	wl_registry_add_listener(registry, &registry_listener, &b);
 	if (wl_display_roundtrip(display) < 0 || !b.compositor || !b.output || !b.buffers ||
@@ -178,6 +285,8 @@ int panel(void)
 		return 91;
 	struct wl_pointer *pointer = wl_seat_get_pointer(b.seat);
 	b.shape = wp_cursor_shape_manager_v1_get_pointer(b.shapes, pointer);
+	struct mikros_toplevel_list_v1 *list = mikros_shell_v1_get_toplevel_list(b.shell);
+	mikros_toplevel_list_v1_add_listener(list, &list_listener, &b);
 	wl_pointer_add_listener(pointer, &pointer_listener, &b);
 
 	struct wl_surface *surface = wl_compositor_create_surface(b.compositor);

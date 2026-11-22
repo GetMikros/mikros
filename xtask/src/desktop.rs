@@ -57,6 +57,10 @@ const SHELL_EXITED: &str = "compositor: the part start-menu of system.mikros.she
 const CLIENT_CONNECTED: &str = "compositor: a client of ";
 const CLIENT_COMMAND: &str = "slash s y s t e m slash a p p s slash s y s t e m dot m i k r o s dot \
     s h e l l shift-minus p r o b e slash g r e e t e r minus p r o b e spc minus minus c l i e n t ret";
+/// What the taskbar probe says of the window list: the first window has the
+/// focus, and the click on the taskbar activated it.
+const LIST_FOCUSED: &str = "greeter-probe: the window of system.mikros.shell_probe has the focus";
+const LIST_ACTIVATED: &str = "greeter-probe: activated the window of system.mikros.shell_probe";
 const SHELL_RESTARTED: &str =
     "compositor: starting the part start-menu of system.mikros.shell_probe again";
 const SHELL_GAVE_UP: &str = "compositor: the part start-menu of system.mikros.shell_probe stopped more than 5 times within a minute; leaving its roles empty";
@@ -384,6 +388,12 @@ pub fn run_with(
         scenario::monitor(&socket, MOVE_TO_PANEL)?;
         let what = "the panel's hand showed";
         screen.until_black(&mut qemu, HAND_PIXEL, what)?;
+        // The taskbar probe's window list tells that the window has the
+        // focus, and a click on the taskbar activates it through the list.
+        scenario::wait_for_line(&log, LIST_FOCUSED, &mut qemu, deadline)?;
+        scenario::monitor(&socket, "mouse_button 1")?;
+        scenario::monitor(&socket, "mouse_button 0")?;
+        scenario::wait_for_line(&log, LIST_ACTIVATED, &mut qemu, deadline)?;
         scenario::wait_for_line(&log, CANCELLED, &mut qemu, deadline)?;
         let serial = scenario::wait_for_line(&log, SHELL_EXITED, &mut qemu, deadline)?;
         let exited = serial
