@@ -18,7 +18,8 @@
 use super::surface::Staged;
 use super::{ClientId, ProtocolError, Rect, Request, Resource, Role, Server, SurfaceId};
 use crate::wayland::protocols::{
-    wl_output, wl_surface, zwlr_layer_shell_v1 as shell, zwlr_layer_surface_v1 as surface_v1,
+    wl_output, wl_surface, xdg_popup, zwlr_layer_shell_v1 as shell,
+    zwlr_layer_surface_v1 as surface_v1,
 };
 use crate::wayland::wire::{Arg, NewId, ObjectId};
 use std::collections::BTreeMap;
@@ -375,6 +376,26 @@ impl Server {
             return Ok(());
         }
         let error = |code, message: &str| ProtocolError::new(request.object, code, message);
+        if let surface_v1::Request::GetPopup { popup } = decoded {
+            let live = self
+                .layers
+                .surfaces
+                .get(&surface)
+                .is_some_and(|l| l.object == request.object && !l.closed);
+            let c = self.client_mut(request);
+            let Resource::Popup(popup_surface) =
+                c.resource(request.object, popup, &xdg_popup::INTERFACE)?
+            else {
+                unreachable!("popups are xdg_popup objects");
+            };
+            if live && !self.set_popup_parent(popup_surface, surface) {
+                return Err(error(
+                    surface_v1::error::INVALID_SURFACE_STATE,
+                    "a popup that has a parent already",
+                ));
+            }
+            return Ok(());
+        }
         let Some(layer) = self
             .layers
             .surfaces
@@ -445,12 +466,7 @@ impl Server {
                 layer.sent.drain(..=at);
                 layer.configured = true;
             }
-            surface_v1::Request::GetPopup { .. } => {
-                return Err(error(
-                    surface_v1::error::INVALID_SURFACE_STATE,
-                    "popups are not served yet",
-                ));
-            }
+            surface_v1::Request::GetPopup { .. } => unreachable!("handled above"),
         }
         Ok(())
     }
@@ -1286,5 +1302,97 @@ mod tests {
         // Asked again for the next one.
         start(&mut server, &client, 22, 32, 2);
         assert_eq!(server.take_layer_questions(), [client.id]);
+    }
+
+    #[test]
+    fn a_popup_of_a_layer_surface_lies_above_it_in_its_layer() {
+        use crate::wayland::protocols::{xdg_popup, xdg_surface, xdg_wm_base};
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        client.bind(&mut server, 2, &xdg_wm_base::INTERFACE, 40);
+        let top = map(
+            &mut server,
+            &client,
+            20,
+            30,
+            2,
+            (ANCHOR_TOP | ANCHOR_LEFT, (200, 100), 0),
+        );
+        let other = map(&mut server, &client, 21, 31, 3, (0, (50, 50), 0));
+        // A positioner for a popup of 60 by 30 below a rectangle at (10, 20).
+        client.send(&mut server, 40, 1, vec![Arg::NewId(NewId(41))]);
+        client.send(&mut server, 41, 1, vec![Arg::Int(60), Arg::Int(30)]);
+        client.send(&mut server, 41, 2, Vec::from([10, 20, 5, 5].map(Arg::Int)));
+        client.send(&mut server, 41, 3, vec![Arg::Uint(6)]);
+        client.send(&mut server, 41, 4, vec![Arg::Uint(8)]);
+        // A popup with no parent, which the layer surface adopts.
+        client.send(&mut server, 3, 0, vec![Arg::NewId(NewId(50))]);
+        client.send(
+            &mut server,
+            40,
+            2,
+            vec![Arg::NewId(NewId(51)), Arg::Object(Some(50))],
+        );
+        let args = vec![
+            Arg::NewId(NewId(52)),
+            Arg::Object(None),
+            Arg::Object(Some(41)),
+        ];
+        client.send(&mut server, 51, 2, args);
+        client.send(&mut server, 30, 5, vec![Arg::Object(Some(52))]);
+        client.send(&mut server, 50, 6, vec![]);
+        assert_eq!(client.error(&mut server), None);
+        let sent = client.events(&mut server, &|id| match id {
+            1 => &wl_display::EVENTS,
+            2 => &wl_registry::EVENTS,
+            51 => &xdg_surface::EVENTS,
+            52 => &xdg_popup::EVENTS,
+            id if id >= 10 => &surface_v1::EVENTS,
+            _ => &wl_callback::EVENTS,
+        });
+        let configure = sent.iter().find(|e| e.0 == 51).unwrap();
+        let Arg::Uint(serial) = configure.2[0] else {
+            panic!("a serial");
+        };
+        client.send(&mut server, 51, 4, vec![Arg::Uint(serial)]);
+        let id = *server.popups.popups.keys().next().unwrap();
+        server.buffer_sizes.insert(98, (60, 30));
+        let s = server.surfaces.get_mut(&id).unwrap();
+        s.pending.buffer = Some(98);
+        s.attached = true;
+        client.send(&mut server, 50, 6, vec![]);
+        assert_eq!(client.error(&mut server), None);
+        // Above its layer surface, below the surfaces of the next layer.
+        let order: Vec<SurfaceId> = server.shown().iter().map(|s| s.surface).collect();
+        assert_eq!(order, [top, id, other]);
+        let shown = server.shown();
+        assert_eq!((shown[1].x - shown[0].x, shown[1].y - shown[0].y), (10, 25));
+    }
+
+    #[test]
+    fn a_popup_without_a_parent_cannot_have_a_first_commit() {
+        use crate::wayland::protocols::{xdg_surface, xdg_wm_base};
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        client.bind(&mut server, 2, &xdg_wm_base::INTERFACE, 40);
+        client.send(&mut server, 40, 1, vec![Arg::NewId(NewId(41))]);
+        client.send(&mut server, 41, 1, vec![Arg::Int(60), Arg::Int(30)]);
+        client.send(&mut server, 41, 2, Vec::from([10, 20, 5, 5].map(Arg::Int)));
+        client.send(&mut server, 3, 0, vec![Arg::NewId(NewId(50))]);
+        client.send(
+            &mut server,
+            40,
+            2,
+            vec![Arg::NewId(NewId(51)), Arg::Object(Some(50))],
+        );
+        let args = vec![
+            Arg::NewId(NewId(52)),
+            Arg::Object(None),
+            Arg::Object(Some(41)),
+        ];
+        client.send(&mut server, 51, 2, args);
+        client.send(&mut server, 50, 6, vec![]);
+        let code = xdg_surface::error::NOT_CONSTRUCTED;
+        assert_eq!(client.error(&mut server), Some(code));
     }
 }
