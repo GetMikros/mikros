@@ -120,9 +120,13 @@ const TOLERANCE: u8 = 2;
 /// that it may still cover on a text console's screen.
 const COVERED: f64 = 0.9;
 const GONE: f64 = 0.1;
-/// The share of its window that the window's colour must cover: all of
-/// it but the pointer's arrow.
-const WINDOW_SHARE: f64 = 0.97;
+/// The area of the pointer's arrow, which starts with its hotspot in the
+/// middle of the screen, over the window: from this many pixels left of and
+/// above the hotspot to this many right of and below it, the last two
+/// excluded. The arrow's pixels are blended with what is under them, so the
+/// check leaves the area out and wants every other pixel of the window to
+/// have the window's colour.
+const ARROW_AREA: (isize, isize, isize, isize) = (-2, -2, 15, 20);
 /// How often the screen is dumped while the run waits for the colour.
 const DUMP_EVERY: Duration = Duration::from_secs(1);
 
@@ -164,23 +168,14 @@ fn colour_share(ppm: &[u8], colour: [u8; 3], part: f64) -> Option<f64> {
 /// The share of the pixels of the `width` by `height` rectangle in the
 /// middle of the screen dump `ppm`, where the compositor places the first
 /// window of a screen whose work area is all of it, that show `colour`,
-/// or None when it is not a PPM image or has no such rectangle.
-fn window_share(ppm: &[u8], colour: [u8; 3], window: (usize, usize)) -> Option<f64> {
-    window_pixels(ppm, colour, window, false)
-}
-
-/// As `window_share`, for the pixels on the window's border, its first and
-/// last rows and columns, which the pointer's arrow does not reach, so that
-/// a window a pixel off the middle is not taken for it.
-fn window_border_share(ppm: &[u8], colour: [u8; 3], window: (usize, usize)) -> Option<f64> {
-    window_pixels(ppm, colour, window, true)
-}
-
-fn window_pixels(
+/// or None when it is not a PPM image or has no such rectangle. With
+/// `arrow` the pixels in the pointer's arrow area, which has its hotspot
+/// in the middle of the screen, do not count.
+fn window_share(
     ppm: &[u8],
     colour: [u8; 3],
     (width, height): (usize, usize),
-    border: bool,
+    arrow: bool,
 ) -> Option<f64> {
     let head = &ppm[..ppm.len().min(32)];
     let text = String::from_utf8_lossy(head);
@@ -194,17 +189,25 @@ fn window_pixels(
         return None;
     }
     let (left, top) = ((screen_width - width) / 2, (screen_height - height) / 2);
+    let (hotspot_x, hotspot_y) = ((screen_width / 2) as isize, (screen_height / 2) as isize);
+    let (from_x, from_y, to_x, to_y) = ARROW_AREA;
+    let in_arrow = |x: usize, y: usize| {
+        let (dx, dy) = (x as isize - hotspot_x, y as isize - hotspot_y);
+        arrow && (from_x..to_x).contains(&dx) && (from_y..to_y).contains(&dy)
+    };
     let near = |p: &[u8; 3]| {
         p.iter()
             .zip(colour)
             .all(|(&a, b)| a.abs_diff(b) <= TOLERANCE)
     };
-    let on_border = |x: usize, y: usize| x == 0 || y == 0 || x == width - 1 || y == height - 1;
     let wanted: Vec<&[u8; 3]> = (0..height)
-        .flat_map(|y| (0..width).map(move |x| (x, y)))
-        .filter(|&(x, y)| !border || on_border(x, y))
-        .map(|(x, y)| &all[(top + y) * screen_width + left + x])
+        .flat_map(|y| (0..width).map(move |x| (left + x, top + y)))
+        .filter(|&(x, y)| !in_arrow(x, y))
+        .map(|(x, y)| &all[y * screen_width + x])
         .collect();
+    if wanted.is_empty() {
+        return None;
+    }
     let shown = wanted.iter().filter(|p| near(p)).count();
     Some(shown as f64 / wanted.len() as f64)
 }
@@ -395,13 +398,12 @@ impl Screen<'_> {
     ) -> Result<()> {
         loop {
             let ppm = scenario::screen_dump(self.socket, self.dump)?;
-            let share = window_share(&ppm, colour, window)
+            let share = window_share(&ppm, colour, window, true)
                 .context("the screen dump is not a PPM image with that window")?;
-            let border = window_border_share(&ppm, colour, window).unwrap_or(0.0);
-            // The client clears all of its window, so a pixel of another
-            // colour is a fault, except for the pointer's arrow, which
-            // starts in the middle of the screen, over the window.
-            if share >= WINDOW_SHARE && border >= 1.0 {
+            // The client draws all of its window in one colour, so a pixel
+            // of another colour is a fault, except in the pointer's arrow,
+            // which starts in the middle of the screen, over the window.
+            if share >= 1.0 {
                 return Ok(());
             }
             let serial = fs::read_to_string(log).unwrap_or_default();
@@ -662,13 +664,43 @@ mod tests {
         ];
         let mut screen = b"P6\n6 4\n255\n".to_vec();
         screen.extend(rows.iter().flatten().flatten());
-        assert_eq!(window_share(&screen, SDL.colour, (2, 2)), Some(0.75));
-        assert_eq!(window_share(&screen, WALLPAPER, (2, 2)), Some(0.25));
-        // Its border has three pixels of the right colour of four.
-        assert_eq!(window_border_share(&screen, SDL.colour, (2, 2)), Some(0.75));
-        assert_eq!(window_share(&screen, SDL.colour, (7, 1)), None);
-        assert_eq!(window_share(&screen, SDL.colour, (2, 5)), None);
-        assert_eq!(window_share(&screen, SDL.colour, (0, 2)), None);
-        assert_eq!(window_share(b"not a picture", SDL.colour, (1, 1)), None);
+        assert_eq!(window_share(&screen, SDL.colour, (2, 2), false), Some(0.75));
+        assert_eq!(window_share(&screen, WALLPAPER, (2, 2), false), Some(0.25));
+        assert_eq!(window_share(&screen, SDL.colour, (7, 1), false), None);
+        assert_eq!(window_share(&screen, SDL.colour, (2, 5), false), None);
+        assert_eq!(window_share(&screen, SDL.colour, (0, 2), false), None);
+        assert_eq!(
+            window_share(b"not a picture", SDL.colour, (1, 1), false),
+            None
+        );
+    }
+
+    #[test]
+    fn leaves_the_pointers_arrow_out_of_the_window() {
+        let (c, w) = (SDL.colour, WALLPAPER);
+        // A screen of 40 by 30 pixels, whose middle, the arrow's hotspot, is
+        // (20, 15), and a window of 10 by 6 from (15, 12) in one colour.
+        let mut screen = b"P6\n40 30\n255\n".to_vec();
+        let mut pixels = vec![w; 40 * 30];
+        for y in 12..18 {
+            for x in 15..25 {
+                pixels[y * 40 + x] = c;
+            }
+        }
+        let write = |pixels: &[[u8; 3]], screen: &mut Vec<u8>| {
+            screen.truncate(b"P6\n40 30\n255\n".len());
+            screen.extend(pixels.iter().flatten());
+        };
+        write(&pixels, &mut screen);
+        assert_eq!(window_share(&screen, c, (10, 6), true), Some(1.0));
+        // A wrong pixel in the arrow's area does not count, and a wrong
+        // pixel outside it, next to the hotspot's side of the window, does.
+        pixels[15 * 40 + 20] = [0, 0, 0];
+        write(&pixels, &mut screen);
+        assert_eq!(window_share(&screen, c, (10, 6), true), Some(1.0));
+        assert_eq!(window_share(&screen, c, (10, 6), false), Some(59.0 / 60.0));
+        pixels[12 * 40 + 16] = [0, 0, 0];
+        write(&pixels, &mut screen);
+        assert!(window_share(&screen, c, (10, 6), true).unwrap() < 1.0);
     }
 }
