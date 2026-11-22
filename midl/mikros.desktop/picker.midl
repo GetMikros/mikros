@@ -1,0 +1,41 @@
+// MIKSPEC-0079.R1
+
+library mikros.desktop;
+using mikros.base;
+using mikros.fs;
+
+type PickMode = enum : u32 {
+    OPEN_FILE = 1; OPEN_FILES = 2; SAVE_FILE = 3; OPEN_FOLDER = 4;
+};
+
+type FileFilter = struct {
+    name string<64>;
+    extensions vector<string<16>, 32>;
+};
+
+type PickRequest = struct {
+    mode PickMode;
+    title string<128>?;
+    suggested_name string<255>?;
+    filters vector<FileFilter, 16>;
+    write bool;
+    bookmark bool;
+};
+
+type Bookmark = struct {
+    bytes array<u8, 32>;
+};
+
+type PickedNode = struct {
+    name string<255>;
+    node client_end<mikros.fs.Node>;
+    writable bool;
+    bookmark Bookmark?;
+};
+
+protocol FilePicker {
+    @1 Pick(request PickRequest, activation_token string<256>)
+        -> (nodes vector<PickedNode, 32>) error base.Status;
+    @2 Resolve(bookmark Bookmark, write bool) -> (node PickedNode) error base.Status;
+    @3 Forget(bookmark Bookmark) -> () error base.Status;
+};

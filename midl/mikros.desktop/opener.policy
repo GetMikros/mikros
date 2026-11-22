@@ -1,0 +1,5 @@
+# Access policy of the methods of opener.midl (MIKSPEC-0023.R47).
+# The compositor does not serve the protocol yet, which its own work
+# decides the access of.
+
+Opener.Open: public

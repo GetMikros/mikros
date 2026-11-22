@@ -1,0 +1,7 @@
+# Access policy of the methods of compositor.midl (MIKSPEC-0023.R47).
+# The Compositor channel is a startup handle of the compositor, which only
+# the session manager holds.
+
+Compositor.Connect: public
+Compositor.ConnectOpener: public
+Compositor.ConnectFilePicker: public

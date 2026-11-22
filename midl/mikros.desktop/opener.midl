@@ -1,0 +1,16 @@
+// MIKSPEC-0078.R1
+
+library mikros.desktop;
+using mikros.base;
+using mikros.fs;
+
+type FileToOpen = struct {
+    name string<255>;
+    node client_end<mikros.fs.Node>;
+    write bool;
+};
+
+protocol Opener {
+    @1 Open(files vector<FileToOpen, 16>, app_id string<128>?,
+            activation_token string<256>) -> (app_id string<128>) error base.Status;
+};

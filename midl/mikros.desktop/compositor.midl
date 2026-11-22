@@ -1,0 +1,12 @@
+// MIKSPEC-0066.R35
+
+library mikros.desktop;
+using mikros.service;
+
+protocol Compositor {
+    @1 Connect(client handle<Channel>, identity mikros.service.ClientIdentity);
+    @2 ConnectOpener(client server_end<Opener>,
+                     identity mikros.service.ClientIdentity);
+    @3 ConnectFilePicker(client server_end<FilePicker>,
+                         identity mikros.service.ClientIdentity);
+};

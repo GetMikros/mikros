@@ -1,0 +1,7 @@
+# Access policy of the methods of picker.midl (MIKSPEC-0023.R47).
+# The compositor does not serve the protocol yet, which its own work
+# decides the access of.
+
+FilePicker.Pick: public
+FilePicker.Resolve: public
+FilePicker.Forget: public
