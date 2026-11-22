@@ -18,6 +18,7 @@ mod seat;
 mod shell;
 mod surface;
 mod theme;
+mod windows;
 mod xdg;
 
 pub use buffer::{BufferId, Imports, Point, TimelineId};
@@ -233,6 +234,8 @@ pub struct Server {
     pub globals: Vec<Global>,
     surfaces: BTreeMap<SurfaceId, Surface>,
     next_surface: SurfaceId,
+    /// The mapped toplevels in their stacking order.
+    windows: windows::Windows,
     /// The rectangles of each client's regions, added or, when false,
     /// taken away, in order.
     regions: BTreeMap<(ClientId, ObjectId), Vec<(bool, Rect)>>,

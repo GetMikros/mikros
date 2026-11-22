@@ -169,10 +169,11 @@ mod tests {
             vec![Arg::NewId(NewId(7)), Arg::Object(Some(5))],
         );
         client.send(&mut server, 3, 0, vec![Arg::NewId(NewId(8))]);
-        let surface = server.surfaces.values_mut().next().unwrap();
+        let (&id, surface) = server.surfaces.iter_mut().next().unwrap();
         surface.role = Role::Toplevel;
         surface.current.buffer = Some(99);
         server.buffer_sizes.insert(99, (100, 50));
+        server.move_window(id, 0, 0);
         server.pointer_motion(10.0, 10.0, 1);
         let events = client.events(&mut server, &|id| match id {
             4 => &wl_seat::EVENTS,

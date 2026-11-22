@@ -1,7 +1,7 @@
-//! What a frame shows, bottom first: the toplevels, oldest surface first,
-//! at the output's corner, and the configured panels above them, at
-//! their edges, each with its buffer once it has one, and the areas of
-//! its materials.
+//! What a frame shows, bottom first: the windows in their stacking order
+//! at their frames, and the configured panels above them, at their
+//! edges, each with its buffer once it has one, and the areas of its
+//! materials.
 
 use super::{BufferId, Rect, Role, Server, SurfaceId};
 
@@ -17,37 +17,46 @@ pub struct Shown {
 }
 
 impl Server {
+    /// The windows, bottom first, then the configured panels.
     pub fn shown(&self) -> Vec<Shown> {
         let screen = self.screen.unwrap_or((0, 0));
-        let mut toplevels = Vec::new();
-        let mut panels = Vec::new();
+        let shown = |id, buffer, x, y, s: &super::Surface| Shown {
+            surface: id,
+            buffer,
+            x,
+            y,
+            haze: s.current.materials.haze.rects().to_vec(),
+            blur: s.current.materials.blur.rects().to_vec(),
+        };
+        let mut shown_windows = Vec::new();
+        for window in self.windows() {
+            let Some(s) = self.surfaces.get(&window.surface) else {
+                continue;
+            };
+            let Some(buffer) = s.current.buffer else {
+                continue;
+            };
+            shown_windows.push(shown(
+                window.surface,
+                buffer,
+                window.frame.x,
+                window.frame.y,
+                s,
+            ));
+        }
         for (&id, s) in &self.surfaces {
             let Some(buffer) = s.current.buffer else {
                 continue;
             };
-            let (x, y) = match (s.role, &s.panel) {
-                (Role::Toplevel, _) => (0, 0),
+            match (s.role, &s.panel) {
                 (Role::Panel, Some(panel)) if panel.configured => {
                     let place = panel.place(screen);
-                    (place.x, place.y)
+                    shown_windows.push(shown(id, buffer, place.x, place.y, s));
                 }
-                _ => continue,
-            };
-            let shown = Shown {
-                surface: id,
-                buffer,
-                x,
-                y,
-                haze: s.current.materials.haze.rects().to_vec(),
-                blur: s.current.materials.blur.rects().to_vec(),
-            };
-            match s.role {
-                Role::Panel => panels.push(shown),
-                _ => toplevels.push(shown),
+                _ => {}
             }
         }
-        toplevels.extend(panels);
-        toplevels
+        shown_windows
     }
 }
 
@@ -102,11 +111,12 @@ mod tests {
         server
             .surfaces
             .insert(5, surface(Role::None, Some(13), None));
+        server.buffer_sizes.insert(11, (400, 300));
         let shown: Vec<_> = server
             .shown()
             .iter()
             .map(|s| (s.buffer, s.x, s.y))
             .collect();
-        assert_eq!(shown, [(11, 0, 0), (10, 0, 752)]);
+        assert_eq!(shown, [(11, 440, 250), (10, 0, 752)]);
     }
 }

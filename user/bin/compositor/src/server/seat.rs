@@ -431,7 +431,7 @@ mod tests {
         surface.role = Role::Toplevel;
         surface.current.buffer = Some(99);
         server.buffer_sizes.insert(99, (100, 50));
-        let _ = id;
+        server.move_window(id, 0, 0);
         client
     }
 
