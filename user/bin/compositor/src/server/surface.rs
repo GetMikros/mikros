@@ -29,6 +29,8 @@ pub enum Role {
     Cursor,
     /// A surface within a parent (`wl_subsurface`).
     Subsurface,
+    /// A layer surface (`zwlr_layer_surface_v1`).
+    Layer,
 }
 
 /// The state of a surface that its requests set and a commit applies.
@@ -355,6 +357,7 @@ impl Server {
                     self.releases.extend(surface.releases());
                 }
                 self.forget_surface_subsurfaces(imports, id);
+                self.layers.surfaces.remove(&id);
                 self.client_mut(request).destroy(request.object);
                 self.collect(imports);
                 return Ok(());
@@ -474,6 +477,7 @@ impl Server {
     ) -> Result<(), ProtocolError> {
         self.check_commit(request, id)?;
         self.check_panel_commit(id)?;
+        self.check_layer_commit(id)?;
         self.check_points(id)?;
         self.check_viewport(id)?;
         let staged = self.stage(id);
@@ -594,6 +598,7 @@ impl Server {
         surface.frames.extend(frames);
         self.committed(client, id);
         self.panel_committed(id);
+        self.layer_committed(id);
         self.commit_damage(id, changed, waits);
         self.presentation_committed(id, replaced, asked, discarded);
     }

@@ -17,6 +17,7 @@ mod fractional;
 mod grabs;
 mod inhibit;
 mod keyboard;
+mod layer;
 mod material;
 mod panel;
 mod presentation;
@@ -113,6 +114,8 @@ pub enum Resource {
     Feedback,
     Subcompositor,
     Subsurface(SurfaceId),
+    LayerShell,
+    LayerSurface(SurfaceId),
 }
 
 /// An object of a client.
@@ -306,6 +309,8 @@ pub struct Server {
     inhibitors: inhibit::Inhibitors,
     /// The subsurfaces and their stacks.
     subsurfaces: subsurface::Subsurfaces,
+    /// The layer surfaces.
+    layers: layer::Layers,
     /// The presentation feedback that waits for a frame.
     presentation: presentation::Presentation,
     /// The windows in order of last focus, and the window switcher.
@@ -465,6 +470,7 @@ impl Server {
         self.forget_client_inhibitors(client);
         self.forget_client_presentation(client);
         self.forget_client_subsurfaces(client);
+        self.forget_client_layers(client);
         self.collect(imports);
     }
 
@@ -598,6 +604,9 @@ impl Server {
             | Resource::DataSource
             | Resource::DataDevice
             | Resource::DataOffer => self.data_request(request, resource, args)?,
+            Resource::LayerShell | Resource::LayerSurface(_) => {
+                self.layer_request(request, resource, args)?
+            }
             Resource::Subcompositor | Resource::Subsurface(_) => {
                 self.subsurface_request(imports, request, resource, args)?
             }
