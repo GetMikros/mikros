@@ -29,7 +29,7 @@ impl Server {
             blur: s.current.materials.blur.rects().to_vec(),
         };
         let mut shown_windows = Vec::new();
-        for window in self.windows() {
+        for window in self.windows().into_iter().filter(|w| !w.minimized) {
             let Some(s) = self.surfaces.get(&window.surface) else {
                 continue;
             };

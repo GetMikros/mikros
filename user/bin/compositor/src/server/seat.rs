@@ -342,6 +342,7 @@ impl Server {
         // A press on a window gives it the keyboard.
         let window = self.surfaces.get(&focus.surface).map(|s| s.role) == Some(Role::Toplevel);
         if pressed && window {
+            self.raise(focus.surface);
             self.focus_keyboard(Some(focus.surface));
         }
         let serial = self.next_serial();
@@ -498,6 +499,28 @@ mod tests {
         // Off the output's edge, the pointer stays on it.
         server.pointer_motion(-50.0, 900.0, 9);
         assert_eq!((server.pointer.x, server.pointer.y), (0.0, 799.0));
+    }
+
+    #[test]
+    fn a_click_raises_the_window_under_the_pointer() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let below = *server.surfaces.keys().next().unwrap();
+        client.send(&mut server, 3, 0, vec![Arg::NewId(NewId(8))]);
+        let above = *server.surfaces.keys().last().unwrap();
+        let surface = server.surfaces.get_mut(&above).unwrap();
+        surface.role = Role::Toplevel;
+        surface.current.buffer = Some(98);
+        server.buffer_sizes.insert(98, (100, 50));
+        server.windows();
+        server.move_window(above, 50, 0);
+        // The second window lies over the right half of the first.
+        let top = |server: &Server| server.surface_at(75, 10).map(|f| f.surface);
+        assert_eq!(top(&server), Some(above));
+        server.pointer_motion(10.0, 10.0, 1);
+        server.pointer_button(0x110, true, 2);
+        server.pointer_button(0x110, false, 3);
+        assert_eq!(top(&server), Some(below));
     }
 
     #[test]

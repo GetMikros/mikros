@@ -20,6 +20,9 @@ const NEAR: i32 = 8;
 pub struct Window {
     pub surface: SurfaceId,
     pub frame: Rect,
+    /// Whether the window is minimized: not drawn, and not a place for
+    /// focus, but still a window.
+    pub minimized: bool,
 }
 
 /// The windows, bottom first.
@@ -71,31 +74,66 @@ impl Server {
     pub fn windows(&self) -> Vec<Window> {
         let mut stack = self.windows.stack.borrow_mut();
         let size = |buffer| self.buffer_sizes.get(&buffer).copied().unwrap_or((0, 0));
-        let mapped: Vec<(SurfaceId, (i32, i32))> = self
+        let mapped: Vec<(SurfaceId, (i32, i32), bool)> = self
             .surfaces
             .iter()
             .filter(|(_, s)| s.role == Role::Toplevel)
             .filter_map(|(&id, s)| {
                 let (w, h) = size(s.current.buffer?);
-                Some((id, (w as i32, h as i32)))
+                let minimized = s.xdg.as_ref().is_some_and(|x| x.minimized);
+                Some((id, (w as i32, h as i32), minimized))
             })
             .collect();
-        stack.retain_mut(|w| match mapped.iter().find(|(id, _)| *id == w.surface) {
-            Some(&(_, (width, height))) => {
+        stack.retain_mut(|w| match mapped.iter().find(|(id, ..)| *id == w.surface) {
+            Some(&(_, (width, height), minimized)) => {
                 w.frame.width = width;
                 w.frame.height = height;
+                w.minimized = minimized;
                 true
             }
             None => false,
         });
-        for &(id, (width, height)) in &mapped {
+        for &(id, (width, height), minimized) in &mapped {
             if stack.iter().any(|w| w.surface == id) {
                 continue;
             }
-            let frame = self.place(&stack, width, height);
-            stack.push(Window { surface: id, frame });
+            let parent = self
+                .parent_of(id)
+                .and_then(|p| stack.iter().find(|w| w.surface == p))
+                .map(|w| w.frame);
+            let frame = self.place(&stack, width, height, parent);
+            stack.push(Window {
+                surface: id,
+                frame,
+                minimized,
+            });
         }
         stack.clone()
+    }
+
+    fn parent_of(&self, surface: SurfaceId) -> Option<SurfaceId> {
+        self.surfaces.get(&surface)?.xdg.as_ref()?.parent
+    }
+
+    /// Raises the window of `surface`, and its children with it, keeping
+    /// their order, to the top of the stack (MIKSPEC-0074.R5).
+    pub fn raise(&self, surface: SurfaceId) {
+        self.windows();
+        let descends = |mut id: SurfaceId| {
+            while let Some(parent) = self.parent_of(id) {
+                if parent == surface {
+                    return true;
+                }
+                id = parent;
+            }
+            false
+        };
+        let mut stack = self.windows.stack.borrow_mut();
+        let (raised, kept): (Vec<Window>, Vec<Window>) = stack
+            .drain(..)
+            .partition(|w| w.surface == surface || descends(w.surface));
+        *stack = kept;
+        stack.extend(raised);
     }
 
     /// Puts the frame of the window of `surface` with its top-left corner
@@ -114,12 +152,22 @@ impl Server {
         }
     }
 
-    /// Where a new window of `width` by `height` goes among `windows`:
-    /// centred in the work area, clamped to its corner when it is larger,
+    /// Where a new window of `width` by `height` goes among `windows`: over
+    /// its `parent`, clamped to the work area, or else centred in the work area, clamped to its corner when it is larger,
     /// and moved right and down while it would lie on another window's
     /// corner and stay inside the work area (MIKSPEC-0074.R4).
-    fn place(&self, windows: &[Window], width: i32, height: i32) -> Rect {
+    fn place(&self, windows: &[Window], width: i32, height: i32, parent: Option<Rect>) -> Rect {
         let area = self.work_area();
+        if let Some(parent) = parent {
+            let x = (parent.x + (parent.width - width) / 2).min(area.x + area.width - width);
+            let y = (parent.y + (parent.height - height) / 2).min(area.y + area.height - height);
+            return Rect {
+                x: x.max(area.x),
+                y: y.max(area.y),
+                width,
+                height,
+            };
+        }
         let mut x = (area.x + (area.width - width) / 2).max(area.x);
         let mut y = (area.y + (area.height - height) / 2).max(area.y);
         let near = |x: i32, y: i32| {
@@ -147,6 +195,7 @@ impl Server {
 mod tests {
     use super::super::panel::PanelState;
     use super::super::surface::SurfaceState;
+    use super::super::xdg::XdgState;
     use super::super::{BufferId, Surface};
     use super::*;
 
@@ -297,6 +346,65 @@ mod tests {
                 .map(|w| w.surface)
                 .collect::<Vec<_>>(),
             [2, 1]
+        );
+    }
+
+    fn child(server: &mut Server, id: SurfaceId, parent: SurfaceId) {
+        server.surfaces.get_mut(&id).expect("made").xdg =
+            Some(XdgState::windowed(Some(parent), false));
+    }
+
+    fn order(server: &Server) -> Vec<SurfaceId> {
+        server.windows().iter().map(|w| w.surface).collect()
+    }
+
+    #[test]
+    fn raising_a_window_raises_its_children_and_keeps_them_above_it() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        toplevel(&mut server, 2, 11, (200, 100));
+        toplevel(&mut server, 3, 12, (300, 200));
+        child(&mut server, 2, 1);
+        assert_eq!(order(&server), [1, 2, 3]);
+        server.raise(1);
+        assert_eq!(order(&server), [3, 1, 2]);
+        server.raise(3);
+        assert_eq!(order(&server), [1, 2, 3]);
+        server.raise(2);
+        assert_eq!(order(&server), [1, 3, 2]);
+    }
+
+    #[test]
+    fn a_child_is_centred_over_its_parent_within_the_work_area() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        server.move_window(1, 0, 0);
+        toplevel(&mut server, 2, 11, (200, 100));
+        child(&mut server, 2, 1);
+        toplevel(&mut server, 3, 12, (300, 400));
+        child(&mut server, 3, 1);
+        let frames: Vec<_> = server.windows().iter().map(|w| w.frame).collect();
+        assert_eq!((frames[1].x, frames[1].y), (100, 100));
+        assert_eq!((frames[2].x, frames[2].y), (50, 0));
+    }
+
+    #[test]
+    fn minimized_windows_stay_windows_but_are_not_shown() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        toplevel(&mut server, 2, 11, (200, 100));
+        server.surfaces.get_mut(&2).expect("made").xdg = Some(XdgState::windowed(None, true));
+        let windows = server.windows();
+        assert_eq!(
+            windows.iter().map(|w| w.minimized).collect::<Vec<_>>(),
+            [false, true]
+        );
+        assert_eq!(
+            server.shown().iter().map(|s| s.surface).collect::<Vec<_>>(),
+            [1]
         );
     }
 }

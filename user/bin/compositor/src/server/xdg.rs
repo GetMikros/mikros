@@ -31,6 +31,23 @@ pub struct XdgState {
     pub min_size: (i32, i32),
     pub max_size: (i32, i32),
     pub geometry: Option<super::Rect>,
+    /// The surface of the toplevel that this one is a child of, and
+    /// whether the toplevel is minimized.
+    pub parent: Option<SurfaceId>,
+    pub minimized: bool,
+}
+
+#[cfg(test)]
+impl XdgState {
+    /// The state of a toplevel that has `parent` and may be minimized, for
+    /// the tests of the window layer.
+    pub(super) fn windowed(parent: Option<SurfaceId>, minimized: bool) -> XdgState {
+        XdgState {
+            parent,
+            minimized,
+            ..XdgState::default()
+        }
+    }
 }
 
 impl Server {
@@ -213,6 +230,33 @@ impl Server {
         let error = |message: &str| {
             ProtocolError::new(request.object, xdg_toplevel::error::INVALID_SIZE, message)
         };
+        if let xdg_toplevel::Request::SetParent { parent } = decoded {
+            let parent = match parent {
+                None => None,
+                Some(object) => {
+                    match self
+                        .client_mut(request)
+                        .objects
+                        .get(&object)
+                        .map(|o| o.resource)
+                    {
+                        Some(Resource::Toplevel(surface)) => Some(surface),
+                        _ => return Err(error("a parent that is not a toplevel")),
+                    }
+                }
+            };
+            // A parent that has this toplevel among its ancestors would
+            // make a ring.
+            let mut ancestor = parent;
+            while let Some(a) = ancestor {
+                if a == id {
+                    return Err(error("a parent that is a descendant"));
+                }
+                ancestor = self.surfaces.get(&a).and_then(|s| s.xdg.as_ref()?.parent);
+            }
+            self.xdg_mut(id)?.parent = parent;
+            return Ok(());
+        }
         let xdg = self.xdg_mut(id)?;
         let mut changed = false;
         match decoded {
@@ -239,13 +283,13 @@ impl Server {
             xdg_toplevel::Request::UnsetMaximized => (xdg.maximized, changed) = (false, true),
             xdg_toplevel::Request::SetFullscreen { .. } => (xdg.fullscreen, changed) = (true, true),
             xdg_toplevel::Request::UnsetFullscreen => (xdg.fullscreen, changed) = (false, true),
-            // Parents, menus, moves, resizes and minimizing come with
-            // window management.
-            xdg_toplevel::Request::SetParent { .. }
-            | xdg_toplevel::Request::ShowWindowMenu { .. }
+            xdg_toplevel::Request::SetMinimized => xdg.minimized = true,
+            xdg_toplevel::Request::SetParent { .. } => unreachable!("handled before"),
+            // Menus, moves and resizes come with the rest of window
+            // management.
+            xdg_toplevel::Request::ShowWindowMenu { .. }
             | xdg_toplevel::Request::Move { .. }
-            | xdg_toplevel::Request::Resize { .. }
-            | xdg_toplevel::Request::SetMinimized => {}
+            | xdg_toplevel::Request::Resize { .. } => {}
         }
         if changed && xdg.initialized {
             self.configure(request.client, id);
