@@ -278,6 +278,9 @@ impl Server {
             false => wl_keyboard::key_state::RELEASED,
         };
         let serial = self.next_serial();
+        if pressed {
+            self.record_press(focus.client, serial);
+        }
         let m = modifiers;
         for (keyboard, _) in self.keyboards_of(focus.client) {
             let Some(c) = self.clients.get_mut(&focus.client) else {

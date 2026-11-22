@@ -261,9 +261,9 @@ impl Compositor {
                     renderer: &self.renderer,
                     store: &mut store,
                 };
-                self.server
-                    .borrow_mut()
-                    .dispatch(&mut importer, client, &bytes, fds);
+                let mut server = self.server.borrow_mut();
+                server.set_clock(mikros_rt::objects::now().max(0) as u64 / 1_000_000);
+                server.dispatch(&mut importer, client, &bytes, fds);
             }
             self.flush(client);
             self.changed.notify();
@@ -838,6 +838,12 @@ pub fn main() {
     let directory = DirectoryAsyncClient::new(directory, reactor.clone());
     let mut server = Server::new();
     server.buffer_formats = imports::FORMATS.to_vec();
+    // The values of activation tokens, which clients must not guess.
+    let mut seed = [0u8; 8];
+    if mikros_rt::objects::random(&mut seed).is_err() {
+        mikros_rt::log!(Error, "compositor: no random bytes for activation tokens");
+    }
+    server.seed_tokens(u64::from_ne_bytes(seed));
     let compositor = Rc::new_cyclic(|me| Compositor {
         me: me.clone(),
         flushing: RefCell::default(),

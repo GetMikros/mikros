@@ -346,6 +346,9 @@ impl Server {
             self.focus_keyboard(Some(focus.surface));
         }
         let serial = self.next_serial();
+        if pressed {
+            self.record_press(focus.client, serial);
+        }
         let state = match pressed {
             true => wl_pointer::button_state::PRESSED,
             false => wl_pointer::button_state::RELEASED,
