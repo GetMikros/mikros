@@ -1906,6 +1906,33 @@ pub fn thread_set_affinity(thread: Checked, mask: UserIn<u8>, len: u64) -> Resul
     crate::sched::set_affinity(&object::<Thread>(thread), &bytes[..used])
 }
 
+pub fn thread_get_affinity(thread: Checked, mask: UserOut<u8>, len: u64) -> Result<(), Error> {
+    if !mask.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    let (bytes, needed) = crate::sched::get_affinity(&object::<Thread>(thread));
+    if len < needed as u64 {
+        return Err(Error::BufferTooSmall);
+    }
+    // The bytes after the processors' are cleared, so the whole of `len`
+    // is written, in pieces.
+    let process = current_process()?;
+    let outputs = prepare(&process, &[mask.range(len)])?;
+    let mut work = Work::new(crate::sched::preempt_point);
+    let mut written = 0u64;
+    while written < len {
+        let piece = (len - written).min(bytes.len() as u64) as usize;
+        let mut chunk = [0u8; kernel_core::smp::MAX_CPUS / 8];
+        if written == 0 {
+            chunk[..needed].copy_from_slice(&bytes[..needed]);
+        }
+        outputs.write(0, written, &chunk[..piece], &mut work);
+        written += piece as u64;
+    }
+    outputs.release(&mut work);
+    Ok(())
+}
+
 pub fn port_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {
     if options != 0 || !out.fits(1) {
         return Err(Error::InvalidArgs);

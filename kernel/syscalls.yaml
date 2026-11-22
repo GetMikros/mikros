@@ -1200,3 +1200,13 @@ syscalls:
       - {name: attributes, type: u32, dir: in}
       - {name: data, type: "*const u8", dir: in}
       - {name: size, type: u64, dir: in}
+
+  - name: thread_get_affinity
+    number: 116
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0018.R15]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [INSPECT]}
+      - {name: mask, type: "*mut u8", dir: out}
+      - {name: len, type: u64, dir: in}

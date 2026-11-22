@@ -736,6 +736,22 @@ pub fn set_affinity(thread: &Arc<Thread>, mask: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
+/// The processors that `thread` may run on, as the mask that
+/// `set_affinity` takes: bit `n` of byte `n / 8` for processor `n`, with the
+/// bits of the processors that the kernel does not use cleared, and the
+/// number of bytes that the processors that the kernel uses need.
+pub fn get_affinity(thread: &Arc<Thread>) -> ([u8; crate::smp::MAX_CPUS / 8], usize) {
+    let mut mask = [0u8; crate::smp::MAX_CPUS / 8];
+    let count = crate::cpu::count();
+    for cpu in 0..count {
+        let word = thread.affinity[cpu / 64].load(Ordering::Acquire);
+        if word >> (cpu % 64) & 1 != 0 {
+            mask[cpu / 8] |= 1 << (cpu % 8);
+        }
+    }
+    (mask, count.div_ceil(8))
+}
+
 /// Interrupts the processor that runs `thread`, when that is another
 /// one, so that it notices a change for the thread at once instead of at
 /// its next interrupt.

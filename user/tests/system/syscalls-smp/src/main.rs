@@ -21,6 +21,7 @@ fn main(m: &Managed) -> i64 {
         m,
         &[
             ("cpu_count_and_affinity", cpu_count_and_affinity),
+            ("affinity_is_read_back", affinity_is_read_back),
             (
                 "signal_reaches_other_processor",
                 signal_reaches_other_processor,
@@ -63,6 +64,80 @@ fn cpu_count_and_affinity(s: &Own) -> Result {
     check("restricting to processor 0", set(&[1]))?;
     sleep_ms(1);
     check("allowing every processor", set(&[0xFF; 32]))
+}
+
+/// The affinity that was set is read back, all processors for a thread
+/// that never had it set, with the bits past the processors cleared and
+/// every byte beyond them zero, a buffer too small for the processors is
+/// refused without a write, and a handle without the right is refused.
+fn affinity_is_read_back(s: &Own) -> Result {
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    let needed = (count as usize).div_ceil(8);
+    let all = |mask: &mut [u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_get_affinity(s.thread, mask.as_mut_ptr(), mask.len() as u64) }
+    };
+    let set = |mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(s.thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    // A thread that was never restricted is allowed on every processor
+    // that the kernel uses, and no bit beyond them.
+    let mut mask = [0xAAu8; 64];
+    check("reading the default", all(&mut mask))?;
+    let expected = |bits: &dyn Fn(usize) -> bool| {
+        let mut out = [0u8; 64];
+        for cpu in 0..count as usize {
+            if bits(cpu) {
+                out[cpu / 8] |= 1 << (cpu % 8);
+            }
+        }
+        out
+    };
+    ensure("every processor by default", mask == expected(&|_| true))?;
+    // Processor 0 alone, and the same read into a buffer of the least size.
+    check("restricting to processor 0", set(&[1]))?;
+    let mut mask = [0xAAu8; 64];
+    check("reading processor 0", all(&mut mask))?;
+    ensure("processor 0 alone", mask == expected(&|cpu| cpu == 0))?;
+    let mut least = [0xAAu8; 32];
+    check("reading into the least buffer", all(&mut least[..needed]))?;
+    ensure(
+        "the least buffer holds it",
+        least[..needed] == mask[..needed],
+    )?;
+    ensure(
+        "nothing past it",
+        least[needed..].iter().all(|&b| b == 0xAA),
+    )?;
+    // A buffer smaller than the processors need is refused, untouched.
+    if needed > 1 {
+        let mut small = [0xAAu8; 32];
+        let status = all(&mut small[..needed - 1]);
+        ensure("a buffer that is too small", status == -15)?;
+        ensure("nothing written", small.iter().all(|&b| b == 0xAA))?;
+    }
+    // A mask with bits beyond the processors reads back without them.
+    check("allowing every processor", set(&[0xFF; 32]))?;
+    let mut mask = [0xAAu8; 64];
+    check("reading every processor", all(&mut mask))?;
+    ensure("no bit beyond the processors", mask == expected(&|_| true))?;
+    // A handle without the right to inspect is refused.
+    let mut weak = 0;
+    // SAFETY: the pointer describes `weak`.
+    check("narrowing the handle", unsafe {
+        sys::handle_duplicate(s.thread, right::MANAGE, &mut weak)
+    })?;
+    let mut mask = [0u8; 8];
+    // SAFETY: the pointer and length describe `mask`.
+    let status = unsafe { sys::thread_get_affinity(weak, mask.as_mut_ptr(), 8) };
+    // SAFETY: the call takes a handle that this test owns.
+    unsafe { sys::handle_close(weak) };
+    ensure("refusing a handle without the right", status != 0)
 }
 
 /// A thread that often blocked after running briefly still runs soon
