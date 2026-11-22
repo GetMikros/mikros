@@ -61,6 +61,10 @@ const CLIENT_COMMAND: &str = "slash s y s t e m slash a p p s slash s y s t e m 
 /// focus, and the click on the taskbar activated it.
 const LIST_FOCUSED: &str = "greeter-probe: the window of system.mikros.shell_probe has the focus";
 const LIST_ACTIVATED: &str = "greeter-probe: activated the window of system.mikros.shell_probe";
+/// The pointer goes from the taskbar into the middle of the window, and
+/// then, while Super is held, drags the window to the right by this much.
+const MOVE_INTO_WINDOW: &str = "mouse_move -100 -377";
+const DRAG: i32 = 100;
 const SHELL_RESTARTED: &str =
     "compositor: starting the part start-menu of system.mikros.shell_probe again";
 const SHELL_GAVE_UP: &str = "compositor: the part start-menu of system.mikros.shell_probe stopped more than 5 times within a minute; leaving its roles empty";
@@ -188,6 +192,40 @@ fn window_pixels(
     Some(shown as f64 / wanted.len() as f64)
 }
 
+/// The smallest rectangle, as its left, top, right and bottom pixels, that
+/// holds every pixel of `ppm` that shows `colour`, or None when none does
+/// or it is not a PPM image.
+fn colour_bounds(ppm: &[u8], colour: [u8; 3]) -> Option<(usize, usize, usize, usize)> {
+    let head = &ppm[..ppm.len().min(32)];
+    let text = String::from_utf8_lossy(head);
+    let width: usize = text.split_ascii_whitespace().nth(1)?.parse().ok()?;
+    let all = scenario::ppm_pixels(ppm)?;
+    let near = |p: &[u8; 3]| {
+        p.iter()
+            .zip(colour)
+            .all(|(&a, b)| a.abs_diff(b) <= TOLERANCE)
+    };
+    let mut bounds: Option<(usize, usize, usize, usize)> = None;
+    for (i, _) in all.iter().enumerate().filter(|(_, p)| near(p)) {
+        let (x, y) = (i % width, i / width);
+        bounds = Some(match bounds {
+            None => (x, y, x, y),
+            Some((l, t, r, b)) => (l.min(x), t.min(y), r.max(x), b.max(y)),
+        });
+    }
+    bounds
+}
+
+/// The width of the screen dump `ppm`.
+fn screen_width_of(ppm: &[u8]) -> Option<usize> {
+    let head = &ppm[..ppm.len().min(32)];
+    String::from_utf8_lossy(head)
+        .split_ascii_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
 /// The pixel at `(x, y)` of the screen dump `ppm`.
 fn pixel(ppm: &[u8], (x, y): (usize, usize)) -> Option<[u8; 3]> {
     let head = &ppm[..ppm.len().min(32)];
@@ -268,6 +306,34 @@ impl Screen<'_> {
             }
             if Instant::now() > self.deadline {
                 bail!("timed out before {what}, with {shown:?} at {at:?}");
+            }
+            std::thread::sleep(DUMP_EVERY);
+        }
+    }
+
+    /// Dumps the screen until the pixels of `colour` fill a rectangle of
+    /// `size` whose left edge is within `slack` of `left`, and returns it.
+    fn until_colour_at(
+        &mut self,
+        qemu: &mut std::process::Child,
+        colour: [u8; 3],
+        size: (usize, usize),
+        left: usize,
+        what: &str,
+    ) -> Result<(usize, usize)> {
+        loop {
+            let ppm = scenario::screen_dump(self.socket, self.dump)?;
+            if let Some((l, t, r, b)) = colour_bounds(&ppm, colour)
+                && (r - l + 1, b - t + 1) == size
+                && l.abs_diff(left) <= 2
+            {
+                return Ok((l, t));
+            }
+            if qemu.try_wait()?.is_some() {
+                bail!("QEMU exited before {what}");
+            }
+            if Instant::now() > self.deadline {
+                bail!("timed out before {what}");
             }
             std::thread::sleep(DUMP_EVERY);
         }
@@ -394,6 +460,17 @@ pub fn run_with(
         scenario::monitor(&socket, "mouse_button 1")?;
         scenario::monitor(&socket, "mouse_button 0")?;
         scenario::wait_for_line(&log, LIST_ACTIVATED, &mut qemu, deadline)?;
+        // Super and the primary button drag the window, which moves by what
+        // the pointer moved.
+        scenario::monitor(&socket, MOVE_INTO_WINDOW)?;
+        let left = (screen_width_of(&fs::read(&dump)?).unwrap_or(1280) - size.0) / 2;
+        scenario::monitor(&socket, "sendkey meta_l 8000")?;
+        std::thread::sleep(Duration::from_secs(1));
+        scenario::monitor(&socket, "mouse_button 1")?;
+        scenario::monitor(&socket, &format!("mouse_move {DRAG} 0"))?;
+        scenario::monitor(&socket, "mouse_button 0")?;
+        let what = "the window was dragged with Super";
+        screen.until_colour_at(&mut qemu, colour, size, left + DRAG as usize, what)?;
         scenario::wait_for_line(&log, CANCELLED, &mut qemu, deadline)?;
         let serial = scenario::wait_for_line(&log, SHELL_EXITED, &mut qemu, deadline)?;
         let exited = serial
@@ -455,6 +532,18 @@ mod tests {
         assert_eq!(colour_share(&screen, COLOUR, 0.5), Some(0.5));
         assert_eq!(pixel(&screen, (2, 0)), Some([40, 90, 160]));
         assert_eq!(pixel(&screen, (4, 0)), None);
+    }
+
+    #[test]
+    fn finds_the_rectangle_of_a_colour() {
+        let (c, w) = (SDL.colour, WALLPAPER);
+        let rows = [[w, w, w, w], [w, c, c, w], [w, c, c, w], [w, w, w, w]];
+        let mut screen = b"P6\n4 4\n255\n".to_vec();
+        screen.extend(rows.iter().flatten().flatten());
+        assert_eq!(colour_bounds(&screen, c), Some((1, 1, 2, 2)));
+        assert_eq!(colour_bounds(&screen, [1, 2, 3]), None);
+        assert_eq!(colour_bounds(b"not a picture", c), None);
+        assert_eq!(screen_width_of(&screen), Some(4));
     }
 
     #[test]
