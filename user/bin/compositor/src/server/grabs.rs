@@ -15,6 +15,18 @@ pub(super) const BTN_LEFT: u32 = 0x110;
 /// How much of a window's top edge stays inside the work area.
 const KEPT: i32 = 32;
 
+/// The edges of a window that a resize moves, as xdg_toplevel's resize
+/// edges name them.
+pub(super) const TOP: u32 = 1;
+pub(super) const BOTTOM: u32 = 2;
+pub(super) const LEFT: u32 = 4;
+pub(super) const RIGHT: u32 = 8;
+
+/// How far outside the edges of a frame, and how far along each edge from
+/// a corner, a resize starts (MIKSPEC-0074.R9).
+const BAND: i32 = 8;
+const CORNER: i32 = 16;
+
 /// A window that the pointer moves, where the pointer holds it, and the
 /// button whose release ends the move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +122,119 @@ fn keep_in(frame: Rect, to: (i32, i32), area: Rect) -> (i32, i32) {
     (x as i32, y as i32)
 }
 
+/// The frame that a resize of `start` by `edges` gives when the pointer
+/// moved by `(dx, dy)`, the size within `min` and `max` (0 for none) and
+/// at least one pixel (MIKSPEC-0074.R9).
+pub(super) fn resize_frame(
+    start: Rect,
+    edges: u32,
+    (dx, dy): (i32, i32),
+    min: (i32, i32),
+    max: (i32, i32),
+) -> Rect {
+    let width = if edges & RIGHT != 0 {
+        i64::from(start.width) + i64::from(dx)
+    } else if edges & LEFT != 0 {
+        i64::from(start.width) - i64::from(dx)
+    } else {
+        i64::from(start.width)
+    };
+    let height = if edges & BOTTOM != 0 {
+        i64::from(start.height) + i64::from(dy)
+    } else if edges & TOP != 0 {
+        i64::from(start.height) - i64::from(dy)
+    } else {
+        i64::from(start.height)
+    };
+    let fit = |size: i64, min: i32, max: i32| {
+        let upper = if max > 0 {
+            i64::from(max)
+        } else {
+            i64::from(i32::MAX)
+        };
+        let lower = i64::from(min.max(1)).min(upper);
+        size.clamp(lower, upper) as i32
+    };
+    let (width, height) = (fit(width, min.0, max.0), fit(height, min.1, max.1));
+    // The edge that does not move stays where it was.
+    let x = if edges & LEFT != 0 && edges & RIGHT == 0 {
+        i64::from(start.x) + i64::from(start.width) - i64::from(width)
+    } else {
+        i64::from(start.x)
+    };
+    let y = if edges & TOP != 0 && edges & BOTTOM == 0 {
+        i64::from(start.y) + i64::from(start.height) - i64::from(height)
+    } else {
+        i64::from(start.y)
+    };
+    Rect {
+        x: x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        y: y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        width,
+        height,
+    }
+}
+
+/// The edges that the corner of `frame` nearest to `point` names, for a
+/// resize with Super and the secondary button.
+pub(super) fn nearest_corner(frame: Rect, (x, y): (i32, i32)) -> u32 {
+    let horizontal = if i64::from(x) * 2 < 2 * i64::from(frame.x) + i64::from(frame.width) {
+        LEFT
+    } else {
+        RIGHT
+    };
+    let vertical = if i64::from(y) * 2 < 2 * i64::from(frame.y) + i64::from(frame.height) {
+        TOP
+    } else {
+        BOTTOM
+    };
+    horizontal | vertical
+}
+
+/// The edges that a press at `point` starts to resize, when it is in the
+/// band just outside `frame`: 8 pixels wide, and a corner within 16 pixels
+/// along an edge from the corner; None inside the frame or beyond the band.
+pub(super) fn band_edges(frame: Rect, (x, y): (i32, i32)) -> Option<u32> {
+    let (x, y) = (i64::from(x), i64::from(y));
+    let (left, top) = (i64::from(frame.x), i64::from(frame.y));
+    let (right, bottom) = (left + i64::from(frame.width), top + i64::from(frame.height));
+    let band = i64::from(BAND);
+    if x < left - band || x >= right + band || y < top - band || y >= bottom + band {
+        return None;
+    }
+    if x >= left && x < right && y >= top && y < bottom {
+        return None;
+    }
+    let mut edges = 0;
+    if x < left {
+        edges |= LEFT;
+    } else if x >= right {
+        edges |= RIGHT;
+    }
+    if y < top {
+        edges |= TOP;
+    } else if y >= bottom {
+        edges |= BOTTOM;
+    }
+    // Along an edge, within 16 pixels of a corner it is the corner's.
+    let corner = i64::from(CORNER);
+    if edges & (LEFT | RIGHT) != 0 && edges & (TOP | BOTTOM) == 0 {
+        if y < top + corner {
+            edges |= TOP;
+        } else if y >= bottom - corner {
+            edges |= BOTTOM;
+        }
+    }
+    if edges & (TOP | BOTTOM) != 0 && edges & (LEFT | RIGHT) == 0 {
+        if x < left + corner {
+            edges |= LEFT;
+        } else if x >= right - corner {
+            edges |= RIGHT;
+        }
+    }
+    Some(edges)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +246,69 @@ mod tests {
             width,
             height,
         }
+    }
+
+    #[test]
+    fn a_resize_moves_the_edges_it_names_within_the_sizes_of_the_client() {
+        let start = rect(100, 100, 400, 300);
+        let free = (0, 0);
+        // The right and bottom edges follow the pointer.
+        assert_eq!(
+            resize_frame(start, RIGHT | BOTTOM, (50, -20), free, free),
+            rect(100, 100, 450, 280)
+        );
+        // The left and top edges move the corner, the others stay.
+        assert_eq!(
+            resize_frame(start, LEFT | TOP, (30, 40), free, free),
+            rect(130, 140, 370, 260)
+        );
+        // A side only changes one size.
+        assert_eq!(
+            resize_frame(start, RIGHT, (50, 999), free, free),
+            rect(100, 100, 450, 300)
+        );
+        // The client's sizes bound it, and the fixed edge stays put.
+        assert_eq!(
+            resize_frame(start, LEFT, (-500, 0), free, (600, 0)),
+            rect(-100, 100, 600, 300)
+        );
+        assert_eq!(
+            resize_frame(start, LEFT, (390, 0), (100, 50), free),
+            rect(400, 100, 100, 300)
+        );
+        // Never below one pixel, even beyond the opposite edge.
+        assert_eq!(
+            resize_frame(start, RIGHT, (-5000, 0), free, free),
+            rect(100, 100, 1, 300)
+        );
+    }
+
+    #[test]
+    fn the_nearest_corner_is_chosen_by_the_halves_of_the_frame() {
+        let frame = rect(0, 0, 100, 60);
+        assert_eq!(nearest_corner(frame, (10, 10)), LEFT | TOP);
+        assert_eq!(nearest_corner(frame, (90, 10)), RIGHT | TOP);
+        assert_eq!(nearest_corner(frame, (10, 50)), LEFT | BOTTOM);
+        assert_eq!(nearest_corner(frame, (90, 50)), RIGHT | BOTTOM);
+    }
+
+    #[test]
+    fn a_resize_starts_in_the_band_around_the_frame() {
+        let frame = rect(100, 100, 200, 150);
+        assert_eq!(band_edges(frame, (95, 170)), Some(LEFT));
+        assert_eq!(band_edges(frame, (300, 170)), Some(RIGHT));
+        assert_eq!(band_edges(frame, (200, 92)), Some(TOP));
+        assert_eq!(band_edges(frame, (200, 250)), Some(BOTTOM));
+        // Within 16 pixels along an edge of a corner, it is the corner's.
+        assert_eq!(band_edges(frame, (95, 110)), Some(LEFT | TOP));
+        assert_eq!(band_edges(frame, (110, 95)), Some(LEFT | TOP));
+        assert_eq!(band_edges(frame, (305, 240)), Some(RIGHT | BOTTOM));
+        assert_eq!(band_edges(frame, (290, 255)), Some(RIGHT | BOTTOM));
+        assert_eq!(band_edges(frame, (95, 95)), Some(LEFT | TOP));
+        // Inside the frame, and beyond the band, it is not.
+        assert_eq!(band_edges(frame, (150, 150)), None);
+        assert_eq!(band_edges(frame, (91, 170)), None);
+        assert_eq!(band_edges(frame, (200, 258)), None);
     }
 
     #[test]

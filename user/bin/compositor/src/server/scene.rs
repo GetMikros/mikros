@@ -12,6 +12,10 @@ pub struct Shown {
     pub buffer: BufferId,
     pub x: i32,
     pub y: i32,
+    /// The size that it is drawn at, which is its buffer's unless a window
+    /// is stretched to its frame (MIKSPEC-0074.R15).
+    pub width: i32,
+    pub height: i32,
     pub haze: Vec<Rect>,
     pub blur: Vec<Rect>,
 }
@@ -20,13 +24,23 @@ impl Server {
     /// The windows, bottom first, then the configured panels.
     pub fn shown(&self) -> Vec<Shown> {
         let screen = self.screen.unwrap_or((0, 0));
-        let shown = |id, buffer, x, y, s: &super::Surface| Shown {
-            surface: id,
-            buffer,
-            x,
-            y,
-            haze: s.current.materials.haze.rects().to_vec(),
-            blur: s.current.materials.blur.rects().to_vec(),
+        let size = |buffer| {
+            self.buffer_sizes
+                .get(&buffer)
+                .map_or((0, 0), |&(w, h)| (w as i32, h as i32))
+        };
+        let shown = |id, buffer, x, y, dest: Option<(i32, i32)>, s: &super::Surface| {
+            let (width, height) = dest.unwrap_or_else(|| size(buffer));
+            Shown {
+                surface: id,
+                buffer,
+                x,
+                y,
+                width,
+                height,
+                haze: s.current.materials.haze.rects().to_vec(),
+                blur: s.current.materials.blur.rects().to_vec(),
+            }
         };
         let mut shown_windows = Vec::new();
         for window in self.windows().into_iter().filter(|w| !w.minimized) {
@@ -36,11 +50,13 @@ impl Server {
             let Some(buffer) = s.current.buffer else {
                 continue;
             };
+            let dest = Some((window.frame.width, window.frame.height));
             shown_windows.push(shown(
                 window.surface,
                 buffer,
                 window.frame.x,
                 window.frame.y,
+                dest,
                 s,
             ));
         }
@@ -51,7 +67,7 @@ impl Server {
             match (s.role, &s.panel) {
                 (Role::Panel, Some(panel)) if panel.configured => {
                     let place = panel.place(screen);
-                    shown_windows.push(shown(id, buffer, place.x, place.y, s));
+                    shown_windows.push(shown(id, buffer, place.x, place.y, None, s));
                 }
                 _ => {}
             }

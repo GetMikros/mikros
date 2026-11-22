@@ -54,6 +54,10 @@ struct Focus {
     client: ClientId,
     object: ObjectId,
     origin: (i32, i32),
+    /// The size that its buffer is drawn at, and the buffer's, which differ
+    /// for a window that is stretched (MIKSPEC-0074.R15).
+    drawn: (i32, i32),
+    buffer: (i32, i32),
 }
 
 /// The pointer: its position on the output, the surface that has it, the
@@ -69,6 +73,15 @@ pub struct Pointer {
     framed: Vec<ClientId>,
     /// The window that the pointer moves, if one is.
     pub(super) moving: Option<super::grabs::Move>,
+    /// The window that the pointer resizes, if one is.
+    pub(super) resizing: Option<super::resize::Resize>,
+}
+
+impl Pointer {
+    /// The surface of the window that the pointer resizes.
+    pub(super) fn resizing_surface(&self) -> Option<SurfaceId> {
+        self.resizing.map(|r| r.surface)
+    }
 }
 
 impl Server {
@@ -220,11 +233,17 @@ impl Server {
     /// its corner.
     fn surface_at(&self, x: i32, y: i32) -> Option<Focus> {
         self.shown().into_iter().rev().find_map(|shown| {
-            let (width, height) = *self.buffer_sizes.get(&shown.buffer)?;
+            let (buffer_width, buffer_height) = *self.buffer_sizes.get(&shown.buffer)?;
+            let buffer = (buffer_width as i32, buffer_height as i32);
             let (lx, ly) = (x - shown.x, y - shown.y);
-            if lx < 0 || ly < 0 || lx >= width as i32 || ly >= height as i32 {
+            if lx < 0 || ly < 0 || lx >= shown.width || ly >= shown.height {
                 return None;
             }
+            // Where it lies in the buffer, which a stretched window maps.
+            let (lx, ly) = (
+                (i64::from(lx) * i64::from(buffer.0) / i64::from(shown.width.max(1))) as i32,
+                (i64::from(ly) * i64::from(buffer.1) / i64::from(shown.height.max(1))) as i32,
+            );
             let s = self.surfaces.get(&shown.surface)?;
             if let Some(input) = &s.current.input
                 && !Area::of(input).contains(lx, ly)
@@ -236,6 +255,8 @@ impl Server {
                 client: s.client,
                 object: s.object,
                 origin: (shown.x, shown.y),
+                drawn: (shown.width, shown.height),
+                buffer,
             })
         })
     }
@@ -268,6 +289,11 @@ impl Server {
     fn local(&self, focus: Focus) -> (Fixed, Fixed) {
         let x = self.pointer.x - f64::from(focus.origin.0);
         let y = self.pointer.y - f64::from(focus.origin.1);
+        let scale = |size: i32, drawn: i32| f64::from(size) / f64::from(drawn.max(1));
+        let (x, y) = (
+            x * scale(focus.buffer.0, focus.drawn.0),
+            y * scale(focus.buffer.1, focus.drawn.1),
+        );
         (Fixed::from_f64(x), Fixed::from_f64(y))
     }
 
@@ -459,6 +485,7 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Rect;
     use super::super::tests::TestClient;
     use super::*;
     use crate::wayland::protocols::{wl_compositor, wl_registry};
@@ -580,6 +607,38 @@ mod tests {
             .iter()
             .filter(|e| e.1 == BUTTON)
             .count()
+    }
+
+    #[test]
+    fn a_stretched_window_is_hit_by_its_frame_and_tells_where_in_its_buffer() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        pointer_events(&mut server, &client);
+        // The 100 by 50 buffer is stretched to 200 by 100.
+        server.set_frame(
+            surface,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 100,
+            },
+        );
+        server.pointer_motion(150.0, 80.0, 1);
+        server.pointer_frame();
+        let events = pointer_events(&mut server, &client);
+        assert_eq!(
+            events[0].2[1..],
+            [
+                Arg::Object(Some(6)),
+                Arg::Fixed(Fixed(75 * 256)),
+                Arg::Fixed(Fixed(40 * 256))
+            ]
+        );
+        // Beyond the buffer, inside the frame, it is still the window.
+        assert!(server.surface_at(199, 99).is_some());
+        assert!(server.surface_at(200, 50).is_none());
     }
 
     #[test]

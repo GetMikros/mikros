@@ -58,17 +58,24 @@ impl Server {
         let mut damage = Vec::new();
         let mut now = std::collections::BTreeMap::new();
         for shown in self.shown() {
-            let Some(&(width, height)) = self.buffer_sizes.get(&shown.buffer) else {
+            let Some(&buffer) = self.buffer_sizes.get(&shown.buffer) else {
                 continue;
             };
             let rect = Rect {
                 x: shown.x,
                 y: shown.y,
-                width: width as i32,
-                height: height as i32,
+                width: shown.width,
+                height: shown.height,
             };
+            let stretched = (shown.width, shown.height) != (buffer.0 as i32, buffer.1 as i32);
             now.insert(shown.surface, rect);
             match self.drawn.get(&shown.surface) {
+                // A stretched buffer is drawn again whole when it changes.
+                Some(&old) if old == rect && stretched => {
+                    if self.committed.contains_key(&shown.surface) {
+                        damage.push(rect);
+                    }
+                }
                 Some(&old) if old == rect => {
                     let size = (rect.width, rect.height);
                     let committed = self.committed.get(&shown.surface).into_iter().flatten();

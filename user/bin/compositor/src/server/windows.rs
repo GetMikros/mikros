@@ -29,6 +29,10 @@ pub struct Window {
     /// Whether the window demands attention: it was mapped below the
     /// focused window, and has not had the keyboard focus since.
     pub attention: bool,
+    /// The size that a resize gave the frame, which the frame keeps while
+    /// the window's buffer is of another size, until a buffer of that size
+    /// comes (MIKSPEC-0074.R15). The buffer's size gives it otherwise.
+    pub target: Option<(i32, i32)>,
 }
 
 /// The windows, bottom first.
@@ -96,6 +100,13 @@ impl Server {
             .collect();
         stack.retain_mut(|w| match mapped.iter().find(|(id, ..)| *id == w.surface) {
             Some(&(_, (width, height), minimized)) => {
+                // A frame that a resize sized keeps its size until a buffer
+                // of that size is there and no resize goes on.
+                let resizing = self.pointer.resizing_surface() == Some(w.surface);
+                if w.target == Some((width, height)) && !resizing {
+                    w.target = None;
+                }
+                let (width, height) = w.target.unwrap_or((width, height));
                 w.frame.width = width;
                 w.frame.height = height;
                 w.minimized = minimized;
@@ -150,6 +161,7 @@ impl Server {
                 minimized,
                 restore: None,
                 attention: !focus,
+                target: None,
             };
             if focus {
                 stack.push(window);
@@ -226,6 +238,22 @@ impl Server {
         // Windows that now overlap in another order are drawn again.
         if stack.iter().map(|w| w.surface).ne(before) {
             self.restacked.extend(frames);
+        }
+    }
+
+    /// Gives the window of `surface` the frame `frame`, whose size it keeps
+    /// while its buffer is of another size.
+    pub(super) fn set_frame(&self, surface: SurfaceId, frame: Rect) {
+        self.windows();
+        if let Some(w) = self
+            .windows
+            .stack
+            .borrow_mut()
+            .iter_mut()
+            .find(|w| w.surface == surface)
+        {
+            w.frame = frame;
+            w.target = Some((frame.width, frame.height));
         }
     }
 
@@ -653,5 +681,44 @@ pub(super) mod tests {
         assert_eq!(attention(&server), [(2, true), (1, false)]);
         server.focus_keyboard(Some(2));
         assert_eq!(attention(&server), [(2, false), (1, false)]);
+    }
+
+    #[test]
+    fn a_frame_keeps_the_size_a_resize_gave_it_until_a_buffer_of_that_size_comes() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        server.set_frame(
+            1,
+            Rect {
+                x: 10,
+                y: 20,
+                width: 600,
+                height: 450,
+            },
+        );
+        let shown = server.shown();
+        assert_eq!(
+            (shown[0].x, shown[0].y, shown[0].width, shown[0].height),
+            (10, 20, 600, 450)
+        );
+        // The client draws another size that is not the frame's: still stretched.
+        server.buffer_sizes.insert(11, (500, 380));
+        server.surfaces.get_mut(&1).expect("made").current.buffer = Some(11);
+        assert_eq!(
+            (server.shown()[0].width, server.shown()[0].height),
+            (600, 450)
+        );
+        // A buffer of the frame's size: drawn as it is, and the frame follows
+        // the buffer from then on.
+        server.buffer_sizes.insert(12, (600, 450));
+        server.surfaces.get_mut(&1).expect("made").current.buffer = Some(12);
+        assert_eq!(server.windows()[0].target, None);
+        server.buffer_sizes.insert(13, (640, 480));
+        server.surfaces.get_mut(&1).expect("made").current.buffer = Some(13);
+        assert_eq!(
+            (server.shown()[0].width, server.shown()[0].height),
+            (640, 480)
+        );
     }
 }

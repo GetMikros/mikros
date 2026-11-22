@@ -15,6 +15,7 @@ mod grabs;
 mod keyboard;
 mod material;
 mod panel;
+mod resize;
 mod scene;
 mod seat;
 mod shell;
