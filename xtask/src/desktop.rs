@@ -47,6 +47,12 @@ const DESKTOP_ENDED: &str = "sessionmgr: the desktop of dee ended";
 /// it was refused.
 const CANCELLED: &str = "compositor: cancelled the question";
 const SHELL_EXITED: &str = "compositor: the part start-menu of system.mikros.shell_probe exited";
+/// What the compositor logs when it starts that part again, as it does
+/// each time the part exits, and when the part has exited too often
+/// within a minute, which the probe, that exits at once, does.
+const SHELL_RESTARTED: &str =
+    "compositor: starting the part start-menu of system.mikros.shell_probe again";
+const SHELL_GAVE_UP: &str = "compositor: the part start-menu of system.mikros.shell_probe stopped more than 5 times within a minute; leaving its roles empty";
 /// The probe's colour and the test colour of the shell probe's
 /// wallpaper, in the bytes of the display, and how far a pixel may be
 /// from them.
@@ -323,6 +329,8 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         if !exited.trim_end().ends_with(SHELL_EXITED) {
             bail!("the shell probe was not refused: {}", exited.trim_end());
         }
+        scenario::wait_for_line(&log, SHELL_RESTARTED, &mut qemu, deadline)?;
+        scenario::wait_for_line(&log, SHELL_GAVE_UP, &mut qemu, deadline)?;
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
         let what = "the console showed from dee's desktop";
         screen.until(&mut qemu, WALLPAPER, &gone, what)?;
