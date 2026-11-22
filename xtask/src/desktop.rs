@@ -133,7 +133,23 @@ fn colour_share(ppm: &[u8], colour: [u8; 3], part: f64) -> Option<f64> {
 /// middle of the screen dump `ppm`, where the compositor places the first
 /// window of a screen whose work area is all of it, that show `colour`,
 /// or None when it is not a PPM image or has no such rectangle.
-fn window_share(ppm: &[u8], colour: [u8; 3], (width, height): (usize, usize)) -> Option<f64> {
+fn window_share(ppm: &[u8], colour: [u8; 3], window: (usize, usize)) -> Option<f64> {
+    window_pixels(ppm, colour, window, false)
+}
+
+/// As `window_share`, for the pixels on the window's border, its first and
+/// last rows and columns, which the pointer's arrow does not reach, so that
+/// a window a pixel off the middle is not taken for it.
+fn window_border_share(ppm: &[u8], colour: [u8; 3], window: (usize, usize)) -> Option<f64> {
+    window_pixels(ppm, colour, window, true)
+}
+
+fn window_pixels(
+    ppm: &[u8],
+    colour: [u8; 3],
+    (width, height): (usize, usize),
+    border: bool,
+) -> Option<f64> {
     let head = &ppm[..ppm.len().min(32)];
     let text = String::from_utf8_lossy(head);
     let screen_width: usize = text.split_ascii_whitespace().nth(1)?.parse().ok()?;
@@ -151,11 +167,14 @@ fn window_share(ppm: &[u8], colour: [u8; 3], (width, height): (usize, usize)) ->
             .zip(colour)
             .all(|(&a, b)| a.abs_diff(b) <= TOLERANCE)
     };
-    let shown = (top..top + height)
-        .flat_map(|row| &all[row * screen_width + left..row * screen_width + left + width])
-        .filter(|p| near(p))
-        .count();
-    Some(shown as f64 / (width * height) as f64)
+    let on_border = |x: usize, y: usize| x == 0 || y == 0 || x == width - 1 || y == height - 1;
+    let wanted: Vec<&[u8; 3]> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| !border || on_border(x, y))
+        .map(|(x, y)| &all[(top + y) * screen_width + left + x])
+        .collect();
+    let shown = wanted.iter().filter(|p| near(p)).count();
+    Some(shown as f64 / wanted.len() as f64)
 }
 
 /// The pixel at `(x, y)` of the screen dump `ppm`.
@@ -260,10 +279,11 @@ impl Screen<'_> {
             let ppm = scenario::screen_dump(self.socket, self.dump)?;
             let share = window_share(&ppm, colour, window)
                 .context("the screen dump is not a PPM image with that window")?;
+            let border = window_border_share(&ppm, colour, window).unwrap_or(0.0);
             // The client clears all of its window, so a pixel of another
             // colour is a fault, except for the pointer's arrow, which
             // starts in the middle of the screen, over the window.
-            if share >= WINDOW_SHARE {
+            if share >= WINDOW_SHARE && border >= 1.0 {
                 return Ok(());
             }
             let serial = fs::read_to_string(log).unwrap_or_default();
@@ -428,6 +448,8 @@ mod tests {
         screen.extend(rows.iter().flatten().flatten());
         assert_eq!(window_share(&screen, SDL.colour, (2, 2)), Some(0.75));
         assert_eq!(window_share(&screen, WALLPAPER, (2, 2)), Some(0.25));
+        // Its border has three pixels of the right colour of four.
+        assert_eq!(window_border_share(&screen, SDL.colour, (2, 2)), Some(0.75));
         assert_eq!(window_share(&screen, SDL.colour, (7, 1)), None);
         assert_eq!(window_share(&screen, SDL.colour, (2, 5)), None);
         assert_eq!(window_share(&screen, SDL.colour, (0, 2)), None);

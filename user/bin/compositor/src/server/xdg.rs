@@ -375,6 +375,7 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    use super::super::panel::Edge;
     use super::super::surface::tests::with_surface;
     use super::super::tests::TestClient;
     use super::*;
@@ -447,9 +448,30 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_parent_ring_of_two_toplevels() {
+        let mut server = Server::new();
+        let client = with_toplevel(&mut server);
+        // A second toplevel, surface 8 with xdg_surface 9 and toplevel 10.
+        client.send(&mut server, 3, 0, vec![Arg::NewId(NewId(8))]);
+        client.send(
+            &mut server,
+            5,
+            2,
+            vec![Arg::NewId(NewId(9)), Arg::Object(Some(8))],
+        );
+        client.send(&mut server, 9, 1, vec![Arg::NewId(NewId(10))]);
+        client.send(&mut server, 10, 1, vec![Arg::Object(Some(7))]);
+        assert_eq!(client.error(&mut server), None);
+        client.send(&mut server, 7, 1, vec![Arg::Object(Some(10))]);
+        let invalid = xdg_toplevel::error::INVALID_PARENT;
+        assert_eq!(client.error(&mut server), Some(invalid));
+    }
+
+    #[test]
     fn configures_a_maximized_toplevel_with_the_work_area() {
         let mut server = Server::new();
         server.screen = Some((1280, 800));
+        super::super::windows::tests::panel(&mut server, 90, Edge::Bottom, 48, true);
         let client = with_toplevel(&mut server);
         client.send(&mut server, 7, 9, vec![]);
         events(&client, &mut server);
@@ -458,7 +480,7 @@ mod tests {
         let states: Vec<u8> = [4u32, 1].iter().flat_map(|s| s.to_ne_bytes()).collect();
         assert!(matches!(
             &sent[0].2[..],
-            [Arg::Int(1280), Arg::Int(800), Arg::Array(a)] if *a == states
+            [Arg::Int(1280), Arg::Int(752), Arg::Array(a)] if *a == states
         ));
     }
 

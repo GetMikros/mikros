@@ -23,6 +23,9 @@ pub struct Window {
     /// Whether the window is minimized: not drawn, and not a place for
     /// focus, but still a window.
     pub minimized: bool,
+    /// Where the window lay before it was maximized or made fullscreen,
+    /// which it goes back to.
+    restore: Option<(i32, i32)>,
 }
 
 /// The windows, bottom first.
@@ -53,15 +56,15 @@ impl Server {
             let zone = panel.place(screen);
             match panel.edge {
                 Edge::Top => {
-                    area.y += zone.height;
-                    area.height -= zone.height;
+                    area.y = area.y.saturating_add(zone.height.max(0));
+                    area.height = area.height.saturating_sub(zone.height.max(0));
                 }
-                Edge::Bottom => area.height -= zone.height,
+                Edge::Bottom => area.height = area.height.saturating_sub(zone.height.max(0)),
                 Edge::Left => {
-                    area.x += zone.width;
-                    area.width -= zone.width;
+                    area.x = area.x.saturating_add(zone.width.max(0));
+                    area.width = area.width.saturating_sub(zone.width.max(0));
                 }
-                Edge::Right => area.width -= zone.width,
+                Edge::Right => area.width = area.width.saturating_sub(zone.width.max(0)),
             }
         }
         area.width = area.width.max(0);
@@ -82,7 +85,8 @@ impl Server {
             .filter_map(|(&id, s)| {
                 let (w, h) = size(s.current.buffer?);
                 let minimized = s.xdg.as_ref().is_some_and(|x| x.minimized);
-                Some((id, (w as i32, h as i32), minimized))
+                let to_i32 = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+                Some((id, (to_i32(w), to_i32(h)), minimized))
             })
             .collect();
         stack.retain_mut(|w| match mapped.iter().find(|(id, ..)| *id == w.surface) {
@@ -93,10 +97,23 @@ impl Server {
                 // A fullscreen window lies at its output's corner and a
                 // maximized one at its work area's.
                 let state = self.surfaces.get(&w.surface).and_then(|s| s.xdg.as_ref());
-                if state.is_some_and(|x| x.fullscreen) {
-                    (w.frame.x, w.frame.y) = (0, 0);
+                let corner = if state.is_some_and(|x| x.fullscreen) {
+                    Some((0, 0))
                 } else if state.is_some_and(|x| x.maximized) {
-                    (w.frame.x, w.frame.y) = (area.x, area.y);
+                    Some((area.x, area.y))
+                } else {
+                    None
+                };
+                match corner {
+                    Some(corner) => {
+                        w.restore.get_or_insert((w.frame.x, w.frame.y));
+                        (w.frame.x, w.frame.y) = corner;
+                    }
+                    None => {
+                        if let Some((x, y)) = w.restore.take() {
+                            (w.frame.x, w.frame.y) = (x, y);
+                        }
+                    }
                 }
                 true
             }
@@ -115,6 +132,7 @@ impl Server {
                 surface: id,
                 frame,
                 minimized,
+                restore: None,
             });
         }
         stack.clone()
@@ -176,33 +194,41 @@ impl Server {
     /// corner and stay inside the work area (MIKSPEC-0074.R4).
     fn place(&self, windows: &[Window], width: i32, height: i32, parent: Option<Rect>) -> Rect {
         let area = self.work_area();
+        // In 64 bits, so that sizes of clients cannot overflow.
+        let (ax, ay, aw, ah) = (
+            i64::from(area.x),
+            i64::from(area.y),
+            i64::from(area.width),
+            i64::from(area.height),
+        );
+        let (w, h) = (i64::from(width), i64::from(height));
+        let to_i32 = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
         if let Some(parent) = parent {
-            let x = (parent.x + (parent.width - width) / 2).min(area.x + area.width - width);
-            let y = (parent.y + (parent.height - height) / 2).min(area.y + area.height - height);
+            let x = (i64::from(parent.x) + (i64::from(parent.width) - w) / 2).min(ax + aw - w);
+            let y = (i64::from(parent.y) + (i64::from(parent.height) - h) / 2).min(ay + ah - h);
             return Rect {
-                x: x.max(area.x),
-                y: y.max(area.y),
+                x: to_i32(x.max(ax)),
+                y: to_i32(y.max(ay)),
                 width,
                 height,
             };
         }
-        let mut x = (area.x + (area.width - width) / 2).max(area.x);
-        let mut y = (area.y + (area.height - height) / 2).max(area.y);
-        let near = |x: i32, y: i32| {
-            windows
-                .iter()
-                .any(|w| (w.frame.x - x).abs() < NEAR && (w.frame.y - y).abs() < NEAR)
+        let mut x = (ax + (aw - w) / 2).max(ax);
+        let mut y = (ay + (ah - h) / 2).max(ay);
+        let near = |x: i64, y: i64| {
+            windows.iter().any(|f| {
+                (i64::from(f.frame.x) - x).abs() < i64::from(NEAR)
+                    && (i64::from(f.frame.y) - y).abs() < i64::from(NEAR)
+            })
         };
-        while near(x, y)
-            && x + CASCADE + width <= area.x + area.width
-            && y + CASCADE + height <= area.y + area.height
-        {
-            x += CASCADE;
-            y += CASCADE;
+        let step = i64::from(CASCADE);
+        while near(x, y) && x + step + w <= ax + aw && y + step + h <= ay + ah {
+            x += step;
+            y += step;
         }
         Rect {
-            x,
-            y,
+            x: to_i32(x),
+            y: to_i32(y),
             width,
             height,
         }
@@ -210,14 +236,19 @@ impl Server {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::panel::PanelState;
     use super::super::surface::SurfaceState;
     use super::super::xdg::XdgState;
     use super::super::{BufferId, Surface};
     use super::*;
 
-    fn toplevel(server: &mut Server, id: SurfaceId, buffer: BufferId, size: (u32, u32)) {
+    pub(in super::super) fn toplevel(
+        server: &mut Server,
+        id: SurfaceId,
+        buffer: BufferId,
+        size: (u32, u32),
+    ) {
         server.buffer_sizes.insert(buffer, size);
         server.surfaces.insert(
             id,
@@ -242,7 +273,13 @@ mod tests {
         );
     }
 
-    fn panel(server: &mut Server, id: SurfaceId, edge: Edge, thickness: u32, exclusive: bool) {
+    pub(in super::super) fn panel(
+        server: &mut Server,
+        id: SurfaceId,
+        edge: Edge,
+        thickness: u32,
+        exclusive: bool,
+    ) {
         let mut state = PanelState::new(7, edge);
         state.thickness = thickness;
         state.exclusive = exclusive;
@@ -461,5 +498,30 @@ mod tests {
         server.buffer_sizes.insert(12, (1280, 800));
         server.surfaces.get_mut(&2).expect("made").current.buffer = Some(12);
         assert_eq!(frames(&server), [(0, 0)]);
+    }
+
+    #[test]
+    fn a_window_goes_back_where_it_was_when_it_is_no_longer_maximized() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        assert_eq!(frames(&server), [(440, 250)]);
+        let mut state = XdgState::windowed(None, false);
+        state.maximized = true;
+        server.surfaces.get_mut(&1).expect("made").xdg = Some(state);
+        assert_eq!(frames(&server), [(0, 0)]);
+        server.surfaces.get_mut(&1).expect("made").xdg = Some(XdgState::windowed(None, false));
+        assert_eq!(frames(&server), [(440, 250)]);
+    }
+
+    #[test]
+    fn huge_panels_and_buffers_do_not_overflow() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        panel(&mut server, 1, Edge::Top, u32::MAX, true);
+        toplevel(&mut server, 2, 10, (u32::MAX, u32::MAX));
+        let area = server.work_area();
+        assert!(area.width >= 0 && area.height >= 0);
+        assert_eq!(server.windows().len(), 1);
     }
 }
