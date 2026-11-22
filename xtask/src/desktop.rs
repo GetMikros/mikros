@@ -112,6 +112,9 @@ const HAND_PIXEL: (usize, usize) = (740, 784);
 /// which it must not do before its window showed, with its failed step's
 /// number after it if it failed.
 const SDL_EXITED: &str = "compositor: the part switcher of system.mikros.shell_probe exited";
+/// How long the run waits after a keyboard leave before it looks for the end
+/// of the part that got it.
+const KEYBOARD_LEAVE: Duration = Duration::from_secs(3);
 const TOLERANCE: u8 = 2;
 /// The share of the screen that the colour must cover, and the share
 /// that it may still cover on a text console's screen.
@@ -518,6 +521,20 @@ pub fn run_with(
         screen.until_colour_at(&mut qemu, colour, size, 0, what)?;
         scenario::monitor(&socket, "sendkey meta_l-down")?;
         let what = "the window was restored with Super and Down";
+        screen.until_colour_at(&mut qemu, colour, size, left + DRAG as usize, what)?;
+        // Alt and Tab take the keyboard from the window, which is a keyboard
+        // leave for its client, and give it back. A part that ends with it
+        // is started again, so its end is in the log, not on the screen.
+        scenario::monitor(&socket, "sendkey alt-tab 2000")?;
+        std::thread::sleep(KEYBOARD_LEAVE);
+        let serial = fs::read_to_string(&log).unwrap_or_default();
+        if let Some(line) = serial.lines().find(|l| l.contains(SDL_EXITED)) {
+            bail!(
+                "the window's part ended at a keyboard leave: {}",
+                line.trim_end()
+            );
+        }
+        let what = "the window showed after Alt and Tab";
         screen.until_colour_at(&mut qemu, colour, size, left + DRAG as usize, what)?;
         // An ordinary client's window, from the text session.
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
