@@ -160,9 +160,19 @@ pub struct Layer<'a> {
     pub pixels: Pixels,
     pub x: i32,
     pub y: i32,
+    /// The size that the pixels are drawn at, which is theirs unless a
+    /// window is stretched to its frame (MIKSPEC-0074.R15).
+    pub size: (i32, i32),
     pub under: Under,
     pub haze: &'a [Rect],
     pub blur: &'a [Rect],
+}
+
+impl Layer<'_> {
+    /// Whether the pixels are drawn at a size other than their own.
+    fn stretched(&self) -> bool {
+        self.size != (self.pixels.width as i32, self.pixels.height as i32)
+    }
 }
 
 /// The output's haze while a frame is drawn: the new one, the old one,
@@ -216,6 +226,10 @@ pub struct Renderer {
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// The sampler that stretches a layer's pixels, and whether linear
+    /// images can be sampled with filtering.
+    sampler: vk::Sampler,
+    filter_linear: bool,
     /// The values of the last frame's layers and its areas' rectangles,
     /// kept to be filled again by the next one.
     frame: RefCell<Option<(HostBuffer, HostBuffer)>>,
@@ -320,6 +334,19 @@ impl Renderer {
             std::mem::transmute::<unsafe extern "system" fn(), GetMemoryHandle>(function)
         };
         let (set_layout, layout, pipeline) = super::pipeline::pipeline(&device)?;
+        let info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+        // SAFETY: the create info lives for the call.
+        let sampler = unsafe { device.create_sampler(&info, None)? };
+        // SAFETY: the physical device belongs to the instance.
+        let features = unsafe { instance.get_physical_device_format_properties(physical, FORMAT) };
+        let filter_linear = features
+            .linear_tiling_features
+            .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR);
         Ok(Renderer {
             _entry: entry,
             instance,
@@ -334,6 +361,8 @@ impl Renderer {
             set_layout,
             layout,
             pipeline,
+            sampler,
+            filter_linear,
             frame: RefCell::new(None),
         })
     }
@@ -480,6 +509,10 @@ impl Renderer {
         handle_type: vk::ExternalMemoryHandleTypeFlags,
         shape: &Shape,
     ) -> Option<(vk::Image, vk::MemoryRequirements)> {
+        // A window can be stretched, which filters its pixels.
+        if !self.filter_linear {
+            return None;
+        }
         let mut external = vk::ExternalMemoryImageCreateInfo::default().handle_types(handle_type);
         let info = vk::ImageCreateInfo::default()
             .push_next(&mut external)
@@ -832,6 +865,31 @@ impl Renderer {
                 continue;
             };
             let (x0, y0) = (layer.x, layer.y);
+            // Filtering reads texels beside the ones drawn, so a stretched
+            // layer's image is copied whole.
+            if layer.stretched() {
+                if !areas.iter().any(|a| overlaps(layer, a)) {
+                    continue;
+                }
+                let whole = vk::BufferImageCopy::default()
+                    .buffer_offset(u64::from(source.first))
+                    .buffer_row_length(source.row)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1),
+                    )
+                    .image_extent(vk::Extent3D {
+                        width: p.width,
+                        height: p.height,
+                        depth: 1,
+                    });
+                match copies.iter_mut().find(|(q, _)| q.image == p.image) {
+                    Some((_, all)) => all.push(whole),
+                    None => copies.push((p, vec![whole])),
+                }
+                continue;
+            }
             let regions: Vec<vk::BufferImageCopy> = areas
                 .iter()
                 .filter_map(|area| {
@@ -995,16 +1053,36 @@ impl Renderer {
         let mut values = Vec::with_capacity(layers.len());
         let mut rects: Vec<[i32; 4]> = Vec::new();
         for layer in layers {
+            // The areas are in the surface's coordinates, which a stretched
+            // layer scales with its pixels.
+            let (sx, sy) = (
+                f64::from(layer.size.0) / f64::from(layer.pixels.width.max(1)),
+                f64::from(layer.size.1) / f64::from(layer.pixels.height.max(1)),
+            );
             let mut area = |area: &[Rect]| {
                 let first = rects.len() as u32;
-                rects.extend(area.iter().map(|r| [r.x, r.y, r.width, r.height]));
+                rects.extend(area.iter().map(|r| {
+                    if layer.stretched() {
+                        let (x0, y0) = (
+                            (f64::from(r.x) * sx).floor() as i32,
+                            (f64::from(r.y) * sy).floor() as i32,
+                        );
+                        let (x1, y1) = (
+                            (f64::from(r.x.saturating_add(r.width)) * sx).ceil() as i32,
+                            (f64::from(r.y.saturating_add(r.height)) * sy).ceil() as i32,
+                        );
+                        [x0, y0, x1 - x0, y1 - y0]
+                    } else {
+                        [r.x, r.y, r.width, r.height]
+                    }
+                }));
                 (first, area.len() as u32)
             };
             let (haze_first, haze_count) = area(layer.haze);
             let (blur_first, blur_count) = area(layer.blur);
             let p = layer.pixels;
             values.push(LayerValues {
-                rect: [layer.x, layer.y, p.width as i32, p.height as i32],
+                rect: [layer.x, layer.y, layer.size.0, layer.size.1],
                 output: [target.width, target.height],
                 alpha: u32::from(p.alpha),
                 haze: match (layer.under, haze) {
@@ -1147,6 +1225,13 @@ impl Renderer {
                             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                             .image_info(&image),
                     ];
+                    let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
+                    writes.push(
+                        vk::WriteDescriptorSet::default()
+                            .dst_binding(5)
+                            .descriptor_type(vk::DescriptorType::SAMPLER)
+                            .image_info(&sampler),
+                    );
                     for (i, info) in shared.iter().enumerate() {
                         writes.push(
                             vk::WriteDescriptorSet::default()
@@ -1232,8 +1317,8 @@ fn overlaps(layer: &Layer, area: &vk::Rect2D) -> bool {
     );
     layer.x < x1
         && layer.y < y1
-        && layer.x.saturating_add(layer.pixels.width as i32) > x0
-        && layer.y.saturating_add(layer.pixels.height as i32) > y0
+        && layer.x.saturating_add(layer.size.0) > x0
+        && layer.y.saturating_add(layer.size.1) > y0
 }
 
 impl Drop for Renderer {
@@ -1245,6 +1330,7 @@ impl Drop for Renderer {
                 self.forget_host(l);
                 self.forget_host(r);
             }
+            self.device.destroy_sampler(self.sampler, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
             self.device

@@ -572,10 +572,12 @@ impl Compositor {
                     });
                 // The wallpaper below every surface (MIKSPEC-0075.R22).
                 let wallpaper = store.wallpaper.as_ref().and_then(|w| {
+                    let pixels = w.buffer.pixels()?;
                     Some(Layer {
-                        pixels: w.buffer.pixels()?,
+                        pixels,
                         x: 0,
                         y: 0,
+                        size: (pixels.width as i32, pixels.height as i32),
                         under: Under::Flat,
                         haze: &[],
                         blur: &[],
@@ -588,6 +590,7 @@ impl Compositor {
                         pixels: store.buffers.get(&s.buffer)?.pixels(),
                         x: s.x,
                         y: s.y,
+                        size: (s.width, s.height),
                         under: Under::Haze,
                         haze: &s.haze,
                         blur: &s.blur,
@@ -599,6 +602,7 @@ impl Compositor {
                         pixels,
                         x,
                         y,
+                        size: (pixels.width as i32, pixels.height as i32),
                         under: Under::Flat,
                         haze: &[],
                         blur: &[],

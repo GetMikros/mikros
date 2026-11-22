@@ -32,6 +32,7 @@ struct Layer {
 @group(0) @binding(2) var<storage, read> haze_old: array<u32>;
 @group(0) @binding(3) var<storage, read> areas: array<vec4<i32>>;
 @group(0) @binding(4) var<storage, read> layers: array<Layer>;
+@group(0) @binding(5) var stretch: sampler;
 
 struct Corner {
     @builtin(position) at: vec4<f32>,
@@ -73,7 +74,15 @@ fn fragment(corner: Corner) -> @location(0) vec4<f32> {
     // haze.
     let on_output = clamp(vec2<i32>(corner.at.xy), vec2<i32>(0), vec2<i32>(l.output) - 1);
     let at = clamp(on_output - l.rect.xy, vec2<i32>(0), l.rect.zw - 1);
-    var c = textureLoad(pixels, at, 0);
+    // The pixels as they are when the layer has their size; otherwise
+    // stretched to the layer, with bilinear filtering (MIKSPEC-0074.R15).
+    var c: vec4<f32>;
+    if all(l.rect.zw == vec2<i32>(textureDimensions(pixels))) {
+        c = textureLoad(pixels, at, 0);
+    } else {
+        let uv = (vec2<f32>(at) + 0.5) / vec2<f32>(l.rect.zw);
+        c = textureSampleLevel(pixels, stretch, uv, 0.0);
+    }
     if l.alpha == 0u {
         c.w = 1.0;
     }
