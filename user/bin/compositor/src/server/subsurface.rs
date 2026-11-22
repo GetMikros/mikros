@@ -14,7 +14,7 @@
 //! destroyed keeps its `wl_subsurface` object, which does nothing more.
 
 use super::surface::Staged;
-use super::{ClientId, Imports, ProtocolError, Request, Resource, Role, Server, SurfaceId};
+use super::{ClientId, Imports, ProtocolError, Rect, Request, Resource, Role, Server, SurfaceId};
 use crate::wayland::protocols::{wl_subcompositor, wl_subsurface, wl_surface};
 use crate::wayland::wire::{Arg, ObjectId};
 use std::collections::BTreeMap;
@@ -128,12 +128,15 @@ impl Subsurfaces {
     }
 
     /// Makes the requested stack and the requested positions of the
-    /// subsurfaces of `parent` the applied ones.
-    pub(super) fn apply_family(&mut self, parent: SurfaceId) {
+    /// subsurfaces of `parent` the applied ones, and says whether that
+    /// changed the stack.
+    pub(super) fn apply_family(&mut self, parent: SurfaceId) -> bool {
         let Some(family) = self.families.get_mut(&parent) else {
-            return;
+            return false;
         };
+        let mut reordered = false;
         if let Some(pending) = family.pending.take() {
+            reordered = pending != family.order;
             family.order = pending;
         }
         for child in &family.order {
@@ -141,14 +144,33 @@ impl Subsurfaces {
                 sub.position = sub.pending_position;
             }
         }
+        reordered
     }
 
     /// The applied stack of `parent`, bottom first, with its own id.
-    #[cfg(test)]
-    fn stack(&self, parent: SurfaceId) -> Vec<SurfaceId> {
+    pub(super) fn stack(&self, parent: SurfaceId) -> Vec<SurfaceId> {
         self.families
             .get(&parent)
             .map_or_else(|| vec![parent], |f| f.order.clone())
+    }
+
+    /// The position of the subsurface `surface` within its parent, as
+    /// applied.
+    pub(super) fn position(&self, surface: SurfaceId) -> (i32, i32) {
+        self.subs.get(&surface).map_or((0, 0), |s| s.position)
+    }
+
+    /// The surface at the top of the chain of parents above `surface`:
+    /// the surface itself when it has no parent.
+    pub(super) fn root_of(&self, surface: SurfaceId) -> SurfaceId {
+        let mut at = surface;
+        for _ in 0..=self.subs.len() {
+            match self.subs.get(&at).and_then(|s| s.parent) {
+                Some(parent) => at = parent,
+                None => break,
+            }
+        }
+        at
     }
 }
 
@@ -437,7 +459,9 @@ impl Server {
     pub(super) fn cascade(&mut self, client: ClientId, parent: SurfaceId) {
         let mut work = vec![parent];
         while let Some(at) = work.pop() {
-            self.subsurfaces.apply_family(at);
+            if self.subsurfaces.apply_family(at) {
+                self.damage_tree(at);
+            }
             let children = self.subsurfaces.children(at);
             for &child in &children {
                 let held = self
@@ -451,6 +475,24 @@ impl Server {
             }
             work.extend(children.into_iter().rev());
         }
+    }
+
+    /// Damages the area of the tree that `surface` belongs to as it is
+    /// drawn now, for a change of order, which no entry's place shows.
+    fn damage_tree(&mut self, surface: SurfaceId) {
+        let root = self.subsurfaces.root_of(surface);
+        let rects: Vec<Rect> = self
+            .shown()
+            .into_iter()
+            .filter(|s| self.subsurfaces.root_of(s.surface) == root)
+            .map(|s| Rect {
+                x: s.x,
+                y: s.y,
+                width: s.width,
+                height: s.height,
+            })
+            .collect();
+        self.restacked.extend(rects);
     }
 
     /// Applies what the subsurfaces below `surface`, and it, hold that
@@ -814,5 +856,92 @@ mod tests {
                 value: 9
             }]
         );
+    }
+    /// The surface 5 a toplevel with a buffer, and the surfaces 6 and 7
+    /// subsurfaces of it with theirs, at (10, 20) and (1, 2), and the
+    /// parent's commit.
+    fn tree(server: &mut Server, client: &TestClient) {
+        server.set_screen((1280, 800));
+        let id = surface(server, 5);
+        server.surfaces.get_mut(&id).unwrap().role = Role::Toplevel;
+        get(server, client, 10, 6, 5);
+        get(server, client, 11, 7, 5);
+        client.send(server, 10, 1, vec![Arg::Int(10), Arg::Int(20)]);
+        client.send(server, 11, 1, vec![Arg::Int(1), Arg::Int(2)]);
+        client.send(server, 11, 3, vec![Arg::Object(Some(5))]);
+        for (object, buffer) in [(7, 1), (6, 2), (5, 3)] {
+            attach(server, object, buffer, None);
+            commit(server, client, object);
+        }
+    }
+
+    #[test]
+    fn shows_a_tree_with_each_surface_between_the_subsurfaces_below_and_above_it() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        tree(&mut server, &client);
+        let shown = server.shown();
+        let objects: Vec<ObjectId> = shown
+            .iter()
+            .map(|s| server.surfaces[&s.surface].object)
+            .collect();
+        assert_eq!(objects, [7, 5, 6]);
+        let parent = surface(&server, 5);
+        assert!(shown.iter().all(|s| s.root == parent));
+        let at = |i: usize| (shown[i].x - shown[1].x, shown[i].y - shown[1].y);
+        assert_eq!((at(0), at(1), at(2)), ((1, 2), (0, 0), (10, 20)));
+        assert_eq!((shown[2].width, shown[2].height), (10, 10));
+    }
+
+    #[test]
+    fn a_subsurface_without_a_buffer_hides_its_own_subsurfaces() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        tree(&mut server, &client);
+        get(&mut server, &client, 12, 8, 6);
+        attach(&mut server, 8, 4, None);
+        commit(&mut server, &client, 8);
+        commit(&mut server, &client, 6);
+        commit(&mut server, &client, 5);
+        assert_eq!(server.shown().len(), 4);
+        // 6 loses its buffer: it and 8 are gone.
+        let id = surface(&server, 6);
+        server.surfaces.get_mut(&id).unwrap().pending.buffer = None;
+        server.surfaces.get_mut(&id).unwrap().attached = true;
+        commit(&mut server, &client, 6);
+        commit(&mut server, &client, 5);
+        assert_eq!(server.shown().len(), 2);
+    }
+
+    #[test]
+    fn the_pointer_is_in_the_topmost_surface_and_a_press_gives_the_window_the_keyboard() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        tree(&mut server, &client);
+        let shown = server.shown();
+        let (parent, child) = (surface(&server, 5), surface(&server, 6));
+        let corner = (shown[1].x, shown[1].y);
+        server.pointer_motion(f64::from(corner.0 + 12), f64::from(corner.1 + 22), 1);
+        assert_eq!(server.pointer_surface(), Some(child));
+        server.pointer_button(272, true, 2);
+        assert_eq!(server.keyboard_focus(), Some(parent));
+        // On the parent's own area, outside the child, it is the parent.
+        server.pointer_button(272, false, 3);
+        server.pointer_motion(f64::from(corner.0 + 5), f64::from(corner.1 + 5), 4);
+        assert_eq!(server.pointer_surface(), Some(parent));
+    }
+
+    #[test]
+    fn a_change_of_order_damages_the_tree() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        tree(&mut server, &client);
+        server.take_damage();
+        assert!(server.take_damage().is_empty());
+        // 6 goes below the parent, which changes no place.
+        client.send(&mut server, 10, 3, vec![Arg::Object(Some(5))]);
+        commit(&mut server, &client, 5);
+        assert_eq!(stack(&server, 5), [7, 6, 5]);
+        assert!(!server.take_damage().is_empty());
     }
 }

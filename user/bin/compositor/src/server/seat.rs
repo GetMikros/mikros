@@ -343,6 +343,12 @@ impl Server {
         self.pointer.pressed.last().copied()
     }
 
+    /// The surface that has the pointer.
+    #[cfg(test)]
+    pub(super) fn pointer_surface(&self) -> Option<SurfaceId> {
+        self.pointer.focus.map(|f| f.surface)
+    }
+
     /// Whether any surface has the pointer.
     pub(super) fn pointer_has_surface(&self) -> bool {
         self.pointer.focus.is_some()
@@ -350,13 +356,17 @@ impl Server {
 
     /// The toplevel that has the pointer, if one has it.
     pub(super) fn toplevel_under_pointer(&self) -> Option<SurfaceId> {
-        let focus = self.pointer.focus?;
-        (self.surfaces.get(&focus.surface)?.role == Role::Toplevel).then_some(focus.surface)
+        let root = self.subsurfaces.root_of(self.pointer.focus?.surface);
+        (self.surfaces.get(&root)?.role == Role::Toplevel).then_some(root)
     }
 
-    /// Whether the surface `surface` has the pointer.
+    /// Whether the window `surface` has the pointer, with a surface of its
+    /// own or one of its subsurfaces.
     pub(super) fn pointer_in(&self, surface: SurfaceId) -> bool {
-        self.pointer.focus.is_some_and(|f| f.surface == surface)
+        let root = |s| self.subsurfaces.root_of(s);
+        self.pointer
+            .focus
+            .is_some_and(|f| root(f.surface) == surface)
     }
 
     /// Takes the pointer from the surface that has it, with `leave`.
@@ -420,11 +430,13 @@ impl Server {
         let Some(focus) = self.pointer.focus else {
             return;
         };
-        // A press on a window gives it the keyboard.
-        let window = self.surfaces.get(&focus.surface).map(|s| s.role) == Some(Role::Toplevel);
+        // A press on a window, or on a subsurface of one, gives the window
+        // the keyboard.
+        let top = self.subsurfaces.root_of(focus.surface);
+        let window = self.surfaces.get(&top).map(|s| s.role) == Some(Role::Toplevel);
         if pressed && window {
-            self.raise(focus.surface);
-            self.focus_keyboard(Some(focus.surface));
+            self.raise(top);
+            self.focus_keyboard(Some(top));
             // Super and the primary button move the window, whose client
             // does not get the press.
             if button == super::grabs::BTN_LEFT
@@ -432,7 +444,7 @@ impl Server {
                 && self.pointer.moving.is_none()
                 && self.pointer.resizing.is_none()
             {
-                self.start_move(focus.surface, button);
+                self.start_move(top, button);
                 return;
             }
         }
