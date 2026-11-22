@@ -150,6 +150,13 @@ impl Server {
         }
     }
 
+    /// Forgets the window lists and the unfinished activation tokens of
+    /// `client`, which disconnected.
+    pub(super) fn forget_client_lists(&mut self, client: ClientId) {
+        self.toplevels.lists.retain(|(c, _), _| *c != client);
+        self.activation.forget_client(client);
+    }
+
     /// Asks the client of the window `surface` to close it, with
     /// `xdg_toplevel.close`, and does nothing else to it.
     fn close_window(&mut self, surface: SurfaceId) {
@@ -428,6 +435,17 @@ mod tests {
         server.update_toplevel_lists();
         let all = events(&mut server, &client);
         assert!(of_handles(&all).is_empty());
+    }
+
+    #[test]
+    fn forgets_the_lists_of_a_client_that_disconnected() {
+        let (mut server, client) = setup();
+        server.update_toplevel_lists();
+        assert!(!server.toplevels.lists.is_empty());
+        server.disconnect(&mut super::super::tests::FakeImports::default(), client.id);
+        assert!(server.toplevels.lists.is_empty());
+        // Nothing is left to be told, and nothing fails.
+        server.update_toplevel_lists();
     }
 
     #[test]

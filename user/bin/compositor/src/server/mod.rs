@@ -388,6 +388,7 @@ impl Server {
             s.client != client
         });
         self.regions.retain(|(c, _), _| *c != client);
+        self.forget_client_lists(client);
         self.collect(imports);
     }
 

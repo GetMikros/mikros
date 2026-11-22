@@ -60,6 +60,11 @@ pub struct Activation {
 }
 
 impl Activation {
+    /// Forgets the tokens that `client` was making.
+    pub(super) fn forget_client(&mut self, client: ClientId) {
+        self.making.retain(|(c, _), _| *c != client);
+    }
+
     /// A value for a token, from a generator that the program seeds.
     fn value(&mut self) -> String {
         // splitmix64
@@ -377,6 +382,16 @@ mod tests {
         let value = token(&mut server, &client, Some(42));
         activate(&mut server, &client, &value);
         assert_eq!(server.keyboard_focus(), Some(own));
+    }
+
+    #[test]
+    fn forgets_the_tokens_being_made_by_a_client_that_disconnected() {
+        let mut server = server();
+        let (client, _) = connect(&mut server, true);
+        new_token(&mut server, &client);
+        assert!(!server.activation.making.is_empty());
+        server.disconnect(&mut super::super::tests::FakeImports::default(), client.id);
+        assert!(server.activation.making.is_empty());
     }
 
     #[test]
