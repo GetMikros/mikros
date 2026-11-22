@@ -25,6 +25,9 @@ struct Layer {
     haze_count: u32,
     blur_first: u32,
     blur_count: u32,
+    // The part of the image that the layer shows, in texels: x, y, width
+    // and height; a width of 0 is all of it.
+    source: vec4<f32>,
 }
 
 @group(0) @binding(0) var pixels: texture_2d<f32>;
@@ -74,13 +77,22 @@ fn fragment(corner: Corner) -> @location(0) vec4<f32> {
     // haze.
     let on_output = clamp(vec2<i32>(corner.at.xy), vec2<i32>(0), vec2<i32>(l.output) - 1);
     let at = clamp(on_output - l.rect.xy, vec2<i32>(0), l.rect.zw - 1);
-    // The pixels as they are when the layer has their size; otherwise
-    // stretched to the layer, with bilinear filtering (MIKSPEC-0074.R15).
+    // The pixels as they are when the layer has their size and shows all
+    // of them; otherwise stretched to the layer, with bilinear filtering
+    // (MIKSPEC-0074.R15).
     var c: vec4<f32>;
-    if all(l.rect.zw == vec2<i32>(textureDimensions(pixels))) {
+    let dimensions = vec2<f32>(textureDimensions(pixels));
+    if l.source.z == 0.0 && all(l.rect.zw == vec2<i32>(textureDimensions(pixels))) {
         c = textureLoad(pixels, at, 0);
     } else {
-        let uv = (vec2<f32>(at) + 0.5) / vec2<f32>(l.rect.zw);
+        var uv = (vec2<f32>(at) + 0.5) / vec2<f32>(l.rect.zw);
+        if l.source.z > 0.0 {
+            // The part that the layer shows, whose edge texels filter with
+            // themselves, not with those beside the part.
+            let low = (l.source.xy + 0.5) / dimensions;
+            let high = (l.source.xy + l.source.zw - 0.5) / dimensions;
+            uv = min(max((l.source.xy + uv * l.source.zw) / dimensions, low), high);
+        }
         c = textureSampleLevel(pixels, stretch, uv, 0.0);
     }
     if l.alpha == 0u {

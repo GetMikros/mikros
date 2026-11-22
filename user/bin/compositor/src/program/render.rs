@@ -163,15 +163,21 @@ pub struct Layer<'a> {
     /// The size that the pixels are drawn at, which is theirs unless a
     /// window is stretched to its frame (MIKSPEC-0074.R15).
     pub size: (i32, i32),
+    /// The surface's own size, in which `haze` and `blur` lie, and the
+    /// part of the pixels that it shows when its viewport crops them, in
+    /// 24.8 fixed-point texels.
+    pub extent: (i32, i32),
+    pub source: Option<[i32; 4]>,
     pub under: Under,
     pub haze: &'a [Rect],
     pub blur: &'a [Rect],
 }
 
 impl Layer<'_> {
-    /// Whether the pixels are drawn at a size other than their own.
+    /// Whether the pixels are drawn at a size other than their own, or
+    /// cropped, which the sampler does.
     fn stretched(&self) -> bool {
-        self.size != (self.pixels.width as i32, self.pixels.height as i32)
+        self.size != (self.pixels.width as i32, self.pixels.height as i32) || self.source.is_some()
     }
 }
 
@@ -207,10 +213,13 @@ struct LayerValues {
     blur_first: u32,
     blur_count: u32,
     _padding: u32,
+    /// The part of the image that the layer shows, in texels: x, y, width
+    /// and height, with a width of 0 for all of it.
+    source: [f32; 4],
 }
 
-// The shaders' `Layer` is 64 bytes, a multiple of its alignment.
-const _: () = assert!(std::mem::size_of::<LayerValues>() == 64);
+// The shaders' `Layer` is 80 bytes, a multiple of its alignment.
+const _: () = assert!(std::mem::size_of::<LayerValues>() == 80);
 
 pub struct Renderer {
     _entry: ash::Entry,
@@ -1054,15 +1063,15 @@ impl Renderer {
         let mut rects: Vec<[i32; 4]> = Vec::new();
         for layer in layers {
             // The areas are in the surface's coordinates, which a stretched
-            // layer scales with its pixels.
+            // layer scales with its surface.
             let (sx, sy) = (
-                f64::from(layer.size.0) / f64::from(layer.pixels.width.max(1)),
-                f64::from(layer.size.1) / f64::from(layer.pixels.height.max(1)),
+                f64::from(layer.size.0) / f64::from(layer.extent.0.max(1)),
+                f64::from(layer.size.1) / f64::from(layer.extent.1.max(1)),
             );
             let mut area = |area: &[Rect]| {
                 let first = rects.len() as u32;
                 rects.extend(area.iter().map(|r| {
-                    if layer.stretched() {
+                    if layer.size != layer.extent {
                         let (x0, y0) = (
                             (f64::from(r.x) * sx).floor() as i32,
                             (f64::from(r.y) * sy).floor() as i32,
@@ -1098,6 +1107,9 @@ impl Renderer {
                 blur_first,
                 blur_count,
                 _padding: 0,
+                source: layer
+                    .source
+                    .map_or([0.0; 4], |r| r.map(|v| v as f32 / 256.0)),
             });
         }
         self.frame_buffers(
