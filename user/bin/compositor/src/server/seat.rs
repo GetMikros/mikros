@@ -67,6 +67,8 @@ pub struct Pointer {
     entered: std::collections::BTreeMap<ClientId, u32>,
     /// The clients that got events since the last frame.
     framed: Vec<ClientId>,
+    /// The window that the pointer moves, if one is.
+    pub(super) moving: Option<super::grabs::Move>,
 }
 
 impl Server {
@@ -311,12 +313,40 @@ impl Server {
         }
     }
 
+    /// The button that was pressed last and is held, if one is.
+    pub(super) fn button_held(&self) -> Option<u32> {
+        self.pointer.pressed.last().copied()
+    }
+
+    /// Whether the surface `surface` has the pointer.
+    pub(super) fn pointer_in(&self, surface: SurfaceId) -> bool {
+        self.pointer.focus.is_some_and(|f| f.surface == surface)
+    }
+
+    /// Takes the pointer from the surface that has it, with `leave`.
+    pub(super) fn leave_pointer_focus(&mut self) {
+        let Some(old) = self.pointer.focus.take() else {
+            return;
+        };
+        let serial = self.next_serial();
+        for (pointer, _) in self.pointers_of(old.client) {
+            if let Some(c) = self.clients.get_mut(&old.client) {
+                wl_pointer::send_leave(&mut c.out, pointer, serial, old.object);
+            }
+        }
+        self.pointer.framed.push(old.client);
+    }
+
     /// Moves the pointer to `(x, y)` on the output, kept on it, at the
     /// time `time` in milliseconds.
     pub fn pointer_motion(&mut self, x: f64, y: f64, time: u32) {
         let (width, height) = self.screen.unwrap_or((1, 1));
         self.pointer.x = x.clamp(0.0, f64::from(width.max(1) - 1));
         self.pointer.y = y.clamp(0.0, f64::from(height.max(1) - 1));
+        // A window that is moved follows the pointer, which no client sees.
+        if self.move_with_pointer() {
+            return;
+        }
         self.refocus();
         let Some(focus) = self.pointer.focus else {
             return;
@@ -338,6 +368,11 @@ impl Server {
             (false, true) => self.pointer.pressed.retain(|&b| b != button),
             _ => return,
         }
+        // The release of the button that moves a window ends the move.
+        if !pressed && self.end_move(button) {
+            self.refocus();
+            return;
+        }
         let Some(focus) = self.pointer.focus else {
             return;
         };
@@ -346,6 +381,12 @@ impl Server {
         if pressed && window {
             self.raise(focus.surface);
             self.focus_keyboard(Some(focus.surface));
+            // Super and the primary button move the window, whose client
+            // does not get the press.
+            if button == super::grabs::BTN_LEFT && self.super_held() {
+                self.start_move(focus.surface, button);
+                return;
+            }
         }
         let serial = self.next_serial();
         if pressed {
@@ -526,6 +567,75 @@ mod tests {
         server.pointer_button(0x110, true, 2);
         server.pointer_button(0x110, false, 3);
         assert_eq!(top(&server), Some(below));
+    }
+
+    /// The surface of the window that `with_window` made, its frame's corner.
+    fn corner(server: &Server) -> (i32, i32) {
+        let window = server.windows().into_iter().next().unwrap();
+        (window.frame.x, window.frame.y)
+    }
+
+    fn button_events(server: &mut Server, client: &TestClient) -> usize {
+        pointer_events(server, client)
+            .iter()
+            .filter(|e| e.1 == BUTTON)
+            .count()
+    }
+
+    #[test]
+    fn super_and_the_primary_button_move_the_window_without_its_client() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        pointer_events(&mut server, &client);
+        server.pointer_motion(10.0, 10.0, 1);
+        server.keyboard_key(125, true, 2, Default::default());
+        server.pointer_button(0x110, true, 3);
+        assert_eq!(button_events(&mut server, &client), 0);
+        server.pointer_motion(110.0, 60.0, 4);
+        assert_eq!(corner(&server), (100, 50));
+        server.pointer_button(0x110, false, 5);
+        assert_eq!(button_events(&mut server, &client), 0);
+        // After the move the pointer is a pointer again: the window is
+        // where it was put, and clicks reach its client.
+        server.keyboard_key(125, false, 6, Default::default());
+        server.pointer_motion(120.0, 70.0, 7);
+        server.pointer_button(0x110, true, 8);
+        assert_eq!(button_events(&mut server, &client), 1);
+        assert_eq!(corner(&server), (100, 50));
+    }
+
+    #[test]
+    fn the_primary_button_without_super_does_not_move_the_window() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        pointer_events(&mut server, &client);
+        server.pointer_motion(10.0, 10.0, 1);
+        server.pointer_button(0x110, true, 3);
+        server.pointer_motion(110.0, 60.0, 4);
+        assert_eq!(corner(&server), (0, 0));
+        assert_eq!(button_events(&mut server, &client), 1);
+    }
+
+    #[test]
+    fn xdg_toplevel_move_follows_the_press_that_it_names() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        pointer_events(&mut server, &client);
+        server.pointer_motion(10.0, 10.0, 1);
+        server.pointer_button(0x110, true, 2);
+        let serial = server.activation.last_press().unwrap();
+        // A serial that is not of a press that it got does nothing.
+        server.request_move(client.id, surface, serial + 100);
+        server.pointer_motion(60.0, 40.0, 3);
+        assert_eq!(corner(&server), (0, 0));
+        // The pointer holds the window where it is, at (60, 40).
+        server.request_move(client.id, surface, serial);
+        server.pointer_motion(110.0, 60.0, 4);
+        assert_eq!(corner(&server), (50, 20));
+        server.pointer_button(0x110, false, 5);
+        server.pointer_motion(0.0, 0.0, 6);
+        assert_eq!(corner(&server), (50, 20));
     }
 
     #[test]

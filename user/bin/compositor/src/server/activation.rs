@@ -60,6 +60,20 @@ pub struct Activation {
 }
 
 impl Activation {
+    /// Whether `client` got a press with `serial` not long ago.
+    pub(super) fn got_press(&mut self, client: ClientId, serial: u32) -> bool {
+        self.expire();
+        self.presses
+            .iter()
+            .any(|p| p.client == client && p.serial == serial)
+    }
+
+    /// The serial of the last press that a client got.
+    #[cfg(test)]
+    pub(super) fn last_press(&self) -> Option<u32> {
+        self.presses.back().map(|p| p.serial)
+    }
+
     /// Forgets the tokens that `client` was making.
     pub(super) fn forget_client(&mut self, client: ClientId) {
         self.making.retain(|(c, _), _| *c != client);

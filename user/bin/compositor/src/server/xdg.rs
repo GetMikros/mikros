@@ -260,6 +260,10 @@ impl Server {
             self.xdg_mut(id)?.parent = parent;
             return Ok(());
         }
+        if let xdg_toplevel::Request::Move { serial, .. } = decoded {
+            self.request_move(request.client, id, serial);
+            return Ok(());
+        }
         let xdg = self.xdg_mut(id)?;
         let mut changed = false;
         match decoded {
@@ -288,11 +292,10 @@ impl Server {
             xdg_toplevel::Request::UnsetFullscreen => (xdg.fullscreen, changed) = (false, true),
             xdg_toplevel::Request::SetMinimized => xdg.minimized = true,
             xdg_toplevel::Request::SetParent { .. } => unreachable!("handled before"),
-            // Menus, moves and resizes come with the rest of window
-            // management.
-            xdg_toplevel::Request::ShowWindowMenu { .. }
-            | xdg_toplevel::Request::Move { .. }
-            | xdg_toplevel::Request::Resize { .. } => {}
+            // Menus and resizes come with the rest of window management.
+            xdg_toplevel::Request::Move { .. } => unreachable!("handled before"),
+            xdg_toplevel::Request::ShowWindowMenu { .. } | xdg_toplevel::Request::Resize { .. } => {
+            }
         }
         if changed && xdg.initialized {
             self.configure(request.client, id);

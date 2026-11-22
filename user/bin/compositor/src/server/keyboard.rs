@@ -238,6 +238,11 @@ impl Server {
         }
     }
 
+    /// Whether the key `key`, an evdev code, is held.
+    pub(super) fn keyboard_pressed(&self, key: u32) -> bool {
+        self.keyboard.pressed.contains(&key)
+    }
+
     /// The window that has the keyboard focus.
     pub fn keyboard_focus(&self) -> Option<SurfaceId> {
         self.keyboard.focus.map(|f| f.surface)

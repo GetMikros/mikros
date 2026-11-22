@@ -11,6 +11,7 @@ mod area;
 mod buffer;
 mod cursor_shape;
 mod damage;
+mod grabs;
 mod keyboard;
 mod material;
 mod panel;
