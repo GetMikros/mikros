@@ -74,6 +74,7 @@ impl Server {
     pub fn windows(&self) -> Vec<Window> {
         let mut stack = self.windows.stack.borrow_mut();
         let size = |buffer| self.buffer_sizes.get(&buffer).copied().unwrap_or((0, 0));
+        let area = self.work_area();
         let mapped: Vec<(SurfaceId, (i32, i32), bool)> = self
             .surfaces
             .iter()
@@ -89,6 +90,14 @@ impl Server {
                 w.frame.width = width;
                 w.frame.height = height;
                 w.minimized = minimized;
+                // A fullscreen window lies at its output's corner and a
+                // maximized one at its work area's.
+                let state = self.surfaces.get(&w.surface).and_then(|s| s.xdg.as_ref());
+                if state.is_some_and(|x| x.fullscreen) {
+                    (w.frame.x, w.frame.y) = (0, 0);
+                } else if state.is_some_and(|x| x.maximized) {
+                    (w.frame.x, w.frame.y) = (area.x, area.y);
+                }
                 true
             }
             None => false,
@@ -117,7 +126,7 @@ impl Server {
 
     /// Raises the window of `surface`, and its children with it, keeping
     /// their order, to the top of the stack (MIKSPEC-0074.R5).
-    pub fn raise(&self, surface: SurfaceId) {
+    pub fn raise(&mut self, surface: SurfaceId) {
         self.windows();
         let descends = |mut id: SurfaceId| {
             while let Some(parent) = self.parent_of(id) {
@@ -128,12 +137,21 @@ impl Server {
             }
             false
         };
-        let mut stack = self.windows.stack.borrow_mut();
-        let (raised, kept): (Vec<Window>, Vec<Window>) = stack
+        let before: Vec<SurfaceId> = self.windows().iter().map(|w| w.surface).collect();
+        let (raised, kept): (Vec<Window>, Vec<Window>) = self
+            .windows
+            .stack
+            .borrow_mut()
             .drain(..)
             .partition(|w| w.surface == surface || descends(w.surface));
+        let frames: Vec<Rect> = raised.iter().map(|w| w.frame).collect();
+        let mut stack = self.windows.stack.borrow_mut();
         *stack = kept;
         stack.extend(raised);
+        // Windows that now overlap in another order are drawn again.
+        if stack.iter().map(|w| w.surface).ne(before) {
+            self.restacked.extend(frames);
+        }
     }
 
     /// Puts the frame of the window of `surface` with its top-left corner
@@ -406,5 +424,42 @@ mod tests {
             server.shown().iter().map(|s| s.surface).collect::<Vec<_>>(),
             [1]
         );
+    }
+
+    #[test]
+    fn raising_a_window_damages_its_frame_only_when_the_order_changes() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        toplevel(&mut server, 1, 10, (400, 300));
+        toplevel(&mut server, 2, 11, (400, 300));
+        let first = server.windows()[0].frame;
+        server.take_damage();
+        assert!(server.take_damage().is_empty());
+        server.raise(2);
+        assert!(server.take_damage().is_empty());
+        server.raise(1);
+        assert_eq!(server.take_damage(), [first]);
+        assert!(server.take_damage().is_empty());
+    }
+
+    #[test]
+    fn a_window_that_is_maximized_or_fullscreen_after_it_is_mapped_moves_to_its_corner() {
+        let mut server = Server::new();
+        server.set_screen((1280, 800));
+        panel(&mut server, 1, Edge::Top, 32, true);
+        toplevel(&mut server, 2, 10, (400, 300));
+        assert_eq!(frames(&server), [(440, 266)]);
+        let mut state = XdgState::windowed(None, false);
+        state.maximized = true;
+        server.surfaces.get_mut(&2).expect("made").xdg = Some(state);
+        server.buffer_sizes.insert(11, (1280, 768));
+        server.surfaces.get_mut(&2).expect("made").current.buffer = Some(11);
+        assert_eq!(frames(&server), [(0, 32)]);
+        let mut state = XdgState::windowed(None, false);
+        state.fullscreen = true;
+        server.surfaces.get_mut(&2).expect("made").xdg = Some(state);
+        server.buffer_sizes.insert(12, (1280, 800));
+        server.surfaces.get_mut(&2).expect("made").current.buffer = Some(12);
+        assert_eq!(frames(&server), [(0, 0)]);
     }
 }

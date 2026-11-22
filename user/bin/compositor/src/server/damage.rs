@@ -84,6 +84,7 @@ impl Server {
                 .filter(|(id, _)| !now.contains_key(id))
                 .map(|(_, &old)| old),
         );
+        damage.append(&mut self.restacked);
         self.drawn = now;
         self.committed.clear();
         damage

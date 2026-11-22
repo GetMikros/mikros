@@ -230,6 +230,9 @@ impl Server {
         let error = |message: &str| {
             ProtocolError::new(request.object, xdg_toplevel::error::INVALID_SIZE, message)
         };
+        let invalid_parent = |message: &str| {
+            ProtocolError::new(request.object, xdg_toplevel::error::INVALID_PARENT, message)
+        };
         if let xdg_toplevel::Request::SetParent { parent } = decoded {
             let parent = match parent {
                 None => None,
@@ -241,7 +244,7 @@ impl Server {
                         .map(|o| o.resource)
                     {
                         Some(Resource::Toplevel(surface)) => Some(surface),
-                        _ => return Err(error("a parent that is not a toplevel")),
+                        _ => return Err(invalid_parent("a parent that is not a toplevel")),
                     }
                 }
             };
@@ -250,7 +253,7 @@ impl Server {
             let mut ancestor = parent;
             while let Some(a) = ancestor {
                 if a == id {
-                    return Err(error("a parent that is a descendant"));
+                    return Err(invalid_parent("a parent that is a descendant"));
                 }
                 ancestor = self.surfaces.get(&a).and_then(|s| s.xdg.as_ref()?.parent);
             }
@@ -337,11 +340,12 @@ impl Server {
     }
 
     /// Sends a toplevel's state to its client: the size, which is the
-    /// screen's for a fullscreen toplevel and otherwise the client's
-    /// choice, and its states, and then the serial to acknowledge.
+    /// screen's for a fullscreen toplevel, the work area's for a maximized
+    /// one and otherwise the client's choice, and its states, and then the serial to acknowledge.
     fn configure(&mut self, client: super::ClientId, id: SurfaceId) {
         let serial = self.next_serial();
         let screen = self.screen;
+        let area = self.work_area();
         let Some(xdg) = self.surfaces.get_mut(&id).and_then(|s| s.xdg.as_mut()) else {
             return;
         };
@@ -355,7 +359,7 @@ impl Server {
             (width, height) = screen.unwrap_or((0, 0));
         } else if xdg.maximized {
             states.push(xdg_toplevel::state::MAXIMIZED);
-            (width, height) = screen.unwrap_or((0, 0));
+            (width, height) = (area.width, area.height);
         }
         xdg.sent.push(serial);
         let object = xdg.object;
@@ -428,6 +432,34 @@ mod tests {
         let surface = server.surfaces().next().unwrap().1;
         assert_eq!(surface.role, Role::Toplevel);
         assert!(surface.xdg.as_ref().unwrap().configured);
+    }
+
+    #[test]
+    fn refuses_a_parent_that_is_no_toplevel_or_makes_a_ring() {
+        let mut server = Server::new();
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 7, 1, vec![Arg::Object(Some(7))]);
+        let invalid = xdg_toplevel::error::INVALID_PARENT;
+        assert_eq!(client.error(&mut server), Some(invalid));
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 7, 1, vec![Arg::Object(Some(6))]);
+        assert_eq!(client.error(&mut server), Some(invalid));
+    }
+
+    #[test]
+    fn configures_a_maximized_toplevel_with_the_work_area() {
+        let mut server = Server::new();
+        server.screen = Some((1280, 800));
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 7, 9, vec![]);
+        events(&client, &mut server);
+        client.send(&mut server, 4, 6, vec![]);
+        let sent = events(&client, &mut server);
+        let states: Vec<u8> = [4u32, 1].iter().flat_map(|s| s.to_ne_bytes()).collect();
+        assert!(matches!(
+            &sent[0].2[..],
+            [Arg::Int(1280), Arg::Int(800), Arg::Array(a)] if *a == states
+        ));
     }
 
     #[test]

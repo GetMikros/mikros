@@ -259,6 +259,9 @@ pub struct Server {
     /// commits damaged since, in surface coordinates.
     drawn: BTreeMap<SurfaceId, Rect>,
     committed: BTreeMap<SurfaceId, Vec<Rect>>,
+    /// The frames of windows that were raised, which the next damage
+    /// covers, as the order in which they overlap changed.
+    restacked: Vec<Rect>,
     imported_timelines: BTreeSet<TimelineId>,
     /// The release points of buffers that surfaces no longer show.
     releases: Vec<Point>,
