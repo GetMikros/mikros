@@ -355,13 +355,13 @@ impl Server {
 
     /// Sends the first configure events of a toplevel after its initial
     /// commit.
-    pub(super) fn committed(&mut self, request: Request, id: SurfaceId) {
+    pub(super) fn committed(&mut self, client: super::ClientId, id: SurfaceId) {
         let Some(xdg) = self.surfaces.get_mut(&id).and_then(|s| s.xdg.as_mut()) else {
             return;
         };
         if xdg.toplevel.is_some() && !xdg.initialized {
             xdg.initialized = true;
-            self.configure(request.client, id);
+            self.configure(client, id);
         }
         self.resize_committed(id);
     }

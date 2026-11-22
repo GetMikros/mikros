@@ -120,6 +120,16 @@ pub(super) struct Waiting {
     pub feedback: Vec<(super::ClientId, ObjectId)>,
 }
 
+/// What a commit of a surface brings: the state it applies, whether it
+/// attached a buffer, its frame callbacks and its presentation feedback.
+#[derive(Debug)]
+pub(super) struct Staged {
+    pub state: SurfaceState,
+    pub attached: bool,
+    pub frames: Vec<ObjectId>,
+    pub asked: Vec<(super::ClientId, ObjectId)>,
+}
+
 /// The most buffers that wait for their acquire points on a surface; a
 /// commit past them gives up the oldest, whose damage the next keeps.
 const WAITING_MAX: usize = 16;
@@ -451,8 +461,8 @@ impl Server {
             .ok_or_else(|| ProtocolError::invalid_object("a destroyed surface"))
     }
 
-    /// Applies the pending state of the surface `id`, after its role
-    /// checked it.
+    /// Commits the surface `id`: its role checks the pending state, which
+    /// is staged and applied.
     fn commit(
         &mut self,
         imports: &mut dyn Imports,
@@ -463,27 +473,73 @@ impl Server {
         self.check_panel_commit(id)?;
         self.check_points(id)?;
         self.check_viewport(id)?;
-        // The feedback that waits for this commit's content to be shown, and
-        // that of content that it gives up.
-        let mut asked = self.presentation.take_asked(id);
+        let staged = self.stage(id);
+        self.apply(imports, request.client, id, staged);
+        Ok(())
+    }
+
+    /// Takes what a commit of `id` brings out of its pending state: the
+    /// parts that a commit consumes, the buffer, its points, the damage,
+    /// the offset, the frame callbacks and the presentation feedback, are
+    /// moved, and the rest, which stays pending, is copied.
+    fn stage(&mut self, id: SurfaceId) -> Staged {
+        let asked = self.presentation.take_asked(id);
+        let surface = self.surfaces.get_mut(&id).expect("a checked surface");
+        let attached = std::mem::take(&mut surface.attached);
+        let pending = &mut surface.pending;
+        let state = SurfaceState {
+            buffer: pending.buffer,
+            acquire: pending.acquire.take(),
+            release: pending.release.take(),
+            damage: std::mem::take(&mut pending.damage),
+            buffer_damage: std::mem::take(&mut pending.buffer_damage),
+            offset: std::mem::take(&mut pending.offset),
+            opaque: pending.opaque.clone(),
+            input: pending.input.clone(),
+            scale: pending.scale,
+            transform: pending.transform,
+            materials: pending.materials.clone(),
+            viewport: pending.viewport,
+        };
+        Staged {
+            state,
+            attached,
+            frames: std::mem::take(&mut surface.pending_frames),
+            asked,
+        }
+    }
+
+    /// Makes what a commit of `id` staged the surface's current state.
+    fn apply(
+        &mut self,
+        imports: &mut dyn Imports,
+        client: super::ClientId,
+        id: SurfaceId,
+        staged: Staged,
+    ) {
+        let Staged {
+            state: mut staged_state,
+            attached,
+            frames,
+            mut asked,
+        } = staged;
+        // The feedback of content that this commit gives up.
         let mut discarded = Vec::new();
         let mut replaced = false;
         let surface = self.surfaces.get_mut(&id).expect("a checked surface");
-        let pending = &mut surface.pending;
         let current = &mut surface.current;
         // A new buffer, or new areas of its materials, change what the
         // whole surface shows when its client damaged nothing.
-        let changed = surface.attached
-            || pending.materials != current.materials
-            || pending.viewport != current.viewport;
+        let changed = attached
+            || staged_state.materials != current.materials
+            || staged_state.viewport != current.viewport;
         // A buffer's points are those of the commit that attached it. A
         // buffer with an acquire point waits for a frame that finds it
         // reached; any other replaces what the surface shows at once, and
         // what waits: the compositor no longer reads those.
         let mut waits = false;
-        if surface.attached {
-            surface.attached = false;
-            match (pending.buffer, pending.acquire.take()) {
+        if attached {
+            match (staged_state.buffer, staged_state.acquire.take()) {
                 (Some(buffer), Some(acquire)) => {
                     if surface.waiting.len() >= WAITING_MAX {
                         let oldest = surface.waiting.remove(0);
@@ -494,7 +550,7 @@ impl Server {
                     surface.waiting.push(Waiting {
                         buffer,
                         acquire,
-                        release: pending.release.take(),
+                        release: staged_state.release.take(),
                         damage: Vec::new(),
                         feedback: std::mem::take(&mut asked),
                     });
@@ -509,29 +565,25 @@ impl Server {
                     replaced = true;
                     current.buffer = buffer;
                     current.acquire = None;
-                    current.release = pending.release.take();
+                    current.release = staged_state.release.take();
                 }
             }
         }
-        pending.acquire = None;
-        pending.release = None;
-        current.damage = std::mem::take(&mut pending.damage);
-        current.buffer_damage = std::mem::take(&mut pending.buffer_damage);
-        current.opaque = pending.opaque.clone();
-        current.input = pending.input.clone();
-        current.scale = pending.scale;
-        current.transform = pending.transform;
-        current.offset = std::mem::take(&mut pending.offset);
-        current.materials = pending.materials.clone();
-        current.viewport = pending.viewport;
-        let frames = std::mem::take(&mut surface.pending_frames);
+        current.damage = staged_state.damage;
+        current.buffer_damage = staged_state.buffer_damage;
+        current.opaque = staged_state.opaque;
+        current.input = staged_state.input;
+        current.scale = staged_state.scale;
+        current.transform = staged_state.transform;
+        current.offset = staged_state.offset;
+        current.materials = staged_state.materials;
+        current.viewport = staged_state.viewport;
         surface.frames.extend(frames);
-        self.committed(request, id);
+        self.committed(client, id);
         self.panel_committed(id);
         self.commit_damage(id, changed, waits);
         self.presentation_committed(id, replaced, asked, discarded);
         self.collect(imports);
-        Ok(())
     }
 
     /// Shows, on each surface, the newest of the buffers that wait whose
