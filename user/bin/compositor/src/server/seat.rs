@@ -714,6 +714,73 @@ mod tests {
     }
 
     #[test]
+    fn a_move_request_during_a_grab_changes_nothing() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        server.move_window(surface, 100, 100);
+        pointer_events(&mut server, &client);
+        server.pointer_motion(95.0, 125.0, 1);
+        server.pointer_button(0x110, true, 2);
+        assert!(server.pointer.resizing.is_some());
+        server.record_press(client.id, 7);
+        server.request_move(client.id, surface, 7);
+        server.request_resize(client.id, surface, 7, 8);
+        assert!(server.pointer.moving.is_none());
+        // The release ends the resize, and nothing resizes afterwards.
+        server.pointer_button(0x110, false, 3);
+        assert!(server.pointer.resizing.is_none());
+        server.pointer_motion(10.0, 125.0, 4);
+        assert_eq!(frame(&server), (100, 100, 100, 50));
+    }
+
+    #[test]
+    fn moving_a_maximized_window_restores_it_under_the_pointer() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        server.move_window(surface, 200, 100);
+        server.windows();
+        // It is maximized: as large as the screen, at its corner.
+        server.buffer_sizes.insert(99, (1280, 800));
+        let xdg = super::super::xdg::XdgState::windowed(None, false);
+        server.surfaces.get_mut(&surface).unwrap().xdg = Some(xdg);
+        server
+            .surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .xdg
+            .as_mut()
+            .unwrap()
+            .maximized = true;
+        assert_eq!(frame(&server), (0, 0, 1280, 800));
+        pointer_events(&mut server, &client);
+        server.pointer_motion(640.0, 10.0, 1);
+        server.keyboard_key(125, true, 2, Default::default());
+        server.pointer_button(0x110, true, 3);
+        // The window is 100 by 50 again, the pointer half way along it.
+        assert!(!server.surfaces[&surface].xdg.as_ref().unwrap().maximized);
+        assert_eq!(frame(&server), (590, 0, 100, 50));
+        server.pointer_motion(700.0, 60.0, 4);
+        assert_eq!(frame(&server), (650, 50, 100, 50));
+    }
+
+    #[test]
+    fn a_resize_ends_when_the_window_is_gone() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        server.move_window(surface, 100, 100);
+        pointer_events(&mut server, &client);
+        server.pointer_motion(95.0, 125.0, 1);
+        server.pointer_button(0x110, true, 2);
+        assert!(server.pointer.resizing.is_some());
+        server.surfaces.get_mut(&surface).unwrap().current.buffer = None;
+        server.pointer_motion(60.0, 125.0, 3);
+        assert!(server.pointer.resizing.is_none());
+    }
+
+    #[test]
     fn one_grab_at_a_time() {
         let mut server = Server::new();
         let client = with_window(&mut server);

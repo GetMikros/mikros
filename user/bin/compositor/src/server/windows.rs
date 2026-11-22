@@ -25,7 +25,7 @@ pub struct Window {
     pub minimized: bool,
     /// Where the window lay before it was maximized or made fullscreen,
     /// which it goes back to.
-    restore: Option<(i32, i32)>,
+    restore: Option<Rect>,
     /// Whether the window demands attention: it was mapped below the
     /// focused window, and has not had the keyboard focus since.
     pub attention: bool,
@@ -100,6 +100,7 @@ impl Server {
             .collect();
         stack.retain_mut(|w| match mapped.iter().find(|(id, ..)| *id == w.surface) {
             Some(&(_, (width, height), minimized)) => {
+                let before = w.frame;
                 // A frame that a resize sized keeps its size until a buffer
                 // of that size is there and no resize goes on.
                 let resizing = self.pointer.resizing_surface() == Some(w.surface);
@@ -122,12 +123,17 @@ impl Server {
                 };
                 match corner {
                     Some(corner) => {
-                        w.restore.get_or_insert((w.frame.x, w.frame.y));
+                        w.restore.get_or_insert(before);
                         (w.frame.x, w.frame.y) = corner;
+                        // The size is the buffer's, which the client draws
+                        // at the size it was asked for.
+                        w.target = None;
+                        w.frame.width = width;
+                        w.frame.height = height;
                     }
                     None => {
-                        if let Some((x, y)) = w.restore.take() {
-                            (w.frame.x, w.frame.y) = (x, y);
+                        if let Some(r) = w.restore.take() {
+                            (w.frame.x, w.frame.y) = (r.x, r.y);
                         }
                     }
                 }
@@ -239,6 +245,19 @@ impl Server {
         if stack.iter().map(|w| w.surface).ne(before) {
             self.restacked.extend(frames);
         }
+    }
+
+    /// The frame that the window of `surface` had before it was maximized
+    /// or made fullscreen, which it no longer goes back to.
+    pub(super) fn take_restore(&self, surface: SurfaceId) -> Option<Rect> {
+        self.windows();
+        self.windows
+            .stack
+            .borrow_mut()
+            .iter_mut()
+            .find(|w| w.surface == surface)?
+            .restore
+            .take()
     }
 
     /// Gives the window of `surface` the frame `frame`, whose size it keeps

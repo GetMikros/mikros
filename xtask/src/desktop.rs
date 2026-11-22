@@ -521,7 +521,7 @@ pub fn run_with(
         // was put.
         let what = "the desktop showed the dragged window again";
         screen.until_colour_at(&mut qemu, colour, size, left + DRAG as usize, what)?;
-        let (app_left, app_top) = screen.until_colour_at(
+        let (app_left, _) = screen.until_colour_at(
             &mut qemu,
             APP_COLOUR,
             APP_SIZE,
@@ -533,7 +533,6 @@ pub fn run_with(
         scenario::monitor(&socket, "mouse_button 1")?;
         scenario::monitor(&socket, &format!("mouse_move {} {}", GROW.0, GROW.1))?;
         scenario::monitor(&socket, "mouse_button 0")?;
-        let _ = app_top;
         let what = "the client's window was resized with the pointer";
         screen.until_colour_at(
             &mut qemu,

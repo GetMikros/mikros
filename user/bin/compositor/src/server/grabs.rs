@@ -47,12 +47,29 @@ impl Server {
     /// it where it is now, until `button` is released. The client of the
     /// window gets `leave`, and no more pointer events.
     pub(super) fn start_move(&mut self, surface: SurfaceId, button: u32) {
+        self.end_grabs();
+        let Some(xdg) = self.surfaces.get(&surface).and_then(|s| s.xdg.as_ref()) else {
+            return self.start_move_of_frame(surface, button);
+        };
+        // A fullscreen window does not move. A maximized one gets back the
+        // frame it had, with the pointer at the same relative horizontal
+        // place in it (MIKSPEC-0074.R27).
+        if xdg.fullscreen {
+            return;
+        }
+        if xdg.maximized {
+            self.restore_for_move(surface);
+        }
+        self.start_move_of_frame(surface, button);
+    }
+
+    fn start_move_of_frame(&mut self, surface: SurfaceId, button: u32) {
         let Some(window) = self.windows().into_iter().find(|w| w.surface == surface) else {
             return;
         };
         let offset = (
-            self.pointer.x as i32 - window.frame.x,
-            self.pointer.y as i32 - window.frame.y,
+            (self.pointer.x as i32).saturating_sub(window.frame.x),
+            (self.pointer.y as i32).saturating_sub(window.frame.y),
         );
         self.pointer.moving = Some(Move {
             surface,
@@ -60,6 +77,51 @@ impl Server {
             button,
         });
         self.leave_pointer_focus();
+    }
+
+    /// Un-maximizes the window of `surface` and gives it back the frame that
+    /// it had, moved so that the pointer is at the same relative horizontal
+    /// place in it, and asks its client for that size.
+    fn restore_for_move(&mut self, surface: SurfaceId) {
+        let Some(window) = self.windows().into_iter().find(|w| w.surface == surface) else {
+            return;
+        };
+        let Some(before) = self.take_restore(surface) else {
+            return;
+        };
+        if let Some(xdg) = self.surfaces.get_mut(&surface).and_then(|s| s.xdg.as_mut()) {
+            xdg.maximized = false;
+        }
+        let from = window.frame;
+        let along = i64::from(self.pointer.x as i32) - i64::from(from.x);
+        let x = i64::from(self.pointer.x as i32)
+            - along * i64::from(before.width) / i64::from(from.width.max(1));
+        let frame = Rect {
+            x: x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+            y: from.y,
+            width: before.width,
+            height: before.height,
+        };
+        self.set_frame(surface, frame);
+        self.ask_size(surface, (frame.width, frame.height));
+    }
+
+    /// Ends the move or the resize that goes on, if one does.
+    pub(super) fn end_grabs(&mut self) {
+        self.pointer.moving = None;
+        if let Some(resize) = self.pointer.resizing.take()
+            && let Some(xdg) = self
+                .surfaces
+                .get_mut(&resize.surface)
+                .and_then(|s| s.xdg.as_mut())
+        {
+            xdg.resizing = false;
+        }
+    }
+
+    /// Whether a window is moved or resized.
+    pub(super) fn grabbing(&self) -> bool {
+        self.pointer.moving.is_some() || self.pointer.resizing.is_some()
     }
 
     /// Puts the window that moves where the pointer holds it, kept in the
@@ -99,6 +161,9 @@ impl Server {
     /// press with `serial`: it starts the move when the client got that
     /// press, a button is held and the pointer is in that window.
     pub(super) fn request_move(&mut self, client: ClientId, surface: SurfaceId, serial: u32) {
+        if self.grabbing() {
+            return;
+        }
         let pressed = self.activation.got_press(client, serial);
         let button = self.button_held();
         let in_window = self.pointer_in(surface);

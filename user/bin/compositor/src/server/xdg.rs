@@ -41,6 +41,7 @@ pub struct XdgState {
     /// acknowledged it, and the latest size asked since (MIKSPEC-0074.R16).
     pub resizing: bool,
     pub(super) outstanding: Option<u32>,
+    pub(super) outstanding_at: u64,
     pub(super) acked: bool,
     pub(super) latest: Option<(i32, i32)>,
 }
@@ -560,6 +561,29 @@ mod tests {
         assert!(configures(&events(&client, &mut server)).is_empty());
         // After a commit, the latest size goes out, and none between.
         client.send(&mut server, 4, 6, vec![]);
+        let later = configures(&events(&client, &mut server));
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].0, (320, 220));
+    }
+
+    #[test]
+    fn a_client_that_does_not_answer_is_not_waited_for_after_a_second() {
+        let mut server = Server::new();
+        server.screen = Some((1280, 800));
+        server.set_clock(1_000);
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 4, 6, vec![]);
+        let first = configures(&events(&client, &mut server));
+        client.send(&mut server, 6, 4, vec![Arg::Uint(first[0].1)]);
+        let surface = *server.surfaces().next().unwrap().0;
+        server.surfaces.get_mut(&surface).unwrap().current.buffer = Some(99);
+        server.ask_size(surface, (300, 200));
+        assert_eq!(configures(&events(&client, &mut server)).len(), 1);
+        server.set_clock(1_500);
+        server.ask_size(surface, (310, 210));
+        assert!(events(&client, &mut server).is_empty());
+        server.set_clock(2_000);
+        server.ask_size(surface, (320, 220));
         let later = configures(&events(&client, &mut server));
         assert_eq!(later.len(), 1);
         assert_eq!(later[0].0, (320, 220));

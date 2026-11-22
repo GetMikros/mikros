@@ -22,6 +22,10 @@ pub(super) struct Resize {
     pub asked: (i32, i32),
 }
 
+/// How long a client has to answer a configure with a size, in
+/// milliseconds, before the next is sent anyway.
+const PATIENCE: u64 = 1000;
+
 /// The values of xdg_toplevel's resize edges.
 const EDGES: [u32; 9] = [0, 1, 2, 4, 5, 6, 8, 9, 10];
 
@@ -34,10 +38,17 @@ impl Server {
     /// Starts resizing the window of `surface` by `edges` with the pointer,
     /// which resizes it until `button` is released. Its client gets `leave`.
     pub(super) fn start_resize(&mut self, surface: SurfaceId, edges: u32, button: u32) {
+        self.end_grabs();
         let Some(window) = self.windows().into_iter().find(|w| w.surface == surface) else {
             return;
         };
-        if edges == 0 {
+        // Fullscreen and maximized windows are not resized by hand.
+        let fixed = self
+            .surfaces
+            .get(&surface)
+            .and_then(|s| s.xdg.as_ref())
+            .is_some_and(|x| x.fullscreen || x.maximized);
+        if edges == 0 || fixed {
             return;
         }
         self.pointer.resizing = Some(Resize {
@@ -61,8 +72,9 @@ impl Server {
         let Some(resize) = self.pointer.resizing else {
             return false;
         };
-        let Some(surface) = self.surfaces.get(&resize.surface) else {
-            self.pointer.resizing = None;
+        let mapped = self.windows().iter().any(|w| w.surface == resize.surface);
+        let Some(surface) = self.surfaces.get(&resize.surface).filter(|_| mapped) else {
+            self.end_grabs();
             return false;
         };
         let (min, max) = surface
@@ -77,7 +89,8 @@ impl Server {
         // The top edge stays in the work area (MIKSPEC-0074.R8).
         let top = self.work_area().y;
         if frame.y < top {
-            frame.height = (frame.height - (top - frame.y)).max(1);
+            let cut = i64::from(top) - i64::from(frame.y);
+            frame.height = (i64::from(frame.height) - cut).clamp(1, i64::from(i32::MAX)) as i32;
             frame.y = top;
         }
         self.set_frame(resize.surface, frame);
@@ -125,6 +138,9 @@ impl Server {
         serial: u32,
         edges: u32,
     ) {
+        if self.grabbing() {
+            return;
+        }
         let pressed = self.activation.got_press(client, serial);
         let button = self.button_held();
         let in_window = self.pointer_in(surface);
@@ -195,6 +211,7 @@ impl Server {
     /// the latest size asked to send when the client has answered with a
     /// commit (MIKSPEC-0074.R16).
     pub(super) fn ask_size(&mut self, surface: SurfaceId, size: (i32, i32)) {
+        let now = self.clock();
         let Some(s) = self.surfaces.get_mut(&surface) else {
             return;
         };
@@ -202,6 +219,10 @@ impl Server {
         let Some(xdg) = s.xdg.as_mut() else {
             return;
         };
+        // A client that has not answered within a second is not waited for.
+        if xdg.outstanding.is_some() && now.saturating_sub(xdg.outstanding_at) >= PATIENCE {
+            xdg.outstanding = None;
+        }
         if xdg.outstanding.is_some() {
             xdg.latest = Some(size);
             return;
@@ -209,6 +230,7 @@ impl Server {
         let serial = self.configure_with(client, surface, Some(size));
         if let Some(xdg) = self.surfaces.get_mut(&surface).and_then(|s| s.xdg.as_mut()) {
             xdg.outstanding = serial;
+            xdg.outstanding_at = now;
             xdg.acked = false;
         }
     }

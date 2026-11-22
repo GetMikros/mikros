@@ -469,6 +469,7 @@ impl Compositor {
             // The pointer goes to what now lies under it.
             {
                 let mut server = self.server.borrow_mut();
+                server.set_clock(mikros_rt::objects::now().max(0) as u64 / 1_000_000);
                 server.refocus();
                 server.pointer_frame();
             }
