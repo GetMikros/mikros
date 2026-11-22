@@ -65,6 +65,20 @@ const LIST_ACTIVATED: &str = "greeter-probe: activated the window of system.mikr
 /// then, while Super is held, drags the window to the right by this much.
 const MOVE_INTO_WINDOW: &str = "mouse_move -100 -377";
 const DRAG: i32 = 100;
+/// An ordinary client's window, which the run starts in the user's text
+/// session, a rectangle of one colour that the compositor places in the
+/// middle of the work area, and then resizes with the pointer at its
+/// bottom right corner, by `GROW`: its colour then fills the frame, the
+/// client having drawn no more.
+const WINDOW_COMMAND: &str = "slash s y s t e m slash a p p s slash s y s t e m dot m i k r o s dot \
+    s h e l l shift-minus p r o b e slash g r e e t e r minus p r o b e spc minus minus w i n d o w \
+    spc shift-7 ret";
+const APP_COLOUR: [u8; 3] = [120, 60, 200];
+const APP_SIZE: (usize, usize) = (200, 150);
+/// From where the pointer is after the drag to the band outside the app
+/// window's bottom right corner.
+const TO_APP_CORNER: &str = "mouse_move 2 79";
+const GROW: (usize, usize) = (100, 60);
 const SHELL_RESTARTED: &str =
     "compositor: starting the part start-menu of system.mikros.shell_probe again";
 const SHELL_GAVE_UP: &str = "compositor: the part start-menu of system.mikros.shell_probe stopped more than 5 times within a minute; leaving its roles empty";
@@ -216,6 +230,29 @@ fn colour_bounds(ppm: &[u8], colour: [u8; 3]) -> Option<(usize, usize, usize, us
     bounds
 }
 
+/// Waits until the serial log `log` has at least `count` lines with `text`.
+fn wait_for_lines(
+    log: &Path,
+    text: &str,
+    count: usize,
+    qemu: &mut std::process::Child,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        let serial = String::from_utf8_lossy(&fs::read(log).unwrap_or_default()).into_owned();
+        if serial.lines().filter(|l| l.contains(text)).count() >= count {
+            return Ok(());
+        }
+        if qemu.try_wait()?.is_some() {
+            bail!("QEMU exited before {count} lines with {text:?}");
+        }
+        if Instant::now() > deadline {
+            bail!("timed out waiting for {count} lines with {text:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// The width of the screen dump `ppm`.
 fn screen_width_of(ppm: &[u8]) -> Option<usize> {
     let head = &ppm[..ppm.len().min(32)];
@@ -312,7 +349,8 @@ impl Screen<'_> {
     }
 
     /// Dumps the screen until the pixels of `colour` fill a rectangle of
-    /// `size` whose left edge is within `slack` of `left`, and returns it.
+    /// `size` whose left edge is within 2 pixels of `left`, and returns its
+    /// top left corner.
     fn until_colour_at(
         &mut self,
         qemu: &mut std::process::Child,
@@ -464,13 +502,46 @@ pub fn run_with(
         // the pointer moved.
         scenario::monitor(&socket, MOVE_INTO_WINDOW)?;
         let left = (screen_width_of(&fs::read(&dump)?).unwrap_or(1280) - size.0) / 2;
-        scenario::monitor(&socket, "sendkey meta_l 8000")?;
+        scenario::monitor(&socket, "sendkey meta_l 3000")?;
         std::thread::sleep(Duration::from_secs(1));
         scenario::monitor(&socket, "mouse_button 1")?;
         scenario::monitor(&socket, &format!("mouse_move {DRAG} 0"))?;
         scenario::monitor(&socket, "mouse_button 0")?;
         let what = "the window was dragged with Super";
         screen.until_colour_at(&mut qemu, colour, size, left + DRAG as usize, what)?;
+        // Super is let go after its hold.
+        std::thread::sleep(Duration::from_secs(4));
+        // An ordinary client's window, from the text session.
+        scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
+        screen.until(&mut qemu, WALLPAPER, &gone, "the console showed from the desktop")?;
+        crate::console::type_keys(&socket, WINDOW_COMMAND)?;
+        std::thread::sleep(Duration::from_secs(2));
+        scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
+        // The desktop shows again with the window that was dragged where it
+        // was put.
+        let what = "the desktop showed the dragged window again";
+        screen.until_colour_at(&mut qemu, colour, size, left + DRAG as usize, what)?;
+        let (app_left, app_top) = screen.until_colour_at(
+            &mut qemu,
+            APP_COLOUR,
+            APP_SIZE,
+            (screen_width_of(&fs::read(&dump)?).unwrap_or(1280) - APP_SIZE.0) / 2,
+            "the client's window showed",
+        )?;
+        // The pointer drags the band at its bottom right corner.
+        scenario::monitor(&socket, TO_APP_CORNER)?;
+        scenario::monitor(&socket, "mouse_button 1")?;
+        scenario::monitor(&socket, &format!("mouse_move {} {}", GROW.0, GROW.1))?;
+        scenario::monitor(&socket, "mouse_button 0")?;
+        let _ = app_top;
+        let what = "the client's window was resized with the pointer";
+        screen.until_colour_at(
+            &mut qemu,
+            APP_COLOUR,
+            (APP_SIZE.0 + GROW.0, APP_SIZE.1 + GROW.1),
+            app_left,
+            what,
+        )?;
         scenario::wait_for_line(&log, CANCELLED, &mut qemu, deadline)?;
         let serial = scenario::wait_for_line(&log, SHELL_EXITED, &mut qemu, deadline)?;
         let exited = serial
@@ -492,7 +563,9 @@ pub fn run_with(
             dir.join("client.ppm"),
             scenario::screen_dump(&socket, &dump)?,
         )?;
-        scenario::wait_for_line(&log, CLIENT_CONNECTED, &mut qemu, deadline)?;
+        // The window of the app that the run started connected as well, so the
+        // client of this step is the second connection.
+        wait_for_lines(&log, CLIENT_CONNECTED, 2, &mut qemu, deadline)?;
         crate::console::type_keys(&socket, "e x i t ret")?;
         scenario::wait_for_line(&log, DESKTOP_ENDED, &mut qemu, deadline).map(drop)
     })();

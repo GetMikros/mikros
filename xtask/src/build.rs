@@ -2744,6 +2744,7 @@ fn greeter_probe(
         "user/tests/greeter-probe/greeter.c",
         "user/tests/greeter-probe/wallpaper.c",
         "user/tests/greeter-probe/panel.c",
+        "user/tests/greeter-probe/window.c",
     ];
     sources.extend(code.iter().map(String::as_str));
     let program = c_build(name, &sources, Linking::Dynamic, &args)?;
