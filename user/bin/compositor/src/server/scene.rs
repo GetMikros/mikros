@@ -12,10 +12,14 @@ pub struct Shown {
     pub buffer: BufferId,
     pub x: i32,
     pub y: i32,
-    /// The size that it is drawn at, which is its buffer's unless a window
-    /// is stretched to its frame (MIKSPEC-0074.R15).
+    /// The size that it is drawn at, which is its own unless a window is
+    /// stretched to its frame (MIKSPEC-0074.R15).
     pub width: i32,
     pub height: i32,
+    /// The surface's own size, which its viewport may set, and the part of
+    /// its buffer that it shows, if its viewport crops it (24.8 fixed-point).
+    pub extent: (i32, i32),
+    pub source: Option<[i32; 4]>,
     pub haze: Vec<Rect>,
     pub blur: Vec<Rect>,
 }
@@ -24,13 +28,9 @@ impl Server {
     /// The windows, bottom first, then the configured panels.
     pub fn shown(&self) -> Vec<Shown> {
         let screen = self.screen.unwrap_or((0, 0));
-        let size = |buffer| {
-            self.buffer_sizes
-                .get(&buffer)
-                .map_or((0, 0), |&(w, h)| (w as i32, h as i32))
-        };
         let shown = |id, buffer, x, y, dest: Option<(i32, i32)>, s: &super::Surface| {
-            let (width, height) = dest.unwrap_or_else(|| size(buffer));
+            let extent = self.extent(s);
+            let (width, height) = dest.unwrap_or(extent);
             Shown {
                 surface: id,
                 buffer,
@@ -38,6 +38,8 @@ impl Server {
                 y,
                 width,
                 height,
+                extent,
+                source: s.current.viewport.source,
                 haze: s.current.materials.haze.rects().to_vec(),
                 blur: s.current.materials.blur.rects().to_vec(),
             }

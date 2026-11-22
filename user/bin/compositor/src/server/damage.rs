@@ -67,7 +67,8 @@ impl Server {
                 width: shown.width,
                 height: shown.height,
             };
-            let stretched = (shown.width, shown.height) != (buffer.0 as i32, buffer.1 as i32);
+            let stretched = (shown.width, shown.height) != (buffer.0 as i32, buffer.1 as i32)
+                || shown.source.is_some();
             now.insert(shown.surface, rect);
             match self.drawn.get(&shown.surface) {
                 // A stretched buffer is drawn again whole when it changes.

@@ -53,6 +53,8 @@ pub struct SurfaceState {
     pub offset: (i32, i32),
     /// The areas of its materials (MIKSPEC-0076.R16).
     pub materials: super::material::Materials,
+    /// The crop and size that its viewport sets.
+    pub viewport: super::Viewport,
 }
 
 impl Default for SurfaceState {
@@ -69,6 +71,7 @@ impl Default for SurfaceState {
             transform: wl_output_transform::NORMAL,
             offset: (0, 0),
             materials: Default::default(),
+            viewport: Default::default(),
         }
     }
 }
@@ -457,12 +460,15 @@ impl Server {
         self.check_commit(request, id)?;
         self.check_panel_commit(id)?;
         self.check_points(id)?;
+        self.check_viewport(id)?;
         let surface = self.surfaces.get_mut(&id).expect("a checked surface");
         let pending = &mut surface.pending;
         let current = &mut surface.current;
         // A new buffer, or new areas of its materials, change what the
         // whole surface shows when its client damaged nothing.
-        let changed = surface.attached || pending.materials != current.materials;
+        let changed = surface.attached
+            || pending.materials != current.materials
+            || pending.viewport != current.viewport;
         // A buffer's points are those of the commit that attached it. A
         // buffer with an acquire point waits for a frame that finds it
         // reached; any other replaces what the surface shows at once, and
@@ -505,6 +511,7 @@ impl Server {
         current.transform = pending.transform;
         current.offset = std::mem::take(&mut pending.offset);
         current.materials = pending.materials.clone();
+        current.viewport = pending.viewport;
         let frames = std::mem::take(&mut surface.pending_frames);
         surface.frames.extend(frames);
         self.committed(request, id);

@@ -88,17 +88,15 @@ impl Server {
     /// buffer now and forgetting those that have none or are gone.
     pub fn windows(&self) -> Vec<Window> {
         let mut stack = self.windows.stack.borrow_mut();
-        let size = |buffer| self.buffer_sizes.get(&buffer).copied().unwrap_or((0, 0));
         let area = self.work_area();
         let mapped: Vec<(SurfaceId, (i32, i32), bool)> = self
             .surfaces
             .iter()
             .filter(|(_, s)| s.role == Role::Toplevel)
             .filter_map(|(&id, s)| {
-                let (w, h) = size(s.current.buffer?);
+                s.current.buffer?;
                 let minimized = s.xdg.as_ref().is_some_and(|x| x.minimized);
-                let to_i32 = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
-                Some((id, (to_i32(w), to_i32(h)), minimized))
+                Some((id, self.extent(s), minimized))
             })
             .collect();
         stack.retain_mut(|w| match mapped.iter().find(|(id, ..)| *id == w.surface) {

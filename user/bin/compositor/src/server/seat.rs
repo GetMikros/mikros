@@ -233,13 +233,12 @@ impl Server {
     /// its corner.
     fn surface_at(&self, x: i32, y: i32) -> Option<Focus> {
         self.shown().into_iter().rev().find_map(|shown| {
-            let (buffer_width, buffer_height) = *self.buffer_sizes.get(&shown.buffer)?;
-            let buffer = (buffer_width as i32, buffer_height as i32);
+            let buffer = shown.extent;
             let (lx, ly) = (x - shown.x, y - shown.y);
             if lx < 0 || ly < 0 || lx >= shown.width || ly >= shown.height {
                 return None;
             }
-            // Where it lies in the buffer, which a stretched window maps.
+            // Where it lies in the surface, which a stretched window maps.
             let (lx, ly) = (
                 (i64::from(lx) * i64::from(buffer.0) / i64::from(shown.width.max(1))) as i32,
                 (i64::from(ly) * i64::from(buffer.1) / i64::from(shown.height.max(1))) as i32,
