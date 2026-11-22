@@ -329,6 +329,16 @@ impl Server {
 
     /// Adds the connection of a shell component of `roles` and `app_id`,
     /// which the compositor created, and returns its ID.
+    /// A new client whose app ID the session manager vouched for with the
+    /// identity that it forwarded (MIKSPEC-0066.R35).
+    pub fn connect_client(&mut self, app_id: String) -> ClientId {
+        let id = self.connect();
+        if let Some(client) = self.clients.get_mut(&id) {
+            client.app_id = Some(app_id);
+        }
+        id
+    }
+
     pub fn connect_component(&mut self, roles: Vec<String>, app_id: String) -> ClientId {
         let id = self.connect();
         if let Some(c) = self.clients.get_mut(&id) {
@@ -745,6 +755,15 @@ pub(crate) mod tests {
         assert_eq!((events[0].0, events[0].1), (2, 0));
         assert_eq!(events[1], (1, 1, vec![Arg::Uint(2)]));
         assert!(server.client(client.id).unwrap().object(2).is_none());
+    }
+
+    #[test]
+    fn knows_the_app_id_of_a_client_that_the_session_manager_forwarded() {
+        let mut server = Server::new();
+        let id = server.connect_client("org.example.app".into());
+        let client = server.client(id).unwrap();
+        assert_eq!(client.app_id.as_deref(), Some("org.example.app"));
+        assert!(client.roles.is_none());
     }
 
     #[test]

@@ -29,6 +29,7 @@ use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
 use imports::{Importer, Store};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
+use mikros_rt::interfaces::mikros::desktop::{CompositorAsyncServer, CompositorRequest};
 use mikros_rt::interfaces::mikros::gpu::{
     Capabilities, Device as Gpu, DeviceAsyncClient as GpuClient, DisplayAsyncClient,
 };
@@ -49,6 +50,9 @@ use std::time::Duration;
 /// The `USER` startup handles: the `Login` channel of greeter mode, and
 /// the `Seat` channel.
 const USER: u32 = 16;
+/// The `Compositor` channel, on which the session manager forwards the
+/// connections of clients (MIKSPEC-0066.R35).
+const CONNECTIONS_ID: u32 = 1;
 const SESSION_ID: u32 = 2;
 const LOGIN_ID: u32 = 3;
 const SEAT_ID: u32 = 7;
@@ -215,10 +219,44 @@ impl Compositor {
         }
     }
 
-    /// Serves the Wayland channel of a client until it closes or breaks
-    /// the protocol.
-    pub async fn serve_client(self: Rc<Self>, channel: OwnedHandle) {
-        let client = self.server.borrow_mut().connect();
+    /// Serves the `Compositor` channel, on which the session manager
+    /// forwards the connections of clients with their identities
+    /// (MIKSPEC-0066.R35). A client of the opener or the file picker is
+    /// refused, as the compositor serves neither yet.
+    async fn serve_connections(self: Rc<Self>, connections: OwnedHandle) {
+        let server = CompositorAsyncServer::new(ServerEnd::new(connections), self.reactor.clone());
+        while let Ok(request) = server.next().await {
+            match request {
+                CompositorRequest::Connect(connect) => {
+                    let app_id = connect.identity.app_id.clone();
+                    mikros_rt::log!(Info, "compositor: a client of {app_id} connected");
+                    let this = self.clone();
+                    self.spawner
+                        .spawn(async move { this.serve_client(connect.client, app_id).await });
+                }
+                CompositorRequest::ConnectOpener(connect) => {
+                    let app_id = connect.identity.app_id;
+                    mikros_rt::log!(
+                        Info,
+                        "compositor: {app_id} asked for the opener, which is not served yet"
+                    );
+                }
+                CompositorRequest::ConnectFilePicker(connect) => {
+                    let app_id = connect.identity.app_id;
+                    mikros_rt::log!(
+                        Info,
+                        "compositor: {app_id} asked for the file picker, which is not served yet"
+                    );
+                }
+            }
+        }
+        mikros_rt::log!(Info, "compositor: the Compositor channel closed");
+    }
+
+    /// Serves the Wayland channel of the client of `app_id` until it
+    /// closes or breaks the protocol.
+    async fn serve_client(self: Rc<Self>, channel: OwnedHandle, app_id: String) {
+        let client = self.server.borrow_mut().connect_client(app_id);
         self.serve(client, channel).await;
     }
 
@@ -816,6 +854,7 @@ pub fn main() {
     // session, the session manager asks its questions on Session.
     let login = take(LOGIN_ID);
     let session = take(SESSION_ID);
+    let connections = take(CONNECTIONS_ID);
     let renderer = match Renderer::new() {
         Ok(renderer) => renderer,
         Err(e) => {
@@ -878,6 +917,9 @@ pub fn main() {
         }
         if let Some(session) = session {
             c.spawner.spawn(session::serve(c.reactor.clone(), session));
+        }
+        if let Some(connections) = connections {
+            c.spawner.spawn(c.clone().serve_connections(connections));
         }
         c.clone().serve_seat(seat).await;
     });
