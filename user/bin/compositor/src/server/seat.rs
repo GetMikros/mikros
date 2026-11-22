@@ -713,6 +713,146 @@ mod tests {
         assert_eq!(frame(&server), (100, 40, 100, 110));
     }
 
+    /// A client with a window that has an xdg state and the keyboard focus,
+    /// on a screen of 1280 by 800.
+    fn with_focused_window(server: &mut Server) -> (TestClient, SurfaceId) {
+        let client = with_window(server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        let xdg = super::super::xdg::XdgState::windowed(None, false);
+        server.surfaces.get_mut(&surface).unwrap().xdg = Some(xdg);
+        server.focus_keyboard(Some(surface));
+        (client, surface)
+    }
+
+    fn chord(server: &mut Server, keys: &[u32]) {
+        for &key in keys {
+            server.keyboard_key(key, true, 0, Default::default());
+        }
+        for &key in keys.iter().rev() {
+            server.keyboard_key(key, false, 0, Default::default());
+        }
+    }
+
+    #[test]
+    fn super_and_up_maximize_the_focused_window_and_super_and_down_restore_it() {
+        let mut server = Server::new();
+        let (_, surface) = with_focused_window(&mut server);
+        server.move_window(surface, 200, 100);
+        chord(&mut server, &[125, 103]);
+        assert!(server.surfaces[&surface].xdg.as_ref().unwrap().maximized);
+        assert_eq!(frame(&server).0, 0);
+        assert_eq!(frame(&server).1, 0);
+        chord(&mut server, &[125, 108]);
+        assert!(!server.surfaces[&surface].xdg.as_ref().unwrap().maximized);
+        assert_eq!(frame(&server), (200, 100, 100, 50));
+    }
+
+    #[test]
+    fn super_and_left_or_right_snap_and_super_and_down_restore() {
+        let mut server = Server::new();
+        let (_, surface) = with_focused_window(&mut server);
+        server.move_window(surface, 200, 100);
+        chord(&mut server, &[125, 105]);
+        assert_eq!(frame(&server), (0, 0, 640, 800));
+        chord(&mut server, &[125, 106]);
+        assert_eq!(frame(&server), (640, 0, 640, 800));
+        // Down puts it back where it was before the first snap.
+        chord(&mut server, &[125, 108]);
+        assert_eq!(frame(&server), (200, 100, 100, 50));
+        // And on a window that is neither, Down minimizes it.
+        chord(&mut server, &[125, 108]);
+        assert!(server.surfaces[&surface].xdg.as_ref().unwrap().minimized);
+    }
+
+    #[test]
+    fn maximizing_a_snapped_window_restores_to_what_it_had_before_the_snap() {
+        let mut server = Server::new();
+        let (_, surface) = with_focused_window(&mut server);
+        server.move_window(surface, 200, 100);
+        chord(&mut server, &[125, 105]);
+        chord(&mut server, &[125, 103]);
+        chord(&mut server, &[125, 108]);
+        assert_eq!(frame(&server), (200, 100, 100, 50));
+    }
+
+    #[test]
+    fn a_window_dragged_to_an_edge_is_snapped_or_maximized() {
+        let mut server = Server::new();
+        let (_, surface) = with_focused_window(&mut server);
+        server.move_window(surface, 200, 100);
+        server.pointer_motion(250.0, 120.0, 1);
+        server.keyboard_key(125, true, 2, Default::default());
+        server.pointer_button(0x110, true, 3);
+        server.pointer_motion(0.0, 300.0, 4);
+        server.pointer_button(0x110, false, 5);
+        assert_eq!(frame(&server), (0, 0, 640, 800));
+        // Dragged again to the top edge: maximized.
+        server.pointer_motion(100.0, 300.0, 6);
+        server.pointer_button(0x110, true, 7);
+        server.pointer_motion(100.0, 0.0, 8);
+        server.pointer_button(0x110, false, 9);
+        assert!(server.surfaces[&surface].xdg.as_ref().unwrap().maximized);
+    }
+
+    #[test]
+    fn moving_a_snapped_window_restores_its_size_under_the_pointer() {
+        let mut server = Server::new();
+        let (_, surface) = with_focused_window(&mut server);
+        server.move_window(surface, 200, 100);
+        chord(&mut server, &[125, 106]);
+        assert_eq!(frame(&server), (640, 0, 640, 800));
+        server.pointer_motion(960.0, 400.0, 1);
+        server.keyboard_key(125, true, 2, Default::default());
+        server.pointer_button(0x110, true, 3);
+        // The window is 100 by 50 again, the pointer half way along it.
+        assert_eq!(frame(&server), (910, 0, 100, 50));
+        server.pointer_motion(500.0, 300.0, 4);
+        server.pointer_button(0x110, false, 5);
+        assert_eq!(frame(&server), (450, 0, 100, 50));
+        // It is no longer snapped: Down minimizes it.
+        chord(&mut server, &[125, 108]);
+        assert!(server.surfaces[&surface].xdg.as_ref().unwrap().minimized);
+    }
+
+    #[test]
+    fn resizing_a_snapped_window_ends_the_snap() {
+        let mut server = Server::new();
+        let (_, surface) = with_focused_window(&mut server);
+        server.move_window(surface, 200, 100);
+        chord(&mut server, &[125, 105]);
+        // The snapped frame is (0, 0, 640, 800): its right band is at 640.
+        server.pointer_motion(644.0, 400.0, 1);
+        server.pointer_button(0x110, true, 2);
+        server.pointer_motion(700.0, 400.0, 3);
+        server.pointer_button(0x110, false, 4);
+        assert_eq!(frame(&server), (0, 0, 696, 800));
+        chord(&mut server, &[125, 108]);
+        assert!(server.surfaces[&surface].xdg.as_ref().unwrap().minimized);
+    }
+
+    #[test]
+    fn alt_and_f4_close_the_window_but_ctrl_alt_f4_does_not() {
+        let mut server = Server::new();
+        let (_, _) = with_focused_window(&mut server);
+        server.keyboard_key(56, true, 0, Default::default());
+        server.keyboard_key(29, true, 0, Default::default());
+        assert!(!server.shortcut(62, true));
+        server.keyboard_key(29, false, 0, Default::default());
+        assert!(server.shortcut(62, true));
+    }
+
+    #[test]
+    fn shortcut_keys_do_not_reach_clients_and_other_keys_do() {
+        let mut server = Server::new();
+        let (_, _) = with_focused_window(&mut server);
+        server.keyboard_key(125, true, 0, Default::default());
+        assert!(server.shortcut(103, true));
+        // Its release is swallowed once, then keys are the client's again.
+        assert!(server.shortcut(103, false));
+        assert!(!server.shortcut(103, false));
+        assert!(!server.shortcut(30, true));
+    }
+
     #[test]
     fn a_move_request_during_a_grab_changes_nothing() {
         let mut server = Server::new();

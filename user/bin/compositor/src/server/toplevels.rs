@@ -159,7 +159,7 @@ impl Server {
 
     /// Asks the client of the window `surface` to close it, with
     /// `xdg_toplevel.close`, and does nothing else to it.
-    fn close_window(&mut self, surface: SurfaceId) {
+    pub(super) fn close_window(&mut self, surface: SurfaceId) {
         let Some(s) = self.surfaces.get(&surface) else {
             return;
         };

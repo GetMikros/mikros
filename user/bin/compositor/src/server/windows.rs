@@ -25,7 +25,7 @@ pub struct Window {
     pub minimized: bool,
     /// Where the window lay before it was maximized or made fullscreen,
     /// which it goes back to.
-    restore: Option<Rect>,
+    pub(super) restore: Option<Rect>,
     /// Whether the window demands attention: it was mapped below the
     /// focused window, and has not had the keyboard focus since.
     pub attention: bool,
@@ -33,6 +33,9 @@ pub struct Window {
     /// the window's buffer is of another size, until a buffer of that size
     /// comes (MIKSPEC-0074.R15). The buffer's size gives it otherwise.
     pub target: Option<(i32, i32)>,
+    /// The half of the work area that the window was snapped to, until it
+    /// is moved, resized, maximized or restored (MIKSPEC-0074.R11).
+    pub snapped: Option<super::arrange::Snap>,
 }
 
 /// The windows, bottom first.
@@ -123,6 +126,7 @@ impl Server {
                 };
                 match corner {
                     Some(corner) => {
+                        w.snapped = None;
                         w.restore.get_or_insert(before);
                         (w.frame.x, w.frame.y) = corner;
                         // The size is the buffer's, which the client draws
@@ -132,7 +136,10 @@ impl Server {
                         w.frame.height = height;
                     }
                     None => {
-                        if let Some(r) = w.restore.take() {
+                        // A snapped window keeps the frame it had before.
+                        if w.snapped.is_none()
+                            && let Some(r) = w.restore.take()
+                        {
                             (w.frame.x, w.frame.y) = (r.x, r.y);
                         }
                     }
@@ -168,6 +175,7 @@ impl Server {
                 restore: None,
                 attention: !focus,
                 target: None,
+                snapped: None,
             };
             if focus {
                 stack.push(window);
@@ -245,6 +253,21 @@ impl Server {
         if stack.iter().map(|w| w.surface).ne(before) {
             self.restacked.extend(frames);
         }
+    }
+
+    /// Runs `change` on the window of `surface`, when it is mapped.
+    pub(super) fn with_window<R>(
+        &self,
+        surface: SurfaceId,
+        change: impl FnOnce(&mut Window) -> R,
+    ) -> Option<R> {
+        self.windows();
+        self.windows
+            .stack
+            .borrow_mut()
+            .iter_mut()
+            .find(|w| w.surface == surface)
+            .map(change)
     }
 
     /// The frame that the window of `surface` had before it was maximized

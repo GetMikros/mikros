@@ -46,6 +46,9 @@ pub struct Keyboard {
     focus: Option<Focus>,
     pressed: Vec<u32>,
     modifiers: Modifiers,
+    /// The keys whose press was a shortcut of the compositor, which no
+    /// client gets the release of.
+    pub(super) swallowed: std::collections::BTreeSet<u32>,
 }
 
 impl Server {
@@ -278,6 +281,10 @@ impl Server {
         }
         let changed = modifiers != self.keyboard.modifiers;
         self.keyboard.modifiers = modifiers;
+        // The shortcuts of the compositor are not for clients.
+        if self.shortcut(key, pressed) {
+            return;
+        }
         let Some(focus) = self.keyboard.focus else {
             return;
         };

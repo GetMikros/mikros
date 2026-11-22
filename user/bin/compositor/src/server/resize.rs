@@ -51,6 +51,12 @@ impl Server {
         if edges == 0 || fixed {
             return;
         }
+        // Resizing ends a snap, which the frame before it is not kept for.
+        self.with_window(surface, |w| {
+            if w.snapped.take().is_some() {
+                w.restore = None;
+            }
+        });
         self.pointer.resizing = Some(Resize {
             surface,
             edges,

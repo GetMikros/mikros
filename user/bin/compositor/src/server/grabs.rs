@@ -57,7 +57,10 @@ impl Server {
         if xdg.fullscreen {
             return;
         }
-        if xdg.maximized {
+        let snapped = self
+            .with_window(surface, |w| w.snapped.is_some())
+            .unwrap_or(false);
+        if xdg.maximized || snapped {
             self.restore_for_move(surface);
         }
         self.start_move_of_frame(surface, button);
@@ -79,7 +82,7 @@ impl Server {
         self.leave_pointer_focus();
     }
 
-    /// Un-maximizes the window of `surface` and gives it back the frame that
+    /// Un-maximizes or un-snaps the window of `surface` and gives it back the frame that
     /// it had, moved so that the pointer is at the same relative horizontal
     /// place in it, and asks its client for that size.
     fn restore_for_move(&mut self, surface: SurfaceId) {
@@ -92,6 +95,7 @@ impl Server {
         if let Some(xdg) = self.surfaces.get_mut(&surface).and_then(|s| s.xdg.as_mut()) {
             xdg.maximized = false;
         }
+        self.with_window(surface, |w| w.snapped = None);
         let from = window.frame;
         let along = i64::from(self.pointer.x as i32) - i64::from(from.x);
         let x = i64::from(self.pointer.x as i32)
@@ -150,11 +154,22 @@ impl Server {
     /// Ends the move of a window when `button` is the button that moved it,
     /// and says whether it did.
     pub(super) fn end_move(&mut self, button: u32) -> bool {
-        if self.pointer.moving.is_some_and(|m| m.button == button) {
-            self.pointer.moving = None;
-            return true;
+        let Some(moving) = self.pointer.moving.filter(|m| m.button == button) else {
+            return false;
+        };
+        self.pointer.moving = None;
+        // A window dragged to the top edge of the output is maximized, to
+        // the left or right edge snapped to that half (MIKSPEC-0074.R11).
+        let width = self.screen.map_or(0, |(w, _)| w);
+        let (x, y) = (self.pointer.x as i32, self.pointer.y as i32);
+        if y <= 0 {
+            self.maximize_window(moving.surface);
+        } else if x <= 0 {
+            self.snap_window(moving.surface, super::arrange::Snap::Left);
+        } else if width > 0 && x >= width - 1 {
+            self.snap_window(moving.surface, super::arrange::Snap::Right);
         }
-        false
+        true
     }
 
     /// `xdg_toplevel.move` of the toplevel `surface` of `client`, after the

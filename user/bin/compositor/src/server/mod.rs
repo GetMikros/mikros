@@ -8,6 +8,7 @@
 
 mod activation;
 mod area;
+mod arrange;
 mod buffer;
 mod cursor_shape;
 mod damage;
