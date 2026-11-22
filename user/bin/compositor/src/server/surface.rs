@@ -166,7 +166,7 @@ impl SurfaceState {
     /// Makes the damage, past its most rectangles, the one rectangle that
     /// holds them all. Damage and buffer damage count together, as the
     /// compositor takes both in the same coordinates.
-    fn limit_damage(&mut self) {
+    pub(super) fn limit_damage(&mut self) {
         if self.damage.len() + self.buffer_damage.len() <= DAMAGE_MAX {
             return;
         }
@@ -354,7 +354,7 @@ impl Server {
                 if let Some(surface) = self.surfaces.remove(&id) {
                     self.releases.extend(surface.releases());
                 }
-                self.forget_surface_subsurfaces(id);
+                self.forget_surface_subsurfaces(imports, id);
                 self.client_mut(request).destroy(request.object);
                 self.collect(imports);
                 return Ok(());
@@ -477,7 +477,9 @@ impl Server {
         self.check_points(id)?;
         self.check_viewport(id)?;
         let staged = self.stage(id);
-        self.apply(imports, request.client, id, staged);
+        if let Some(staged) = self.hold_or_merge(id, staged) {
+            self.apply(imports, request.client, id, staged);
+        }
         Ok(())
     }
 
@@ -512,7 +514,8 @@ impl Server {
         }
     }
 
-    /// Makes what a commit of `id` staged the surface's current state.
+    /// Makes what a commit of `id` staged the surface's current state,
+    /// which applies what its subsurfaces held.
     fn apply(
         &mut self,
         imports: &mut dyn Imports,
@@ -520,6 +523,13 @@ impl Server {
         id: SurfaceId,
         staged: Staged,
     ) {
+        self.apply_state(client, id, staged);
+        self.cascade(client, id);
+        self.collect(imports);
+    }
+
+    /// Makes what a commit of `id` staged the surface's current state.
+    pub(super) fn apply_state(&mut self, client: super::ClientId, id: SurfaceId, staged: Staged) {
         let Staged {
             state: mut staged_state,
             attached,
@@ -586,8 +596,6 @@ impl Server {
         self.panel_committed(id);
         self.commit_damage(id, changed, waits);
         self.presentation_committed(id, replaced, asked, discarded);
-        self.subsurfaces.apply_family(id);
-        self.collect(imports);
     }
 
     /// Shows, on each surface, the newest of the buffers that wait whose

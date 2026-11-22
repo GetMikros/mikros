@@ -101,7 +101,7 @@ impl Server {
     }
 
     /// Tells `feedback` that its content was not shown.
-    fn discard_listed(&mut self, feedback: Vec<(ClientId, ObjectId)>) {
+    pub(super) fn discard_listed(&mut self, feedback: Vec<(ClientId, ObjectId)>) {
         for (client, feedback) in feedback {
             if let Some(c) = self.clients.get_mut(&client) {
                 wp_presentation_feedback::send_discarded(&mut c.out, feedback);

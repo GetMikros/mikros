@@ -140,10 +140,12 @@ impl Server {
             return Ok(());
         };
         let viewport = s.pending.viewport;
+        // The newest buffer that was attached, which a commit may have
+        // staged, held or made wait, as well as shown.
         let buffer = if s.attached {
             s.pending.buffer
         } else {
-            s.current.buffer
+            s.pending.buffer.or(s.current.buffer)
         };
         let Some(&(width, height)) = buffer.and_then(|b| self.buffer_sizes.get(&b)) else {
             return Ok(());

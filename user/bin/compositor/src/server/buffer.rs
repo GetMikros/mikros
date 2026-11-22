@@ -342,6 +342,11 @@ impl Server {
                 timelines.extend([w.acquire].iter().chain(&w.release).map(|p| p.timeline));
             }
         }
+        for held in self.subsurfaces.held() {
+            buffers.extend(held.state.buffer.filter(|_| held.attached));
+            let points = held.state.acquire.iter().chain(&held.state.release);
+            timelines.extend(points.map(|p| p.timeline));
+        }
         timelines.extend(self.releases.iter().map(|p| p.timeline));
         self.imported_buffers.retain(|b| {
             let used = buffers.contains(b);

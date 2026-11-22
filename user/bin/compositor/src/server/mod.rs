@@ -599,7 +599,7 @@ impl Server {
             | Resource::DataDevice
             | Resource::DataOffer => self.data_request(request, resource, args)?,
             Resource::Subcompositor | Resource::Subsurface(_) => {
-                self.subsurface_request(request, resource, args)?
+                self.subsurface_request(imports, request, resource, args)?
             }
             Resource::Presentation => self.presentation_request(request, args)?,
             Resource::Feedback => {

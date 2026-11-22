@@ -3,13 +3,18 @@
 //! in a stack with its parent and its siblings. A subsurface's position
 //! and its place in the stack, which its requests change, take effect
 //! when its parent's state is next applied. A subsurface starts on top,
-//! in synchronized mode.
+//! in synchronized mode, in which what its commits bring is held until its
+//! parent's state is applied; a subsurface whose ancestor is synchronized
+//! is held too. The held state of later commits merges into the earlier:
+//! the last buffer wins and the earlier one is given up, and damage and
+//! frame callbacks add up.
 //!
 //! A subsurface that was destroyed stops being a subsurface at once,
 //! though its surface keeps the role; a surface whose parent was
 //! destroyed keeps its `wl_subsurface` object, which does nothing more.
 
-use super::{ClientId, ProtocolError, Request, Resource, Role, Server, SurfaceId};
+use super::surface::Staged;
+use super::{ClientId, Imports, ProtocolError, Request, Resource, Role, Server, SurfaceId};
 use crate::wayland::protocols::{wl_subcompositor, wl_subsurface, wl_surface};
 use crate::wayland::wire::{Arg, ObjectId};
 use std::collections::BTreeMap;
@@ -26,6 +31,9 @@ struct Sub {
     sync: bool,
     position: (i32, i32),
     pending_position: (i32, i32),
+    /// What its commits brought since its parent's state was applied,
+    /// while its mode and its ancestors' hold them.
+    staged: Option<Staged>,
 }
 
 /// The stack of a parent and its subsurfaces, bottom first, as applied
@@ -68,16 +76,55 @@ impl Subsurfaces {
     }
 
     /// Takes `surface` out of the stacks of its parent, and forgets it.
-    fn remove(&mut self, surface: SurfaceId) {
-        let Some(sub) = self.subs.remove(&surface) else {
-            return;
-        };
+    fn remove(&mut self, surface: SurfaceId) -> Option<Sub> {
+        let sub = self.subs.remove(&surface)?;
         if let Some(family) = sub.parent.and_then(|p| self.families.get_mut(&p)) {
             family.order.retain(|&s| s != surface);
             if let Some(pending) = &mut family.pending {
                 pending.retain(|&s| s != surface);
             }
         }
+        Some(sub)
+    }
+
+    /// Whether the commits of `surface` are held: it is a subsurface
+    /// with a parent, and it or an ancestor is synchronized. A
+    /// subsurface without a parent is not held.
+    fn is_synchronized(&self, surface: SurfaceId) -> bool {
+        let mut at = surface;
+        for _ in 0..=self.subs.len() {
+            let Some(sub) = self.subs.get(&at) else {
+                return false;
+            };
+            let Some(parent) = sub.parent else {
+                return false;
+            };
+            if sub.sync {
+                return true;
+            }
+            at = parent;
+        }
+        false
+    }
+
+    /// The subsurfaces of `parent` in its applied stack, bottom first.
+    fn children(&self, parent: SurfaceId) -> Vec<SurfaceId> {
+        self.families.get(&parent).map_or_else(Vec::new, |f| {
+            f.order.iter().copied().filter(|&s| s != parent).collect()
+        })
+    }
+
+    /// Every subsurface of `parent`, whether or not its stack has been
+    /// applied since it became one.
+    fn all_children(&self, parent: SurfaceId) -> Vec<SurfaceId> {
+        let of_parent = |sub: &&Sub| sub.parent == Some(parent);
+        let children = self.subs.iter().filter(|(_, sub)| of_parent(sub));
+        children.map(|(&child, _)| child).collect()
+    }
+
+    /// What the subsurfaces hold, for the buffers and points in use.
+    pub(super) fn held(&self) -> impl Iterator<Item = &Staged> {
+        self.subs.values().filter_map(|s| s.staged.as_ref())
     }
 
     /// Makes the requested stack and the requested positions of the
@@ -108,6 +155,7 @@ impl Subsurfaces {
 impl Server {
     pub(super) fn subsurface_request(
         &mut self,
+        imports: &mut dyn Imports,
         request: Request,
         resource: Resource,
         args: Vec<Arg>,
@@ -130,7 +178,7 @@ impl Server {
             Resource::Subsurface(surface) => {
                 let decoded =
                     wl_subsurface::Request::decode(request.opcode, args).map_err(invalid)?;
-                self.subsurface(request, surface, decoded)
+                self.subsurface(imports, request, surface, decoded)
             }
             _ => unreachable!("subsurface_request handles subsurfaces"),
         }
@@ -181,6 +229,7 @@ impl Server {
                 sync: true,
                 position: (0, 0),
                 pending_position: (0, 0),
+                staged: None,
             },
         );
         self.subsurfaces.pending_stack(parent).push(child);
@@ -189,6 +238,7 @@ impl Server {
 
     fn subsurface(
         &mut self,
+        imports: &mut dyn Imports,
         request: Request,
         surface: SurfaceId,
         decoded: wl_subsurface::Request,
@@ -202,8 +252,8 @@ impl Server {
             .is_some_and(|s| s.object == request.object);
         if matches!(decoded, wl_subsurface::Request::Destroy) {
             self.client_mut(request).destroy(request.object);
-            if live {
-                self.subsurfaces.remove(surface);
+            if live && let Some(sub) = self.subsurfaces.remove(surface) {
+                self.give_up_held(surface, sub);
             }
             return Ok(());
         }
@@ -225,7 +275,10 @@ impl Server {
                 self.place_subsurface(request, surface, parent, sibling, 0)?;
             }
             wl_subsurface::Request::SetSync => self.set_sync(surface, true),
-            wl_subsurface::Request::SetDesync => self.set_sync(surface, false),
+            wl_subsurface::Request::SetDesync => {
+                self.set_sync(surface, false);
+                self.flush_held(imports, request.client, surface);
+            }
         }
         Ok(())
     }
@@ -267,16 +320,158 @@ impl Server {
     }
 
     /// Forgets the subsurface of `surface`, which was destroyed, and
-    /// leaves its subsurfaces without a parent.
-    pub(super) fn forget_surface_subsurfaces(&mut self, surface: SurfaceId) {
-        self.subsurfaces.remove(surface);
-        if let Some(family) = self.subsurfaces.families.remove(&surface) {
-            for child in family.order {
-                if let Some(sub) = self.subsurfaces.subs.get_mut(&child) {
-                    sub.parent = None;
+    /// leaves its subsurfaces without a parent, which applies what they
+    /// held.
+    pub(super) fn forget_surface_subsurfaces(
+        &mut self,
+        imports: &mut dyn Imports,
+        surface: SurfaceId,
+    ) {
+        if let Some(sub) = self.subsurfaces.remove(surface) {
+            self.give_up_held(surface, sub);
+        }
+        self.subsurfaces.families.remove(&surface);
+        let children: Vec<SurfaceId> = self
+            .subsurfaces
+            .subs
+            .iter()
+            .filter(|(_, sub)| sub.parent == Some(surface))
+            .map(|(&child, _)| child)
+            .collect();
+        for child in children {
+            let Some(sub) = self.subsurfaces.subs.get_mut(&child) else {
+                continue;
+            };
+            sub.parent = None;
+            let client = sub.client;
+            self.flush_held(imports, client, child);
+        }
+    }
+
+    /// What a subsurface that is gone held: the release points of its
+    /// buffer, its frame callbacks, which the next frame answers, and its
+    /// presentation feedback, which is discarded.
+    fn give_up_held(&mut self, surface: SurfaceId, sub: Sub) {
+        let Some(held) = sub.staged else {
+            return;
+        };
+        self.releases.extend(held.state.release);
+        if let Some(s) = self.surfaces.get_mut(&surface) {
+            s.frames.extend(held.frames);
+        }
+        self.discard_listed(held.asked);
+    }
+
+    /// Takes what `staged` brings, from a commit of `surface`, that its
+    /// mode and its ancestors hold, into what it held, and returns what
+    /// to apply now: nothing while it is held, otherwise the commit and
+    /// what was held, merged.
+    pub(super) fn hold_or_merge(&mut self, surface: SurfaceId, staged: Staged) -> Option<Staged> {
+        let held = self
+            .subsurfaces
+            .subs
+            .get_mut(&surface)
+            .map(|sub| sub.staged.take());
+        let Some(held) = held else {
+            return Some(staged);
+        };
+        let merged = match held {
+            Some(held) => self.merge_staged(held, staged),
+            None => staged,
+        };
+        if self.subsurfaces.is_synchronized(surface) {
+            if let Some(sub) = self.subsurfaces.subs.get_mut(&surface) {
+                sub.staged = Some(merged);
+            }
+            return None;
+        }
+        Some(merged)
+    }
+
+    /// `later`, a commit after `earlier`, on top of `earlier`: the state
+    /// that stays pending and the last buffer are the later's, a buffer
+    /// that the later replaces is given up with its release point and its
+    /// presentation feedback, and damage and frame callbacks add up.
+    fn merge_staged(&mut self, earlier: Staged, later: Staged) -> Staged {
+        let Staged {
+            mut state,
+            attached,
+            mut frames,
+            mut asked,
+        } = later;
+        let mut damage = earlier.state.damage;
+        damage.extend(std::mem::take(&mut state.damage));
+        let mut buffer_damage = earlier.state.buffer_damage;
+        buffer_damage.extend(std::mem::take(&mut state.buffer_damage));
+        state.damage = damage;
+        state.buffer_damage = buffer_damage;
+        let mut earlier_frames = earlier.frames;
+        earlier_frames.append(&mut frames);
+        let mut earlier_asked = earlier.asked;
+        let mut attached_now = attached;
+        if attached {
+            if earlier.attached {
+                self.releases.extend(earlier.state.release);
+                self.discard_listed(std::mem::take(&mut earlier_asked));
+            }
+        } else {
+            // The buffer is the earlier commit's.
+            state.buffer = earlier.state.buffer;
+            state.acquire = earlier.state.acquire;
+            state.release = earlier.state.release;
+            attached_now = earlier.attached;
+        }
+        earlier_asked.append(&mut asked);
+        state.limit_damage();
+        Staged {
+            state,
+            attached: attached_now,
+            frames: earlier_frames,
+            asked: earlier_asked,
+        }
+    }
+
+    /// Applies what the subsurfaces below `parent`, which `parent`'s state
+    /// that was just applied releases, held, and installs their stacks and
+    /// positions, parents first.
+    pub(super) fn cascade(&mut self, client: ClientId, parent: SurfaceId) {
+        let mut work = vec![parent];
+        while let Some(at) = work.pop() {
+            self.subsurfaces.apply_family(at);
+            let children = self.subsurfaces.children(at);
+            for &child in &children {
+                let held = self
+                    .subsurfaces
+                    .subs
+                    .get_mut(&child)
+                    .and_then(|s| s.staged.take());
+                if let Some(held) = held {
+                    self.apply_state(client, child, held);
                 }
             }
+            work.extend(children.into_iter().rev());
         }
+    }
+
+    /// Applies what the subsurfaces below `surface`, and it, hold that
+    /// they no longer need to, after a change of mode or of parent.
+    fn flush_held(&mut self, imports: &mut dyn Imports, client: ClientId, surface: SurfaceId) {
+        let mut work = vec![surface];
+        while let Some(at) = work.pop() {
+            let free = !self.subsurfaces.is_synchronized(at);
+            let held = self
+                .subsurfaces
+                .subs
+                .get_mut(&at)
+                .filter(|_| free)
+                .and_then(|s| s.staged.take());
+            if let Some(held) = held {
+                self.apply_state(client, at, held);
+                self.cascade(client, at);
+            }
+            work.extend(self.subsurfaces.all_children(at));
+        }
+        self.collect(imports);
     }
 
     /// Forgets the subsurfaces and stacks of `client`, which went.
@@ -291,6 +486,7 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Point;
     use super::super::tests::TestClient;
     use super::*;
     use crate::wayland::protocols::wl_compositor;
@@ -472,5 +668,151 @@ mod tests {
         server.disconnect(&mut super::super::tests::FakeImports::default(), client.id);
         assert!(server.subsurfaces.subs.is_empty());
         assert!(server.subsurfaces.families.is_empty());
+    }
+    /// Attaches the buffer `buffer`, of 10 by 10 pixels, to the surface of
+    /// `object` as a request would, with the release point `release`.
+    fn attach(server: &mut Server, object: ObjectId, buffer: u64, release: Option<u64>) {
+        let id = surface(server, object);
+        server.buffer_sizes.insert(buffer, (10, 10));
+        server.imported_buffers.insert(buffer);
+        let s = server.surfaces.get_mut(&id).unwrap();
+        s.pending.buffer = Some(buffer);
+        s.pending.release = release.map(|value| Point { timeline: 1, value });
+        s.attached = true;
+    }
+
+    fn shown_buffer(server: &Server, object: ObjectId) -> Option<u64> {
+        server.surfaces[&surface(server, object)].current.buffer
+    }
+
+    #[test]
+    fn a_synchronized_commit_waits_for_the_parents() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 10, 6, 5);
+        attach(&mut server, 6, 1, None);
+        // A frame callback of the child, which the child's commit brings.
+        client.send(&mut server, 6, 3, vec![Arg::NewId(NewId(20))]);
+        commit(&mut server, &client, 6);
+        server.frames_done(5);
+        assert_eq!(shown_buffer(&server, 6), None);
+        let child = surface(&server, 6);
+        assert!(server.surfaces[&child].frames.is_empty());
+        assert!(server.subsurfaces.subs[&child].staged.is_some());
+        commit(&mut server, &client, 5);
+        assert_eq!(shown_buffer(&server, 6), Some(1));
+        assert!(server.subsurfaces.subs[&child].staged.is_none());
+        assert_eq!(server.surfaces[&child].frames, [20]);
+    }
+
+    #[test]
+    fn held_commits_merge_with_the_last_buffer_and_the_damage_of_all() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 10, 6, 5);
+        attach(&mut server, 6, 1, Some(5));
+        client.send(&mut server, 6, 2, Vec::from([0, 0, 2, 2].map(Arg::Int)));
+        commit(&mut server, &client, 6);
+        attach(&mut server, 6, 2, Some(7));
+        client.send(&mut server, 6, 2, Vec::from([4, 4, 2, 2].map(Arg::Int)));
+        commit(&mut server, &client, 6);
+        // The first buffer was never shown: its release point is due.
+        assert_eq!(
+            server.take_releases(),
+            [Point {
+                timeline: 1,
+                value: 5
+            }]
+        );
+        commit(&mut server, &client, 5);
+        let child = surface(&server, 6);
+        let current = &server.surfaces[&child].current;
+        assert_eq!(current.buffer, Some(2));
+        assert_eq!(
+            current.release,
+            Some(Point {
+                timeline: 1,
+                value: 7
+            })
+        );
+        assert_eq!(current.damage.len(), 2);
+        assert_eq!(client.error(&mut server), None);
+    }
+
+    #[test]
+    fn a_desynchronized_commit_applies_at_once_and_so_does_what_was_held() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 10, 6, 5);
+        attach(&mut server, 6, 1, None);
+        commit(&mut server, &client, 6);
+        assert_eq!(shown_buffer(&server, 6), None);
+        // Desynchronizing applies what it held.
+        client.send(&mut server, 10, 5, vec![]);
+        assert_eq!(shown_buffer(&server, 6), Some(1));
+        attach(&mut server, 6, 2, None);
+        commit(&mut server, &client, 6);
+        assert_eq!(shown_buffer(&server, 6), Some(2));
+        // Synchronized again, it waits again.
+        client.send(&mut server, 10, 4, vec![]);
+        attach(&mut server, 6, 3, None);
+        commit(&mut server, &client, 6);
+        assert_eq!(shown_buffer(&server, 6), Some(2));
+    }
+
+    #[test]
+    fn a_subsurface_below_a_synchronized_one_is_held_with_it() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 10, 6, 5);
+        get(&mut server, &client, 11, 7, 6);
+        // The grandchild is desynchronized, but its parent holds it.
+        client.send(&mut server, 11, 5, vec![]);
+        attach(&mut server, 7, 1, None);
+        commit(&mut server, &client, 7);
+        attach(&mut server, 6, 2, None);
+        commit(&mut server, &client, 6);
+        assert_eq!(
+            (shown_buffer(&server, 6), shown_buffer(&server, 7)),
+            (None, None)
+        );
+        commit(&mut server, &client, 5);
+        assert_eq!(
+            (shown_buffer(&server, 6), shown_buffer(&server, 7)),
+            (Some(2), Some(1))
+        );
+    }
+
+    #[test]
+    fn what_a_subsurface_held_is_applied_when_its_parent_is_destroyed() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 10, 6, 5);
+        attach(&mut server, 6, 1, None);
+        commit(&mut server, &client, 6);
+        client.send(&mut server, 5, 0, vec![]);
+        assert_eq!(shown_buffer(&server, 6), Some(1));
+        // Without a parent it applies at once.
+        attach(&mut server, 6, 2, None);
+        commit(&mut server, &client, 6);
+        assert_eq!(shown_buffer(&server, 6), Some(2));
+    }
+
+    #[test]
+    fn a_held_buffer_stays_imported_and_a_destroyed_subsurface_gives_its_release_up() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        get(&mut server, &client, 10, 6, 5);
+        attach(&mut server, 6, 1, Some(9));
+        commit(&mut server, &client, 6);
+        assert!(client.imports.borrow().dropped_buffers.is_empty());
+        client.send(&mut server, 10, 0, vec![]);
+        assert_eq!(
+            server.take_releases(),
+            [Point {
+                timeline: 1,
+                value: 9
+            }]
+        );
     }
 }
