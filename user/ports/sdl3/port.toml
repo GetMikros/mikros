@@ -9,15 +9,17 @@
 #   have, though for the libraries of cursor themes and EGL windows,
 #   which its libwayland has;
 # - Vulkan is offered on Mikros, with the loader libvulkan.dlib;
-# - SDL_CloseFileDialogs closes the file dialogs that are still open.
+# - SDL_CloseFileDialogs closes the file dialogs that are still open;
+# - the Wayland driver does not dereference a missing data device when the
+#   keyboard leaves a window.
 # Only the Wayland video driver is built, with the dummy and offscreen
 # ones, and no audio but the dummy and disk drivers; libwayland and
 # xkbcommon are linked, not loaded when they are first used.
 
 [source]
-url = "https://github.com/GetMikros/SDL/archive/8c694bf30681a46e39e212d88fad4d9d362fc5b5.tar.gz"
-sha256 = "a9c103fee8950204baebdf1aa6e6f7f59bfcfdff9d515e229c0a0c4fbdb1e739"
-dir = "SDL-8c694bf30681a46e39e212d88fad4d9d362fc5b5"
+url = "https://github.com/GetMikros/SDL/archive/617f74c8dd08ff576ba876c5a23208e0f9092d94.tar.gz"
+sha256 = "49c224872e5b4309a9b93366b4b673f6daf48d10ee31273c44c2cf4e66a0254f"
+dir = "SDL-617f74c8dd08ff576ba876c5a23208e0f9092d94"
 
 [build]
 options = [
