@@ -48,7 +48,8 @@ pub(super) struct Windows {
 
 impl Server {
     /// The work area of the output: its rectangle minus the exclusive
-    /// zones of its configured panels (MIKSPEC-0074.R2).
+    /// zones of its configured panels and of its layer surfaces
+    /// (MIKSPEC-0074.R29).
     pub fn work_area(&self) -> Rect {
         let screen = self.screen.unwrap_or((0, 0));
         let mut area = Rect {
@@ -78,6 +79,9 @@ impl Server {
                 }
                 Edge::Right => area.width = area.width.saturating_sub(zone.width.max(0)),
             }
+        }
+        for (edge, depth) in self.layers.reservations() {
+            super::layer::reserve(&mut area, edge, depth);
         }
         area.width = area.width.max(0);
         area.height = area.height.max(0);

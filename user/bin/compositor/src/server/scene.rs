@@ -107,7 +107,44 @@ impl Server {
                 blur: s.current.materials.blur.rects().to_vec(),
             }
         };
-        let mut shown_windows = Vec::new();
+        // The layers, bottom to top: those of the layer surfaces below the
+        // windows, the windows, the panels, the layer `top`, the active
+        // fullscreen window, and the layer `overlay` (MIKSPEC-0076.R24).
+        let layer = |layer: u32| -> Vec<Shown> {
+            let mut mapped: Vec<(u64, SurfaceId)> = self
+                .layers
+                .surfaces
+                .iter()
+                .filter(|(_, l)| l.current.layer == layer)
+                .filter_map(|(&id, l)| Some((l.mapped_at?, id)))
+                .collect();
+            mapped.sort_unstable();
+            let mut out = Vec::new();
+            for (_, id) in mapped {
+                let Some(s) = self.surfaces.get(&id) else {
+                    continue;
+                };
+                let Some(buffer) = s.current.buffer else {
+                    continue;
+                };
+                let extent = self.extent(s);
+                let Some(place) = self.layer_place(id, extent) else {
+                    continue;
+                };
+                let own = shown(id, id, buffer, place.x, place.y, None, s);
+                self.push_tree(own, &shown, &mut out);
+            }
+            out
+        };
+        let active = self.keyboard_focus().filter(|&f| {
+            self.surfaces
+                .get(&f)
+                .and_then(|s| s.xdg.as_ref())
+                .is_some_and(|x| x.fullscreen)
+        });
+        let mut shown_windows = layer(0);
+        shown_windows.extend(layer(1));
+        let mut fullscreen = Vec::new();
         for window in self.windows().into_iter().filter(|w| !w.minimized) {
             let Some(s) = self.surfaces.get(&window.surface) else {
                 continue;
@@ -118,7 +155,12 @@ impl Server {
             let dest = Some((window.frame.width, window.frame.height));
             let (id, x, y) = (window.surface, window.frame.x, window.frame.y);
             let own = shown(id, id, buffer, x, y, dest, s);
-            self.push_tree(own, &shown, &mut shown_windows);
+            let out = if active == Some(id) {
+                &mut fullscreen
+            } else {
+                &mut shown_windows
+            };
+            self.push_tree(own, &shown, out);
         }
         for (&id, s) in &self.surfaces {
             let Some(buffer) = s.current.buffer else {
@@ -133,6 +175,9 @@ impl Server {
                 _ => {}
             }
         }
+        shown_windows.extend(layer(2));
+        shown_windows.extend(fullscreen);
+        shown_windows.extend(layer(3));
         shown_windows
     }
 }

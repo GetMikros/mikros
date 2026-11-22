@@ -210,10 +210,13 @@ pub(super) struct Layers {
 }
 
 impl Layers {
-    /// The reservations of the layer surfaces that are shown, as the edge
+    /// The reservations of the layer surfaces that are mapped, as the edge
     /// and the depth.
     pub(super) fn reservations(&self) -> Vec<(u32, i32)> {
-        let shown = self.surfaces.values().filter(|l| l.configured && !l.closed);
+        let shown = self
+            .surfaces
+            .values()
+            .filter(|l| l.configured && !l.closed && l.mapped_at.is_some());
         shown.filter_map(|l| l.current.reserved()).collect()
     }
 }
@@ -796,5 +799,144 @@ mod tests {
         // It can have a layer surface again.
         get(&mut server, &client, 3);
         assert_eq!(client.error(&mut server), None);
+    }
+
+    /// Makes the surface `surface` (a new one) a layer surface `object` in
+    /// `layer`, anchored as `anchor`, of `size`, with the exclusive zone
+    /// `zone`, and maps it with a buffer of that size.
+    fn map(
+        server: &mut Server,
+        client: &TestClient,
+        surface: u32,
+        object: u32,
+        layer: u32,
+        (anchor, size, zone): (u32, (u32, u32), i32),
+    ) -> SurfaceId {
+        client.send(server, 3, 0, vec![Arg::NewId(NewId(surface))]);
+        let args = vec![
+            Arg::NewId(NewId(object)),
+            Arg::Object(Some(surface)),
+            Arg::Object(None),
+            Arg::Uint(layer),
+            Arg::String(Some("test".into())),
+        ];
+        client.send(server, 4, 0, args);
+        client.send(
+            server,
+            object,
+            0,
+            vec![Arg::Uint(size.0), Arg::Uint(size.1)],
+        );
+        client.send(server, object, 1, vec![Arg::Uint(anchor)]);
+        client.send(server, object, 2, vec![Arg::Int(zone)]);
+        client.send(server, surface, 6, vec![]);
+        let sent = client.events(server, &|id| match id {
+            1 => &wl_display::EVENTS,
+            2 => &wl_registry::EVENTS,
+            id if id >= 10 => &surface_v1::EVENTS,
+            _ => &wl_callback::EVENTS,
+        });
+        let configure = sent.iter().find(|e| e.0 == object).unwrap();
+        let Arg::Uint(serial) = configure.2[0] else {
+            panic!("a serial");
+        };
+        client.send(server, object, 6, vec![Arg::Uint(serial)]);
+        let id = *server
+            .surfaces
+            .iter()
+            .find(|(_, s)| s.object == surface)
+            .unwrap()
+            .0;
+        let buffer = u64::from(surface);
+        server
+            .buffer_sizes
+            .insert(buffer, (size.0.max(10), size.1.max(10)));
+        let s = server.surfaces.get_mut(&id).unwrap();
+        s.pending.buffer = Some(buffer);
+        s.attached = true;
+        client.send(server, surface, 6, vec![]);
+        id
+    }
+
+    const TOP_BAR: (u32, (u32, u32), i32) = (ANCHOR_TOP | ANCHOR_LEFT | ANCHOR_RIGHT, (0, 40), 40);
+
+    #[test]
+    fn stacks_the_layers_around_the_windows_and_later_mapped_surfaces_above() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        let window = *server.surfaces.keys().next().unwrap();
+        {
+            let s = server.surfaces.get_mut(&window).unwrap();
+            s.role = Role::Toplevel;
+            s.current.buffer = Some(99);
+            server.buffer_sizes.insert(99, (100, 50));
+        }
+        let overlay = map(&mut server, &client, 20, 30, 3, (0, (50, 50), 0));
+        let top_a = map(&mut server, &client, 21, 31, 2, (0, (50, 50), 0));
+        let background = map(&mut server, &client, 22, 32, 0, (0, (50, 50), 0));
+        let bottom = map(&mut server, &client, 23, 33, 1, (0, (50, 50), 0));
+        let top_b = map(&mut server, &client, 24, 34, 2, (0, (50, 50), 0));
+        assert_eq!(client.error(&mut server), None);
+        let order: Vec<SurfaceId> = server.shown().iter().map(|s| s.surface).collect();
+        assert_eq!(order, [background, bottom, window, top_a, top_b, overlay]);
+    }
+
+    #[test]
+    fn an_active_fullscreen_window_lies_between_the_top_and_the_overlay_layers() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        let window = *server.surfaces.keys().next().unwrap();
+        {
+            let s = server.surfaces.get_mut(&window).unwrap();
+            s.role = Role::Toplevel;
+            s.current.buffer = Some(99);
+            s.xdg = Some(super::super::xdg::XdgState::windowed(None, false));
+            s.xdg.as_mut().unwrap().fullscreen = true;
+            server.buffer_sizes.insert(99, (100, 50));
+        }
+        let top = map(&mut server, &client, 21, 31, 2, (0, (50, 50), 0));
+        let overlay = map(&mut server, &client, 20, 30, 3, (0, (50, 50), 0));
+        let order = |server: &Server| -> Vec<SurfaceId> {
+            server.shown().iter().map(|s| s.surface).collect()
+        };
+        // Without the focus the window is one of the others.
+        assert_eq!(order(&server), [window, top, overlay]);
+        server.focus_keyboard(Some(window));
+        // With it, it covers the layer `top`.
+        assert_eq!(order(&server), [top, window, overlay]);
+    }
+
+    #[test]
+    fn the_exclusive_zones_of_layers_above_the_windows_leave_the_work_area() {
+        let mut server = Server::new();
+        let client = connect(&mut server);
+        let full = server.work_area();
+        assert_eq!((full.width, full.height), (1280, 800));
+        map(&mut server, &client, 20, 30, 2, TOP_BAR);
+        let area = server.work_area();
+        assert_eq!(
+            (area.x, area.y, area.width, area.height),
+            (0, 40, 1280, 760)
+        );
+        // Zones on one edge add up, and layers below the windows have none.
+        map(&mut server, &client, 21, 31, 3, TOP_BAR);
+        map(
+            &mut server,
+            &client,
+            22,
+            32,
+            1,
+            (ANCHOR_LEFT | ANCHOR_TOP | ANCHOR_BOTTOM, (30, 0), 30),
+        );
+        let area = server.work_area();
+        assert_eq!(
+            (area.x, area.y, area.width, area.height),
+            (0, 80, 1280, 720)
+        );
+        // A closed one leaves it free again.
+        let id = *server.layers.surfaces.keys().next().unwrap();
+        server.close_layer(id);
+        let area = server.work_area();
+        assert_eq!(area.y, 40);
     }
 }
