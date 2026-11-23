@@ -610,12 +610,14 @@ async fn set_grant(
         };
         inner.manage_grants(caller, reason).await?;
     }
-    let revoked = inner.store.borrow_mut().set_grant(&grant);
+    let revoked = inner.store.borrow_mut().set_grant_revoking(&grant);
     inner.files.changed();
     // Only once those that watch with confirmation have stopped access
-    // (MIKSPEC-0037.R34).
-    if let Some(revoked) = revoked.map_err(status)? {
-        let pending = inner.revoked(&revoked);
+    // (MIKSPEC-0037.R34), within one time limit for all of them
+    // (MIKSPEC-0037.R57).
+    let revoked = revoked.map_err(status)?;
+    if !revoked.is_empty() {
+        let pending = revoked.iter().flat_map(|r| inner.revoked(r)).collect();
         inner.confirmed(pending).await;
     }
     Ok(BrokerSetGrantResponse {})

@@ -44,6 +44,18 @@ pub fn via(caller_app: &str, caller_koid: u64, client_koid: u64) -> String {
 /// The app ID of the service manager, which the broker trusts from its
 /// start.
 pub const SERVICE_MANAGER: &str = "system.servicemgr";
+/// The permission that holds the user's folders too (MIKSPEC-0037.R57).
+pub const FULL_DISK: &str = "user.full_disk.access";
+/// The folder permissions that `FULL_DISK` answers for (MIKSPEC-0037.R57).
+pub const FOLDERS: [&str; 7] = [
+    "user.desktop.access",
+    "user.documents.access",
+    "user.downloads.access",
+    "user.pictures.access",
+    "user.music.access",
+    "user.videos.access",
+    "user.developer.access",
+];
 /// The app ID of the process manager, whose questions name no service.
 pub const PROCESS_MANAGER: &str = "system.processmgr";
 /// The permissions the service manager holds from the start.
@@ -398,6 +410,9 @@ impl Store {
             Scope::System | Scope::Admin if self.system_of(client, permission) => Decision::Allowed,
             Scope::Admin if self.holds(client, permission) => Decision::Allowed,
             Scope::System | Scope::Admin => Decision::Undetermined,
+            Scope::User if FOLDERS.contains(&permission) && self.full_disk(client) => {
+                Decision::Allowed
+            }
             Scope::User => grant,
             Scope::Default if grant == Decision::Denied => Decision::Denied,
             Scope::Default => Decision::Allowed,
@@ -408,6 +423,15 @@ impl Store {
             _ if elevated => (Decision::Allowed, true),
             _ => (decision, false),
         })
+    }
+
+    /// Whether `client` holds `FULL_DISK` with an `ALLOWED` grant, or, a
+    /// build, as held for its process (MIKSPEC-0037.R57).
+    fn full_disk(&self, client: Identity<'_>) -> bool {
+        match client.build() {
+            true => self.holds(client, FULL_DISK),
+            false => self.grant(client, FULL_DISK) == Decision::Allowed,
+        }
     }
 
     /// What a request for `permission` by `client` comes to, and whether
@@ -497,6 +521,32 @@ impl Store {
             app_id: grant.app_id.clone(),
             permission: grant.permission.clone(),
         }))
+    }
+
+    /// Sets the grant `grant` as `set_grant` does, and returns everything
+    /// that it takes away: besides its own permission, when it changes
+    /// `FULL_DISK` from `ALLOWED`, each folder permission that the user and
+    /// app have no `ALLOWED` grant of their own for (MIKSPEC-0037.R57).
+    pub fn set_grant_revoking(&mut self, grant: &Grant) -> Result<Vec<Revoked>, Failure> {
+        let mut taken: Vec<Revoked> = self.set_grant(grant)?.into_iter().collect();
+        if grant.permission == FULL_DISK && !taken.is_empty() {
+            for folder in FOLDERS {
+                let own = self.grants.get(&(
+                    grant.user,
+                    grant.app_id.clone(),
+                    String::new(),
+                    folder.into(),
+                ));
+                if own != Some(&Decision::Allowed) {
+                    taken.push(Revoked {
+                        user: grant.user,
+                        app_id: grant.app_id.clone(),
+                        permission: folder.into(),
+                    });
+                }
+            }
+        }
+        Ok(taken)
     }
 
     /// Stores `decision`, `ALLOWED` or `DENIED`, and returns the one it

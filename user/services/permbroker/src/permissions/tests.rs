@@ -782,3 +782,79 @@ fn a_question_names_the_service_that_asks_for_a_client() {
     assert_eq!(via("system.devicemgr", 5, 6), "system.devicemgr");
     assert_eq!(via(PROCESS_MANAGER, 5, 6), "");
 }
+
+#[test]
+fn full_disk_answers_for_the_folders_whatever_their_grants() {
+    let mut s = store();
+    let check = |s: &Store, permission: &str| s.check(id(APP), permission).map(|d| d.0);
+    for folder in FOLDERS {
+        assert_eq!(check(&s, folder), Ok(Decision::Undetermined));
+    }
+    s.set_grant(&grant(1, FULL_DISK, Decision::Allowed))
+        .unwrap();
+    s.set_grant(&grant(1, "user.pictures.access", Decision::Denied))
+        .unwrap();
+    for folder in FOLDERS {
+        assert_eq!(check(&s, folder), Ok(Decision::Allowed));
+        let asked = s.request(id(APP), folder).map(|r| r.0);
+        assert_eq!(asked, Ok(Requested::Decided(Decision::Allowed)));
+    }
+    // Neither the volumes nor another user's app are covered.
+    assert_eq!(check(&s, "user.volumes.access"), Ok(Decision::Undetermined));
+    let other = Identity { user: 2, ..id(APP) };
+    assert_eq!(
+        s.check(other, FOLDERS[0]).map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+    s.set_grant(&grant(1, FULL_DISK, Decision::Denied)).unwrap();
+    assert_eq!(check(&s, "user.pictures.access"), Ok(Decision::Denied));
+}
+
+#[test]
+fn a_build_gets_the_folders_through_the_full_disk_it_holds() {
+    let mut s = store();
+    let build = Identity {
+        checksum: "build",
+        ..id(APP)
+    };
+    assert_eq!(
+        s.check(build, FOLDERS[1]).map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+    s.record(build, FULL_DISK, true);
+    assert_eq!(
+        s.check(build, FOLDERS[1]).map(|d| d.0),
+        Ok(Decision::Allowed)
+    );
+    let other_process = Identity {
+        koid: KOID + 1,
+        ..build
+    };
+    assert_eq!(
+        s.check(other_process, FOLDERS[1]).map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+}
+
+#[test]
+fn taking_full_disk_away_revokes_the_folders_without_a_grant_of_their_own() {
+    let mut s = store();
+    s.set_grant(&grant(1, FULL_DISK, Decision::Allowed))
+        .unwrap();
+    s.set_grant(&grant(1, "user.music.access", Decision::Allowed))
+        .unwrap();
+    let revoked = s
+        .set_grant_revoking(&grant(1, FULL_DISK, Decision::Denied))
+        .unwrap();
+    let names: Vec<&str> = revoked.iter().map(|r| r.permission.as_str()).collect();
+    assert_eq!(names.len(), 7);
+    assert_eq!(names[0], FULL_DISK);
+    assert!(!names.contains(&"user.music.access"));
+    assert!(names.contains(&"user.documents.access"));
+    assert!(revoked.iter().all(|r| r.user == 1 && r.app_id == APP));
+    // Nothing is taken away when it was not allowed.
+    let again = s
+        .set_grant_revoking(&grant(1, FULL_DISK, Decision::Denied))
+        .unwrap();
+    assert!(again.is_empty());
+}
