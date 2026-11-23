@@ -372,9 +372,46 @@ class Log(gdb.Command):
             print(f"[{seconds}.{rest // 1000:06}] {level} p{koid}: {message}")
 
 
+class KernelStacks(gdb.Command):
+    """Show where the threads of a process wait in the kernel, as the
+    return addresses found by following the frame pointers of their saved
+    contexts: mikros kstacks PROCESS"""
+
+    def __init__(self):
+        super().__init__("mikros kstacks", gdb.COMMAND_USER)
+
+    @needs_kernel
+    def invoke(self, arg, from_tty):
+        running = running_thread()
+        for inner, t in threads(process(arg)):
+            state = THREAD_STATES[int(scalar(t["state"]))]
+            print(f"thread {int(t['header']['koid'])} {text(t['name'])!r}: {state}")
+            if inner == running or state == "DEAD" or int(scalar(t["stack_top"])) == 0:
+                continue
+            rsp = int(arch_thread(t)["rsp"]["value"])
+            if rsp == 0:
+                continue
+            words = (word(rsp + 8 * i) for i in range(len(SWITCH_FRAME)))
+            saved = dict(zip(SWITCH_FRAME, words))
+            first = gdb.execute("info symbol {:#x}".format(saved["rip"]), to_string=True)
+            print("  #0 " + first.strip())
+            frame = saved["rbp"]
+            for depth in range(1, 24):
+                try:
+                    caller = word(frame + 8)
+                    frame = word(frame)
+                except gdb.MemoryError:
+                    break
+                if caller == 0 or not (caller >> 63):
+                    break
+                name = gdb.execute("info symbol {:#x}".format(caller), to_string=True)
+                print("  #{} ".format(depth) + name.strip())
+
+
 Mikros()
 Ps()
 Threads()
+KernelStacks()
 Handles()
 Mappings()
 Log()
