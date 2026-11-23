@@ -48,7 +48,7 @@ pub struct Grants {
     keys: RefCell<BTreeMap<(u32, String, String), u64>>,
     next: Cell<u64>,
     /// The gates of the pending entries of each grant, which a
-    /// revocation closes (MIKSPEC-0094.R8).
+    /// revocation closes (MIKSPEC-0094.R11).
     gates: RefCell<BTreeMap<GrantId, Vec<Weak<Gate>>>>,
 }
 

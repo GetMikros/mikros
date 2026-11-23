@@ -1,5 +1,5 @@
 //! The two things a gate does with a call of the file system protocol
-//! once it has the call (MIKSPEC-0094.R8): forward it to the folder's
+//! once it has the call (MIKSPEC-0094.R11): forward it to the folder's
 //! connection, or fail it.
 
 use mikros_rt::interfaces::mikros::fs::*;

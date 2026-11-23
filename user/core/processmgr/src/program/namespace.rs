@@ -1258,7 +1258,7 @@ impl Namespaces {
                 add(&mut entries, &mut origins, none(volumes));
             }
         } else if app.is_some() && user != 0 && user != GREETER_USER {
-            // Asked for on first use (MIKSPEC-0094.R2).
+            // Asked for on first use (MIKSPEC-0094.R10).
             let grant = (user, app_id, crate::program::grants::VOLUMES);
             let pending = (crate::gate::Target::Volumes, String::new());
             let view = crate::program::pending::view(&shared.rc(), grant, pending, RW).await;
@@ -1706,7 +1706,7 @@ impl Namespaces {
                 }
             };
             if !holds {
-                // Asked for on first use (MIKSPEC-0094.R2), unless the
+                // Asked for on first use (MIKSPEC-0094.R10), unless the
                 // app holds full disk.
                 let target = crate::gate::PENDING.iter().find(|(p, _)| *p == permission);
                 if let Some(&(_, target)) = target.filter(|_| !full) {
