@@ -99,6 +99,9 @@ struct Change {
     shown: Option<Shown>,
     cursor: Option<Cursor>,
     damage: Vec<Rect>,
+    /// Whether the commit lists the CRTC or its primary plane, and
+    /// otherwise leaves the scanout as it is, and only the cursor changes.
+    scanout: bool,
 }
 
 pub struct Display {

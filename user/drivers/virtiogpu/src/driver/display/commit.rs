@@ -67,6 +67,7 @@ impl Display {
                 return Err(Status::InvalidArgs);
             }
             let at = change_at(&mut changes, &crtcs, index);
+            changes[at].scanout = true;
             changes[at].active = crtc.active;
             changes[at].mode = crtc.active.then_some((crtc.mode.width, crtc.mode.height));
         }
@@ -80,7 +81,10 @@ impl Display {
             if plane.crtc == 0 {
                 match is_cursor {
                     true => changes[at].cursor = None,
-                    false => changes[at].shown = None,
+                    false => {
+                        changes[at].scanout = true;
+                        changes[at].shown = None;
+                    }
                 }
                 continue;
             }
@@ -111,6 +115,7 @@ impl Display {
                     y: plane.dst.y.max(0) as u32,
                 });
             } else {
+                changes[at].scanout = true;
                 let mode = changes[at].mode.ok_or(Status::InvalidArgs)?;
                 let screen = Rect::new(0, 0, u64::from(mode.0), u64::from(mode.1));
                 if dst != screen || src.width == 0 {
@@ -209,6 +214,13 @@ impl Display {
     async fn apply(&self, change: &Change, fence: Option<u64>) -> Result<(), Status> {
         let scanout = change.index as u32;
         let before = self.crtcs.borrow()[change.index];
+        // A commit of the cursor alone leaves what the scanout shows
+        // alone, with no copy and no flush.
+        if !change.scanout {
+            return self
+                .apply_cursor(scanout, before.cursor, change.cursor)
+                .await;
+        }
         match change.shown {
             None if before.shown.is_some() || before.active != change.active => {
                 let off = protocol::set_scanout(scanout, 0, protocol::Rect::default());
@@ -339,6 +351,7 @@ fn change_at(changes: &mut Vec<Change>, crtcs: &[Crtc], index: usize) -> usize {
         shown: now.shown,
         cursor: now.cursor,
         damage: Vec::new(),
+        scanout: false,
     });
     changes.len() - 1
 }
