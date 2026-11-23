@@ -1,4 +1,4 @@
-//! The state of a pending entry's gate (MIKSPEC-0094.R8), apart from the
+//! The state of a pending entry's gate (MIKSPEC-0094.R11), apart from the
 //! protocol that carries it: for one entry and one subject, which of the
 //! calls that need an answer asks, which wait for that question, and
 //! what each is told when it ends or when the grant is revoked.
@@ -14,7 +14,7 @@ pub enum Target {
     Volumes,
 }
 
-/// The permissions that get a pending entry (MIKSPEC-0094.R2), and what
+/// The permissions that get a pending entry (MIKSPEC-0094.R10), and what
 /// each shows.
 pub const PENDING: [(&str, Target); 8] = [
     ("user.desktop.access", Target::Folder("desktop")),
@@ -77,6 +77,8 @@ pub enum Phase {
 #[derive(Debug)]
 pub struct Machine<W> {
     phase: Phase,
+    /// Whether it was `ALLOWED` once, so that it forwarded calls.
+    forwarded: bool,
     waiting: VecDeque<W>,
 }
 
@@ -86,12 +88,20 @@ impl<W> Machine<W> {
     pub fn new(revoked: bool) -> Machine<W> {
         Machine {
             phase: if revoked { Phase::Revoked } else { Phase::Idle },
+            forwarded: false,
             waiting: VecDeque::new(),
         }
     }
 
     pub fn phase(&self) -> Phase {
         self.phase
+    }
+
+    /// Whether the four calls that need no answer are still answered as
+    /// before an answer: they are until the gate forwards, and not once it
+    /// was revoked after that (MIKSPEC-0094.R11).
+    pub fn unanswered(&self) -> bool {
+        !self.forwarded && self.phase != Phase::Allowed
     }
 
     /// Whether the four calls that need no answer are forwarded now.
@@ -130,6 +140,7 @@ impl<W> Machine<W> {
             Answer::Failed(e) => (Phase::Idle, Outcome::Failed(e)),
         };
         self.phase = phase;
+        self.forwarded |= phase == Phase::Allowed;
         self.waiting
             .drain(..)
             .map(|w| (w, outcome.clone()))

@@ -104,3 +104,19 @@ fn eight_permissions_get_a_pending_entry() {
         1
     );
 }
+
+#[test]
+fn the_quick_calls_keep_their_answers_unless_revoked_after_forwarding() {
+    let mut m = M::new(false);
+    assert!(m.unanswered());
+    m.arrive(1);
+    assert!(m.unanswered());
+    m.ended::<i32>(Answer::Allowed);
+    assert!(!m.unanswered());
+    m.revoke::<i32>();
+    assert!(!m.unanswered());
+    let mut never = M::new(false);
+    never.arrive(1);
+    never.revoke::<i32>();
+    assert!(never.unanswered());
+}

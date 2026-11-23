@@ -1,4 +1,4 @@
-//! The gate of a pending entry (MIKSPEC-0094.R2, MIKSPEC-0094.R8): a
+//! The gate of a pending entry (MIKSPEC-0094.R10, MIKSPEC-0094.R11): a
 //! directory that the process manager serves over `Node`, which the
 //! union server shows as a revocable view and binds to each client
 //! connection's subject with `Restrict`. The first call that needs an
@@ -320,9 +320,15 @@ impl Connection {
             .state
             .as_ref()
             .is_some_and(|state| state.machine.borrow().allowed());
+        // Before an answer, and never forwarded, the four answer on their
+        // own.
+        let unanswered = self
+            .state
+            .as_ref()
+            .is_none_or(|state| state.machine.borrow().unanswered());
         // The calls that never wait, and `Restrict`.
         let request = match request {
-            R::GetAttributes(_, r) if !allowed => {
+            R::GetAttributes(_, r) if unanswered => {
                 let _ = r.reply(
                     s,
                     Ok(NodeGetAttributesResponse {
@@ -331,7 +337,7 @@ impl Connection {
                 );
                 return;
             }
-            R::Access(_, r) if !allowed => {
+            R::Access(_, r) if unanswered => {
                 let _ = r.reply(
                     s,
                     Ok(NodeAccessResponse {
@@ -340,11 +346,11 @@ impl Connection {
                 );
                 return;
             }
-            R::QueryFilesystem(_, r) if !allowed => {
+            R::QueryFilesystem(_, r) if unanswered => {
                 let _ = r.reply(s, Err(Error::NotSupported));
                 return;
             }
-            R::Clone(q, r) if !allowed => {
+            R::Clone(q, r) if unanswered => {
                 let cloned = match self.rights.contains(q.rights) {
                     true => {
                         self.spawn(q.node, q.rights);
