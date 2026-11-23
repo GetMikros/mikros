@@ -1686,6 +1686,13 @@ impl Namespaces {
             portable_checksum: checksum.into(),
         };
         let mut held = BTreeMap::new();
+        // Full disk covers the user's folders, so no entry of one waits
+        // for an answer.
+        let full = shared
+            .permissions
+            .holds(client(), false, crate::program::grants::FULL_DISK)
+            .await;
+        held.insert(crate::program::grants::FULL_DISK, full);
         for (path, rights, permission) in crate::program::grants::folders(&name) {
             if entries.iter().any(|e| e.path == path) {
                 continue;
@@ -1699,9 +1706,10 @@ impl Namespaces {
                 }
             };
             if !holds {
-                // Asked for on first use (MIKSPEC-0094.R2).
+                // Asked for on first use (MIKSPEC-0094.R2), unless the
+                // app holds full disk.
                 let target = crate::gate::PENDING.iter().find(|(p, _)| *p == permission);
-                if let Some(&(_, target)) = target {
+                if let Some(&(_, target)) = target.filter(|_| !full) {
                     let grant = (user, app_id, permission);
                     let gate = crate::program::pending::view(
                         &shared.rc(),
