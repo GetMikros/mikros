@@ -7,6 +7,7 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::future::poll_fn;
 use core::task::Poll;
 use mikros_rt::interfaces::__midl::ServerEnd;
@@ -30,6 +31,8 @@ struct Connection<F: Format> {
     bound: bool,
     /// The owner of the connection's locks.
     owner: u64,
+    /// Whether the connection ended, which ends a lock that waits.
+    closed: Rc<Cell<bool>>,
 }
 
 /// Serves the connection on `end` to `target` with `rights` until the
@@ -43,8 +46,9 @@ pub async fn serve<F: Format>(
     append: bool,
     bound: bool,
 ) {
-    let server = NodeAsyncServer::new(end, fs.reactor.clone());
+    let server = Rc::new(NodeAsyncServer::new(end, fs.reactor.clone()));
     let owner = fs.owner();
+    let closed = Rc::new(Cell::new(false));
     let mut connection = Connection {
         fs,
         target,
@@ -53,11 +57,30 @@ pub async fn serve<F: Format>(
         append,
         bound,
         owner,
+        closed: closed.clone(),
     };
     while let Ok(request) = server.next().await {
         match request {
-            // A lock that waits holds up the connection's other requests,
-            // as a waiting `fcntl` does.
+            // A lock that waits does not hold up the connection's other
+            // calls, `Unlock` included, and ends with the connection
+            // (MIKSPEC-0049.R38).
+            NodeRequest::Lock(q, r) if q.wait => {
+                let waiter = Connection {
+                    fs: connection.fs.clone(),
+                    target,
+                    rights,
+                    cursor: 0,
+                    append: false,
+                    bound,
+                    owner,
+                    closed: closed.clone(),
+                };
+                let server = server.clone();
+                connection.fs.spawner.spawn(async move {
+                    let locked = waiter.lock(q).await;
+                    let _ = r.reply(server.server(), locked.map(|()| NodeLockResponse {}));
+                });
+            }
             NodeRequest::Lock(q, r) => {
                 let locked = connection.lock(q).await;
                 let _ = r.reply(server.server(), locked.map(|()| NodeLockResponse {}));
@@ -65,6 +88,8 @@ pub async fn serve<F: Format>(
             request => connection.handle(request, server.server()),
         }
     }
+    // Before the locks go, which wakes the waiting ones.
+    closed.set(true);
     connection.fs.close(connection.target, owner);
 }
 
@@ -373,6 +398,9 @@ impl<F: Format> Connection<F> {
         })?;
         let range = range(q.start, q.length)?;
         poll_fn(|cx| {
+            if self.closed.get() {
+                return Poll::Ready(Err(Error::Io));
+            }
             let waker = q.wait.then_some(cx.waker());
             match self.fs.try_lock(id, self.owner, exclusive, range, waker) {
                 Ok(true) => Poll::Ready(Ok(())),

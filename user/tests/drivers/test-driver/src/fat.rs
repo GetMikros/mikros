@@ -4,6 +4,9 @@
 
 use crate::now;
 use alloc::vec::Vec;
+use core::future::poll_fn;
+use core::pin::pin;
+use core::task::Poll;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
@@ -267,6 +270,52 @@ pub async fn locks(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     drop(other);
     ok(file.lock(LockKind::Exclusive, 0, 4, true).await)?;
     ok(file.unlock(0, 0).await)?;
+    waiting_lock(file, reactor).await
+}
+
+/// Whether an `Unlock` of a connection is answered while a `Lock` that
+/// waits on it is still waiting, and the `Lock` is granted once the other
+/// holder lets go (MIKSPEC-0049.R38).
+async fn waiting_lock(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+    const SETTLE: i64 = 200_000_000;
+    const LIMIT: i64 = 3_000_000_000;
+    let clone = async || {
+        let (client, server) = endpoints::<Node>().ok()?;
+        ok(file.clone(server, RW).await)?;
+        Some(NodeAsyncClient::new(client, reactor.clone()))
+    };
+    let (holder, waiter) = (clone().await?, clone().await?);
+    ok(holder.lock(LockKind::Exclusive, 0, 4, false).await)?;
+    let mut locking = pin!(waiter.lock(LockKind::Exclusive, 0, 4, true));
+    // Let the lock reach the server and wait there.
+    let mut settle = pin!(reactor.sleep_until(now() + SETTLE));
+    let waited = poll_fn(|cx| {
+        if locking.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(false);
+        }
+        settle.as_mut().poll(cx).map(|_| true)
+    })
+    .await;
+    expect(waited)?;
+    let mut unlocking = pin!(waiter.unlock(8, 1));
+    let mut timeout = pin!(reactor.sleep_until(now() + LIMIT));
+    let answered = poll_fn(|cx| {
+        if locking.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        if unlocking.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Some(true));
+        }
+        match timeout.as_mut().poll(cx).is_ready() {
+            true => Poll::Ready(Some(false)),
+            false => Poll::Pending,
+        }
+    })
+    .await;
+    expect(answered == Some(true))?;
+    ok(holder.unlock(0, 0).await)?;
+    ok(locking.await)?;
     Some(())
 }
 
