@@ -143,7 +143,7 @@ enum Event {
 /// other in the order they arrive, except that, while one waits for
 /// `backing`, a call that never waits is served as it arrives
 /// (MIKSPEC-0051.R18), and a lock that waits does not hold up the calls
-/// after it.
+/// after it (MIKSPEC-0051.R19).
 pub async fn serve(
     domain: Rc<Domain>,
     backing: NodeAsyncClient,
