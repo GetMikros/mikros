@@ -2,14 +2,19 @@
 //! runtime module expects.
 
 use crate::sys::{self, Handle, Status};
+use alloc::alloc::{Layout, alloc, dealloc};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
+use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 pub const SHOULD_WAIT: i32 = -22;
 pub const PEER_CLOSED: i32 = -24;
 const INVALID_ARGS: Status = -10;
 const ACCESS_DENIED: Status = -13;
 const BUFFER_TOO_SMALL: Status = -15;
+const NO_MEMORY: Status = -4;
 
 /// The largest message, in bytes and in handles.
 const BYTES_MAX: usize = 65536;
@@ -136,24 +141,186 @@ pub fn channel_read(channel: u32) -> Result<(Vec<u8>, Vec<u32>), i32> {
     }
 }
 
+/// The buffers that a call's reply goes to: the largest message and
+/// the most handles.
+struct Reply {
+    bytes: [u8; BYTES_MAX],
+    handles: [Handle; HANDLES_MAX],
+}
+
+/// How many calls at once get kept buffers, one per thread that is calling
+/// at the same time.
+const SLOTS: usize = 8;
+/// How long, in processor timestamp counter ticks, a buffer that is not
+/// the first one stays unused before it is given back: about a second.
+const IDLE_TICKS: u64 = 3_000_000_000;
+
+/// A slot of kept reply buffers: whoever sets `busy` owns them.
+struct Slot {
+    busy: AtomicBool,
+    buffers: AtomicPtr<Reply>,
+    /// When the slot was last used, by `ticks`.
+    idle_since: AtomicU64,
+}
+
+/// The first slot's buffers, which are zero pages of the program's image
+/// that nothing maps until a call uses them, so that calls made before
+/// the allocator can map memory have them too.
+struct First(UnsafeCell<MaybeUninit<Reply>>);
+
+// SAFETY: only the owner of the first slot uses it.
+unsafe impl Sync for First {}
+
+static FIRST: First = First(UnsafeCell::new(MaybeUninit::uninit()));
+
+#[allow(clippy::declare_interior_mutable_const)]
+const UNUSED: Slot = Slot {
+    busy: AtomicBool::new(false),
+    buffers: AtomicPtr::new(core::ptr::null_mut()),
+    idle_since: AtomicU64::new(0),
+};
+
+static SLOTS_KEPT: [Slot; SLOTS] = {
+    let mut slots = [UNUSED; SLOTS];
+    slots[0] = Slot {
+        busy: AtomicBool::new(false),
+        buffers: AtomicPtr::new(FIRST.0.get().cast()),
+        idle_since: AtomicU64::new(0),
+    };
+    slots
+};
+
+/// A time that only grows, in ticks that last about a third of a
+/// nanosecond.
+fn ticks() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: reading the timestamp counter has no preconditions.
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut now = 0;
+        // SAFETY: the pointer is valid for the call.
+        unsafe { sys::clock_get_monotonic(&mut now) };
+        now as u64 * 3
+    }
+}
+
+fn reply_layout() -> Layout {
+    Layout::new::<Reply>()
+}
+
+/// The buffers that a call has: a slot's, or its own when the slots are
+/// all in use.
+struct Lease {
+    slot: Option<usize>,
+    buffers: *mut Reply,
+}
+
+/// Takes the buffers of a free slot, made when the slot has none, or
+/// buffers of the call's own: none when the memory is not there.
+fn lease() -> Option<Lease> {
+    for (at, slot) in SLOTS_KEPT.iter().enumerate() {
+        if slot
+            .busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            continue;
+        }
+        let mut buffers = slot.buffers.load(Ordering::Relaxed);
+        if buffers.is_null() {
+            // SAFETY: the layout is not empty.
+            buffers = unsafe { alloc(reply_layout()) }.cast::<Reply>();
+            if buffers.is_null() {
+                slot.busy.store(false, Ordering::Release);
+                continue;
+            }
+            slot.buffers.store(buffers, Ordering::Relaxed);
+        }
+        return Some(Lease {
+            slot: Some(at),
+            buffers,
+        });
+    }
+    // SAFETY: the layout is not empty.
+    let buffers: *mut Reply = unsafe { alloc(reply_layout()) }.cast();
+    (!buffers.is_null()).then_some(Lease {
+        slot: None,
+        buffers,
+    })
+}
+
+/// Gives the buffers back. A slot keeps its buffers for the next call,
+/// and the slots after the first give theirs up once they have been
+/// unused for `IDLE_TICKS`, so that threads that called once do not hold
+/// memory for good.
+fn release(lease: Lease) {
+    let Some(at) = lease.slot else {
+        // SAFETY: the buffers came from `alloc` with this layout.
+        unsafe { dealloc(lease.buffers.cast(), reply_layout()) };
+        return;
+    };
+    let now = ticks();
+    SLOTS_KEPT[at].idle_since.store(now, Ordering::Relaxed);
+    SLOTS_KEPT[at].busy.store(false, Ordering::Release);
+    for slot in &SLOTS_KEPT[1..] {
+        if slot.buffers.load(Ordering::Relaxed).is_null()
+            || now.wrapping_sub(slot.idle_since.load(Ordering::Relaxed)) < IDLE_TICKS
+            || slot
+                .busy
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            continue;
+        }
+        // Still unused for as long, now that the slot is ours.
+        let buffers = slot.buffers.load(Ordering::Relaxed);
+        if !buffers.is_null()
+            && now.wrapping_sub(slot.idle_since.load(Ordering::Relaxed)) >= IDLE_TICKS
+        {
+            slot.buffers.store(core::ptr::null_mut(), Ordering::Relaxed);
+            // SAFETY: the buffers came from `alloc` with this layout and
+            // nobody else has the slot.
+            unsafe { dealloc(buffers.cast(), reply_layout()) };
+        }
+        slot.busy.store(false, Ordering::Release);
+    }
+}
+
 /// Makes a call, consuming `handles` even when it fails, and returns the
 /// reply. The kernel replaces the request's transaction ID.
+///
+/// The reply goes to buffers of the largest size that stay with the
+/// caller's slot between calls, since mapping and faulting in 64 KiB for
+/// each call cost more than the call.
 pub fn channel_call(
     channel: u32,
     bytes: &[u8],
     handles: &[u32],
     deadline: i64,
 ) -> Result<(Vec<u8>, Vec<u32>), i32> {
-    let mut reply = vec![0u8; BYTES_MAX];
-    let mut reply_handles: Vec<Handle> = vec![0; HANDLES_MAX];
+    let Some(lease) = lease() else {
+        close_all(handles);
+        return Err(NO_MEMORY as i32);
+    };
+    let reply = lease.buffers;
+    // SAFETY: the lease owns the buffers, which are big enough.
+    let (reply_bytes, reply_handles) = unsafe {
+        (
+            core::ptr::addr_of_mut!((*reply).bytes).cast::<u8>(),
+            core::ptr::addr_of_mut!((*reply).handles).cast::<Handle>(),
+        )
+    };
     let args: [u64; 8] = [
         bytes.as_ptr() as u64,
         bytes.len() as u64,
         handles.as_ptr() as u64,
         handles.len() as u64,
-        reply.as_mut_ptr() as u64,
+        reply_bytes as u64,
         BYTES_MAX as u64,
-        reply_handles.as_mut_ptr() as u64,
+        reply_handles as u64,
         HANDLES_MAX as u64,
     ];
     let mut out = [0u64; 2];
@@ -167,21 +334,31 @@ pub fn channel_call(
             out.as_mut_ptr().cast(),
         )
     };
-    match s {
-        crate::OK => {}
+    let result = match s {
+        crate::OK => {
+            let (len, count) = (out[0] as usize, out[1] as usize);
+            // SAFETY: the kernel wrote `len` bytes and `count` handles to
+            // the buffers, which the lease still owns.
+            let copied = unsafe {
+                (
+                    core::slice::from_raw_parts(reply_bytes, len).to_vec(),
+                    core::slice::from_raw_parts(reply_handles, count).to_vec(),
+                )
+            };
+            Ok(copied)
+        }
         // Failures about the handles themselves leave them with the
         // caller, whose handles this call consumes.
         INVALID_ARGS | ACCESS_DENIED => {
             close_all(handles);
-            return Err(s as i32);
+            Err(s as i32)
         }
         // On every other failure the kernel took them: it wrote them, or
         // closed them when it did not (MIKSPEC-0009.R36).
-        _ => return Err(s as i32),
-    }
-    reply.truncate(out[0] as usize);
-    reply_handles.truncate(out[1] as usize);
-    Ok((reply, reply_handles))
+        _ => Err(s as i32),
+    };
+    release(lease);
+    result
 }
 
 /// Waits until `channel` is readable or its peer closed.
