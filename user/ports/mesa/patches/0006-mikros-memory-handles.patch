@@ -1,7 +1,7 @@
 diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmpipe/lp_mikros.c
 --- a/src/gallium/drivers/llvmpipe/lp_mikros.c
 +++ b/src/gallium/drivers/llvmpipe/lp_mikros.c
-@@ -104,8 +104,61 @@
+@@ -104,8 +104,73 @@
        mikros_handle_close(render);
  }
  
@@ -12,6 +12,9 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmp
 +#define HANDLE_DESCRIPTOR 10u
 +#define OBJECT_MEMORY 3u
 +#define OBJECT_EVENT 5u
++/* The rights of an exported memory object: DUPLICATE, TRANSFER, READ,
++ * WRITE, MAP and INSPECT. */
++#define MEMORY_EXPORT_RIGHTS ((1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 5) | (1u << 9))
 +
 +uint32_t
 +lp_mikros_handle_copy(uint32_t handle)
@@ -22,10 +25,19 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmp
 +   return copy;
 +}
 +
++uint32_t
++lp_mikros_memory_copy(uint32_t memory)
++{
++   mikros_handle_t copy = 0;
++   if (mikros_handle_duplicate(memory, MEMORY_EXPORT_RIGHTS, &copy) != 0)
++      return 0;
++   return copy;
++}
++
 +int
 +lp_mikros_memory_fd(uint32_t memory)
 +{
-+   mikros_handle_t copy = lp_mikros_handle_copy(memory);
++   mikros_handle_t copy = lp_mikros_memory_copy(memory);
 +   if (copy == 0)
 +      return -1;
 +   int fd = mikros_fd_from_handle(copy, MEMORY_DESCRIPTOR);
@@ -64,7 +76,7 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmp
  {
     mikros_midl_arena_t arena;
     if (!arena_new(&arena))
-@@ -118,27 +171,95 @@
+@@ -118,27 +183,152 @@
     arena_free(&arena);
     if (s != MIKROS_MIDL_OK)
        return NULL;
@@ -85,13 +97,14 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmp
     }
     *buffer = created.buffer;
 +   *memory = created.memory;
-+   return map;
-+}
-+
+    return map;
+ }
+ 
 +void *
 +lp_mikros_buffer_import(uint32_t render, uint32_t from, uint32_t *buffer, uint32_t *memory,
-+                        uint64_t *size)
++                        uint64_t *size, uint32_t *token)
 +{
++   *token = 0;
 +   mikros_handle_t handle = lp_mikros_handle_copy(from);
 +   if (handle == 0)
 +      return NULL;
@@ -111,6 +124,9 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmp
 +         *buffer = r.buffer;
 +         *memory = r.memory;
 +         *size = r.size;
++         /* The import took the duplicate that was sent, so another is
++          * kept, with which the memory can be exported again. */
++         *token = lp_mikros_handle_copy(from);
 +         imported = true;
 +      } else if (r.memory != 0) {
 +         mikros_handle_close(r.memory);
@@ -140,11 +156,64 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmp
 +   if (!imported)
 +      return NULL;
 +   void *map = map_memory(*memory, *size);
-+   if (map == NULL)
++   if (map == NULL) {
++      if (*token != 0)
++         mikros_handle_close(*token);
++      *token = 0;
 +      lp_mikros_buffer_destroy(render, *buffer, NULL, 0, *memory);
-    return map;
- }
- 
++   }
++   return map;
++}
++
++bool
++lp_mikros_buffer_probe(uint32_t render, uint32_t from)
++{
++   mikros_handle_t handle = lp_mikros_handle_copy(from);
++   if (handle == 0)
++      return false;
++   mikros_midl_arena_t arena;
++   if (!arena_new(&arena)) {
++      mikros_handle_close(handle);
++      return false;
++   }
++   mikros_base_Status error;
++   uint32_t buffer = 0;
++   switch (object_type(handle)) {
++   case OBJECT_EVENT: {
++      mikros_gpu_Render_ImportBuffer_Response r = {0};
++      if (mikros_gpu_Render_ImportBuffer(render, handle, &r, &error, INT64_MAX, &arena) ==
++          MIKROS_MIDL_OK)
++         buffer = r.buffer;
++      if (r.memory != 0)
++         mikros_handle_close(r.memory);
++      break;
++   }
++   case OBJECT_MEMORY: {
++      mikros_handle_t copy = lp_mikros_handle_copy(handle);
++      mikros_gpu_Render_ImportMemory_Response r;
++      if (copy != 0 && mikros_gpu_Render_ImportMemory(render, copy, &r, &error, INT64_MAX,
++                                                      &arena) == MIKROS_MIDL_OK)
++         buffer = r.buffer;
++      /* The duplicate is the render device's, whether it was imported or
++       * not. */
++      mikros_handle_close(handle);
++      break;
++   }
++   default:
++      mikros_handle_close(handle);
++      break;
++   }
++   arena_free(&arena);
++   if (buffer == 0)
++      return false;
++   mikros_midl_arena_t destroy;
++   if (arena_new(&destroy)) {
++      mikros_gpu_Render_DestroyBuffer(render, buffer, &destroy);
++      arena_free(&destroy);
++   }
++   return true;
++}
++
 +uint32_t
 +lp_mikros_buffer_token(uint32_t render, uint32_t buffer)
 +{
@@ -174,7 +243,7 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.c b/src/gallium/drivers/llvmp
 diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.h b/src/gallium/drivers/llvmpipe/lp_mikros.h
 --- a/src/gallium/drivers/llvmpipe/lp_mikros.h
 +++ b/src/gallium/drivers/llvmpipe/lp_mikros.h
-@@ -9,16 +9,48 @@
+@@ -9,16 +9,63 @@
  #include <stdbool.h>
  #include <stdint.h>
  
@@ -192,6 +261,11 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.h b/src/gallium/drivers/llvmp
 +bool llvmpipe_mikros_import(struct pipe_screen *screen, uint32_t handle,
 +                            struct pipe_memory_allocation **mem, uint64_t *size);
 +
++/* Whether the export token or memory object `handle`, which stays the
++ * caller's, can be imported into llvmpipe's screen. Nothing stays
++ * imported. */
++bool llvmpipe_mikros_probe(struct pipe_screen *screen, uint32_t handle);
++
  /* A connection to the render instance, or 0 when there is none. */
  uint32_t lp_mikros_render_open(void);
  
@@ -207,9 +281,19 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_mikros.h b/src/gallium/drivers/llvmp
 +
 +/* The buffer of the export token or memory object `handle`, which stays
 + * the caller's, imported into `render` and mapped writable, whose ID,
-+ * memory object and size it stores, or NULL. */
++ * memory object and size it stores, or NULL. For an export token it also
++ * stores a duplicate of it, which the allocation owns, in `token`, and 0
++ * otherwise. */
 +void *lp_mikros_buffer_import(uint32_t render, uint32_t handle, uint32_t *buffer,
-+                              uint32_t *memory, uint64_t *size);
++                              uint32_t *memory, uint64_t *size, uint32_t *token);
++
++/* Whether the export token or memory object `handle`, which stays the
++ * caller's, can be imported into `render`; nothing stays imported. */
++bool lp_mikros_buffer_probe(uint32_t render, uint32_t handle);
++
++/* A duplicate of the memory object `memory` with the rights that an
++ * exported memory object carries, or 0. */
++uint32_t lp_mikros_memory_copy(uint32_t memory);
 +
 +/* A new export token of the buffer `buffer`, or 0. */
 +uint32_t lp_mikros_buffer_token(uint32_t render, uint32_t buffer);
@@ -250,16 +334,19 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_texture.c b/src/gallium/drivers/llvm
     if (mem->cpu_addr == NULL) {
        FREE(mem);
        return NULL;
-@@ -1411,7 +1414,7 @@
+@@ -1410,8 +1413,10 @@
+    if (mem->cpu_addr != MAP_FAILED)
        munmap(mem->cpu_addr, mem->size);
  #elif DETECT_OS_MIKROS
++   if (mem->token != 0)
++      mikros_handle_close(mem->token);
     lp_mikros_buffer_destroy(llvmpipe_screen(pscreen)->render, mem->buffer, mem->cpu_addr,
 -                            mem->size);
 +                            mem->size, mem->memory);
  #else
     os_free_aligned(mem->cpu_addr);
  #endif
-@@ -1522,7 +1525,78 @@
+@@ -1522,7 +1527,88 @@
  }
  #endif
  
@@ -293,7 +380,8 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_texture.c b/src/gallium/drivers/llvm
 +   mem->fd = -1;
 +   mem->type = LLVMPIPE_MEMORY_FD_TYPE_INVALID;
 +   mem->cpu_addr = lp_mikros_buffer_import(llvmpipe_screen(screen)->render, handle,
-+                                           &mem->buffer, &mem->memory, &mem->size);
++                                           &mem->buffer, &mem->memory, &mem->size,
++                                           &mem->token);
 +   if (!mem->cpu_addr) {
 +      FREE(mem);
 +      return false;
@@ -330,9 +418,18 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_texture.c b/src/gallium/drivers/llvm
 +                       bool token)
 +{
 +   struct llvmpipe_memory_allocation *mem = (struct llvmpipe_memory_allocation *)pmem;
-+   if (token)
-+      return lp_mikros_buffer_token(llvmpipe_screen(screen)->render, mem->buffer);
-+   return lp_mikros_handle_copy(mem->memory);
++   if (token) {
++      /* The token that the memory was imported with is exported again. */
++      uint32_t copy = mem->token != 0 ? lp_mikros_handle_copy(mem->token) : 0;
++      return copy != 0 ? copy : lp_mikros_buffer_token(llvmpipe_screen(screen)->render, mem->buffer);
++   }
++   return lp_mikros_memory_copy(mem->memory);
++}
++
++bool
++llvmpipe_mikros_probe(struct pipe_screen *screen, uint32_t handle)
++{
++   return lp_mikros_buffer_probe(llvmpipe_screen(screen)->render, handle);
 +}
 +
 +#elif defined(PIPE_MEMORY_FD)
@@ -342,7 +439,7 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_texture.c b/src/gallium/drivers/llvm
 diff -ruN a/src/gallium/drivers/llvmpipe/lp_texture.h b/src/gallium/drivers/llvmpipe/lp_texture.h
 --- a/src/gallium/drivers/llvmpipe/lp_texture.h
 +++ b/src/gallium/drivers/llvmpipe/lp_texture.h
-@@ -140,8 +140,10 @@
+@@ -140,8 +140,13 @@
     enum llvmpipe_memory_fd_type type;
     int mem_fd;
  #if DETECT_OS_MIKROS
@@ -351,6 +448,9 @@ diff -ruN a/src/gallium/drivers/llvmpipe/lp_texture.h b/src/gallium/drivers/llvm
 +    * object. */
     uint32_t buffer;
 +   uint32_t memory;
++   /* The export token that the memory was imported with, kept so that it
++    * can be exported again, or 0. */
++   uint32_t token;
  #endif
  };
  

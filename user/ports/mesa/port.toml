@@ -26,9 +26,14 @@
 #   headers, the same as the vulkan-headers port's, with
 #   VK_USE_PLATFORM_MIKROS defined for Mesa's Vulkan code on Mikros.
 # - 0006: llvmpipe exports an allocation as an export token or its memory
-#   object, and imports either, through the render instance.
+#   object, which it duplicates with the rights of an exported memory
+#   object, and imports either through the render instance, keeping the
+#   token of an imported one so that it can be exported again; it can
+#   also try an import without keeping it.
 # - 0007: lavapipe offers VK_MIKROS_external_memory_handle and
-#   VK_KHR_external_memory_fd, whose descriptors are the C library's.
+#   VK_KHR_external_memory_fd, whose descriptors are the C library's;
+#   a successful import through the descriptor closes it, and the query
+#   of a handle's properties tries the import.
 # - 0008: lavapipe's timeline semaphores are kernel timelines, offered
 #   through VK_MIKROS_external_semaphore_handle and
 #   VK_KHR_external_semaphore_fd.

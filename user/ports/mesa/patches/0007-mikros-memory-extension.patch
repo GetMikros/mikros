@@ -36,16 +36,16 @@ diff -ruN a/src/gallium/frontends/lavapipe/lvp_device.c b/src/gallium/frontends/
  #ifdef VK_USE_PLATFORM_ANDROID_KHR
  #include "vk_android.h"
  #endif
-@@ -163,6 +168,9 @@
+@@ -162,6 +167,9 @@
+    .KHR_external_memory                   = true,
  #ifdef PIPE_MEMORY_FD
     .KHR_external_memory_fd                = true,
- #endif
++#endif
 +#ifdef VK_USE_PLATFORM_MIKROS
 +   .MIKROS_external_memory_handle         = true,
-+#endif
+ #endif
     .KHR_external_semaphore                = true,
  #ifdef HAVE_LIBDRM
-    .KHR_external_semaphore_fd             = true,
 @@ -346,6 +354,10 @@
     unsigned valid[] = {
        VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
@@ -119,7 +119,20 @@ diff -ruN a/src/gallium/frontends/lavapipe/lvp_device.c b/src/gallium/frontends/
  #ifdef PIPE_MEMORY_FD
     else if (mem->vk.import_handle_type) {
        assert(import_info &&
-@@ -2685,11 +2731,57 @@
+@@ -2292,7 +2338,12 @@
+          goto fail;
+       }
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++      /* The import keeps what it needs as handles of its own. */
++      close(import_info->fd);
++#else
+       mem->backed_fd = import_info->fd;
++#endif
+       mem->vk.size = size;
+       mem->map = device->pscreen->map_memory(device->pscreen, mem->pmem);
+       mem->memory_type = memory_type;
+@@ -2685,11 +2736,59 @@
     assert(pGetFdInfo->sType == VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR);
     assert_memhandle_type(pGetFdInfo->handleType);
  
@@ -167,7 +180,9 @@ diff -ruN a/src/gallium/frontends/lavapipe/lvp_device.c b/src/gallium/frontends/
 +{
 +   VK_FROM_HANDLE(lvp_device, device, _device);
 +
-+   if (!assert_memhandle_type(handleType) || handle == 0)
++   if ((handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_TOKEN_BIT_MIKROS &&
++        handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_MEMORY_OBJECT_BIT_MIKROS) ||
++       handle == 0 || !llvmpipe_mikros_probe(device->pscreen, handle))
 +      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
 +   pMemoryHandleProperties->memoryTypeBits = 1;
 +   return VK_SUCCESS;
