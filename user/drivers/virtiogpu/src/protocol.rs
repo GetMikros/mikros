@@ -170,6 +170,13 @@ pub fn resource_flush(resource: u32, rect: Rect, fence: Option<u64>) -> Vec<u8> 
         .done()
 }
 
+/// `command` with `fence`: it asks for its response to carry the fence.
+pub fn fenced(mut command: Vec<u8>, fence: u64) -> Vec<u8> {
+    command[4..8].copy_from_slice(&FLAG_FENCE.to_le_bytes());
+    command[8..16].copy_from_slice(&fence.to_le_bytes());
+    command
+}
+
 /// A cursor command: a new image, `resource` with its hot spot, or only
 /// a move.
 fn cursor(kind: u32, scanout: u32, x: u32, y: u32, resource: u32, hot: (u32, u32)) -> Vec<u8> {
@@ -272,6 +279,26 @@ mod tests {
             (Some(1), Some(4), Some(7))
         );
         assert_eq!(u32_at(&resource_flush(7, rect, None), 4), Some(0));
+    }
+
+    #[test]
+    fn any_command_can_be_fenced_afterwards() {
+        let rect = Rect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        let c = fenced(set_scanout(0, 5, rect), 11);
+        assert_eq!(u32_at(&c, 0), Some(0x0103));
+        assert_eq!(u32_at(&c, 4), Some(1));
+        assert_eq!(u64::from_le_bytes(c[8..16].try_into().unwrap()), 11);
+        assert_eq!(c, {
+            let mut plain = set_scanout(0, 5, rect);
+            plain[4..8].copy_from_slice(&1u32.to_le_bytes());
+            plain[8..16].copy_from_slice(&11u64.to_le_bytes());
+            plain
+        });
     }
 
     #[test]
