@@ -3,7 +3,7 @@
 //! information and the kernel debugger scripts. Also the check of those
 //! scripts that `cargo xtask test` runs.
 
-use crate::build::{self, Kind};
+use crate::build::{self, Edition, Kind};
 use crate::qemu::{self, MachineArgs};
 use crate::{firmware, image};
 use anyhow::{Context, Result, bail};
@@ -134,7 +134,7 @@ pub fn start_halted(
 
 pub fn run(args: &Args) -> Result<()> {
     let built = build::build(args.kind)?;
-    let disk = image::path(args.kind, false, false);
+    let disk = image::path(args.kind, Edition::Server, false, false);
     // The kernel runs at the addresses of its debug information.
     image::create_with(args.kind, &built, &disk, image::KASLR_OFF, &[])?;
     let log = disk.with_extension("serial.log");

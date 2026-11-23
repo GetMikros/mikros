@@ -30,12 +30,17 @@ pub enum Disk {
 /// otherwise.
 pub const DEFAULT_MEMORY: &str = "2G";
 
+/// The memory of a virtual machine that boots the desktop edition, unless
+/// its options say otherwise: the desktop and its graphics driver need more.
+pub const DESKTOP_MEMORY: &str = "3G";
+
 /// The options for a virtual machine, shared by the commands that start
 /// one.
 #[derive(clap::Args, Clone, Debug)]
 pub struct MachineArgs {
     /// Memory size, in QEMU's notation such as 2G: 2G by default, and 3G
-    /// for `cargo xtask test`.
+    /// for `cargo xtask test` and for the desktop edition of `cargo xtask
+    /// run`.
     #[arg(long)]
     pub memory: Option<String>,
     /// Number of processors.

@@ -5,7 +5,7 @@ pub(crate) mod gpt;
 pub(crate) mod owners;
 pub mod root;
 
-use crate::build::{self, Kind};
+use crate::build::{self, Edition, Kind};
 use crate::secure_boot::{self, Key};
 use anyhow::{Context, Result};
 use std::fs::{self, File};
@@ -34,6 +34,15 @@ pub struct Args {
     /// The build kind to put in the image.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
+    /// The edition of the system: `server`, or `desktop`, which adds the
+    /// compositor and the stand-ins for the greeter and the shell. Boot a
+    /// desktop image with `cargo xtask run --edition desktop`: the greeter
+    /// logs in the administrator `dee`, password `dee-password`, on text
+    /// console 1, where `desktop` starts dee's desktop; Ctrl-Alt-F1 shows
+    /// the desktop and Ctrl-Alt-F2 the console. The desktop edition is for
+    /// development only.
+    #[arg(long, value_enum, default_value_t = Edition::Server, conflicts_with = "tests")]
+    pub edition: Edition,
     /// Create a live image, whose command line holds the word `live`, so
     /// that the system uses its root partition read-only and keeps no
     /// changes.
@@ -53,12 +62,17 @@ pub struct Args {
     pub tests: bool,
 }
 
-/// Where the image of a build kind is written: a live one with `live`,
-/// a test image with `tests`.
-pub fn path(kind: Kind, live: bool, tests: bool) -> PathBuf {
+/// Where the image of a build kind is written: one of the desktop edition
+/// with `edition`, a live one with `live`, a test image with `tests`.
+pub fn path(kind: Kind, edition: Edition, live: bool, tests: bool) -> PathBuf {
     let name = format!(
-        "mikros-{}{}{}.img",
+        "mikros-{}{}{}{}.img",
         kind.name(),
+        if edition == Edition::Desktop {
+            "-desktop"
+        } else {
+            ""
+        },
         if live { "-live" } else { "" },
         if tests { "-tests" } else { "" }
     );
@@ -150,9 +164,9 @@ pub fn run(args: &Args) -> Result<()> {
     };
     let built = match args.tests {
         true => build::build_tests(args.kind)?,
-        false => build::build(args.kind)?,
+        false => build::build_edition(args.kind, args.edition)?,
     };
-    let out = path(args.kind, args.live, args.tests);
+    let out = path(args.kind, args.edition, args.live, args.tests);
     // An image for installing or releasing renews its partition GUIDs at
     // its first boot, so that the disks copied from it do not share them;
     // a test image keeps them (MIKSPEC-0023.R48).
@@ -172,7 +186,14 @@ pub fn run(args: &Args) -> Result<()> {
         &[],
         Extras::default(),
         key.as_ref(),
-    )
+    )?;
+    if args.edition == Edition::Desktop {
+        println!(
+            "desktop edition: the greeter logs in dee, password dee-password, on text console 1, \
+             for development only; boot it with cargo xtask run --edition desktop"
+        );
+    }
+    Ok(())
 }
 
 /// The command line word that makes the system use the root partition
@@ -403,6 +424,43 @@ fn create_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn names_the_image_of_each_edition() {
+        let name = |edition, live, tests| {
+            path(Kind::Debug, edition, live, tests)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(name(Edition::Server, false, false), "mikros-debug.img");
+        assert_eq!(
+            name(Edition::Desktop, false, false),
+            "mikros-debug-desktop.img"
+        );
+        assert_eq!(
+            name(Edition::Desktop, true, false),
+            "mikros-debug-desktop-live.img"
+        );
+        assert_eq!(name(Edition::Server, false, true), "mikros-debug-tests.img");
+    }
+
+    #[test]
+    fn a_test_image_has_no_edition() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["image"]).is_ok());
+        assert!(Cli::try_parse_from(["image", "--tests"]).is_ok());
+        assert!(Cli::try_parse_from(["image", "--edition", "desktop"]).is_ok());
+        assert!(Cli::try_parse_from(["image", "--tests", "--edition", "desktop"]).is_err());
+        assert!(Cli::try_parse_from(["image", "--edition", "kiosk"]).is_err());
+    }
 
     #[test]
     fn writes_partitions_at_their_places() {
