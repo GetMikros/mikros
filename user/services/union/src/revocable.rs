@@ -3,12 +3,13 @@
 //! memory objects handed out through them.
 
 use crate::view::flat;
-use alloc::collections::BTreeMap;
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::{Future, poll_fn};
-use core::pin::pin;
+use core::pin::{Pin, pin};
 use core::task::{Poll, Waker};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
@@ -34,7 +35,12 @@ impl Domain {
         poll_fn(|cx| match self.revoked.get() {
             true => Poll::Ready(()),
             false => {
-                self.waiting.borrow_mut().push(cx.waker().clone());
+                // A connection polls this on every event, so a waker
+                // that is there stays alone.
+                let mut waiting = self.waiting.borrow_mut();
+                if !waiting.iter().any(|w| w.will_wake(cx.waker())) {
+                    waiting.push(cx.waker().clone());
+                }
                 Poll::Pending
             }
         })
@@ -99,22 +105,6 @@ impl Domains {
     }
 }
 
-/// Runs `future` until it ends or `domain` is revoked: then None.
-async fn unless_revoked<T>(domain: &Domain, future: impl Future<Output = T>) -> Option<T> {
-    let mut future = pin!(future);
-    let mut revoked = pin!(domain.revoked());
-    poll_fn(|cx| {
-        if let Poll::Ready(value) = future.as_mut().poll(cx) {
-            return Poll::Ready(Some(value));
-        }
-        match revoked.as_mut().poll(cx) {
-            Poll::Ready(()) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    })
-    .await
-}
-
 /// A connection of a revocable view: its domain, the backing node, and
 /// its rights.
 struct Connection {
@@ -125,9 +115,34 @@ struct Connection {
     spawner: Spawner,
 }
 
+/// Whether `request` is one of the calls that a view's connection serves
+/// while another call of it waits for its backing connection
+/// (MIKSPEC-0051.R18).
+fn never_waits(request: &NodeRequest) -> bool {
+    matches!(
+        request,
+        NodeRequest::GetAttributes(..)
+            | NodeRequest::Access(..)
+            | NodeRequest::QueryFilesystem(..)
+            | NodeRequest::Clone(..)
+    )
+}
+
+type Handling<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// What a connection's loop learned.
+enum Event {
+    Request(Result<NodeRequest, mikros_rt::interfaces::__midl::Error>),
+    Finished,
+    Revoked,
+}
+
 /// Serves the connection on `end` to `backing` with `rights` in `domain`,
 /// forwarding each request to `backing`, until the client closes it or
-/// the domain is revoked, which closes both.
+/// the domain is revoked, which closes both. The calls go one after the
+/// other in the order they arrive, except that, while one waits for
+/// `backing`, a call that never waits is served as it arrives
+/// (MIKSPEC-0051.R18).
 pub async fn serve(
     domain: Rc<Domain>,
     backing: NodeAsyncClient,
@@ -147,16 +162,48 @@ pub async fn serve(
         reactor,
         spawner,
     };
+    let mut revoked = pin!(connection.domain.revoked());
+    let mut next: Pin<Box<dyn Future<Output = _> + '_>> = Box::pin(server.next());
+    let mut current: Option<Handling<'_>> = None;
+    let mut queued: VecDeque<NodeRequest> = VecDeque::new();
+    let mut meanwhile: Vec<Handling<'_>> = Vec::new();
     loop {
-        let Some(Ok(request)) = unless_revoked(&connection.domain, server.next()).await else {
-            break;
-        };
-        if connection.domain.is_revoked() {
-            break;
+        if current.is_none()
+            && let Some(request) = queued.pop_front()
+        {
+            current = Some(Box::pin(connection.handle(request, server.server())));
         }
-        let handled = connection.handle(request, server.server());
-        if unless_revoked(&connection.domain, handled).await.is_none() {
-            break;
+        let event = poll_fn(|cx| {
+            if revoked.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Event::Revoked);
+            }
+            meanwhile.retain_mut(|call| call.as_mut().poll(cx).is_pending());
+            if let Some(call) = current.as_mut()
+                && call.as_mut().poll(cx).is_ready()
+            {
+                return Poll::Ready(Event::Finished);
+            }
+            match next.as_mut().poll(cx) {
+                Poll::Ready(request) => Poll::Ready(Event::Request(request)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+        match event {
+            Event::Revoked => break,
+            Event::Finished => current = None,
+            Event::Request(Err(_)) => break,
+            Event::Request(Ok(request)) => {
+                next = Box::pin(server.next());
+                if connection.domain.is_revoked() {
+                    break;
+                }
+                let busy = current.is_some() || !queued.is_empty();
+                match busy && never_waits(&request) {
+                    true => meanwhile.push(Box::pin(connection.handle(request, server.server()))),
+                    false => queued.push_back(request),
+                }
+            }
         }
     }
 }
