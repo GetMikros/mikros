@@ -26,7 +26,8 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{
-    Broker, BrokerAsyncClient, BrokerEvent, Decision, Grant, Prompter,
+    Broker, BrokerAsyncClient, BrokerEvent, Decision, Grant, Permissions, PermissionsAsyncClient,
+    Prompter,
 };
 use mikros_rt::interfaces::mikros::process::{
     HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
@@ -46,6 +47,7 @@ mikros_rt::raw_main!(main);
 const CONTROL_ID: u32 = 0;
 const BROKER: &str = "/system/services/system.permbroker/permbroker";
 const PROTOCOL: &str = "mikros.permissions.Broker";
+const ASK_PROTOCOL: &str = "mikros.permissions.Permissions";
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
 const PAGE_SIZE: u64 = 4096;
@@ -271,6 +273,29 @@ fn connect_as(
         process(0, caller, koid),
     );
     BrokerAsyncClient::new(client, reactor.clone())
+}
+
+/// A connection to the broker's `Permissions` on `provider`, for `caller`.
+fn connect_ask(
+    provider: &ProviderClient,
+    caller: &str,
+    reactor: &Reactor,
+) -> PermissionsAsyncClient {
+    let (client, server) = endpoints::<Permissions>().expect("a channel");
+    let _ = provider.connect(
+        ASK_PROTOCOL.into(),
+        None,
+        server.into_handle(),
+        process(1, caller, KOID),
+    );
+    PermissionsAsyncClient::new(client, reactor.clone())
+}
+
+async fn ask(p: &PermissionsAsyncClient, permission: &str) -> Result<Decision, Status> {
+    match p.ask(permission.into()).await {
+        Ok(r) => r.map(|r| r.decision),
+        Err(_) => Err(Status::PeerClosed),
+    }
 }
 
 async fn check(b: &BrokerAsyncClient, user: u32, app: &str, p: &str) -> Result<Decision, Status> {
@@ -562,7 +587,36 @@ async fn probe(
     c(
         "not asking for a decided permission",
         request(&admin, APP, "user.camera.use").await == Ok(Decision::Denied),
-    )
+    )?;
+
+    // `Ask` is for user permissions, with a decision of its own
+    // (MIKSPEC-0094.R5).
+    let asking = connect_ask(&provider, APP, reactor);
+    c(
+        "refusing an unknown permission in Ask",
+        ask(&asking, "nope").await == Err(Status::NotFound),
+    )?;
+    c(
+        "refusing a permission that is not a user's in Ask",
+        ask(&asking, "default.network.use").await == Err(Status::InvalidArgs),
+    )?;
+    c(
+        "refusing an admin permission in Ask",
+        ask(&asking, "admin.time.set").await == Err(Status::InvalidArgs),
+    )?;
+    c(
+        "answering a decided permission in Ask",
+        ask(&asking, "user.camera.use").await == Ok(Decision::Denied),
+    )?;
+    c(
+        "denying what nobody answers in Ask",
+        ask(&asking, "user.microphone.use").await == Ok(Decision::Denied),
+    )?;
+    let mut refused = false;
+    for _ in 0..20 {
+        refused |= ask(&asking, "user.camera.use").await == Err(Status::NoResources);
+    }
+    c("limiting how often Ask is called", refused)
 }
 
 fn now() -> i64 {
