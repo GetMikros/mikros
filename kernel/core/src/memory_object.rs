@@ -316,6 +316,14 @@ impl MemoryObject {
                 charge = Some(crate::pager::charge_wait()?);
             }
             let absent = state.absent(index)?;
+            // A page that is requested already is waited for from here,
+            // under the locks that the answer to the request takes before
+            // its wake: registered after they are dropped, the thread
+            // could miss an answer that came in between.
+            let registered = match absent {
+                Absent::Wait => Some(crate::pager::wait_for(koid, index)?),
+                _ => None,
+            };
             drop(state);
             drop(pages);
             // The thread waits before the page is requested, so that the
@@ -331,7 +339,7 @@ impl MemoryObject {
                         return Err(e);
                     }
                 },
-                Absent::Wait => crate::pager::wait_for(koid, index)?,
+                Absent::Wait => registered.expect("registered under the locks"),
                 Absent::Failed => return Err(Error::Io),
                 Absent::Revoked => return Err(Error::AccessDenied),
             };
