@@ -120,3 +120,24 @@ fn the_quick_calls_keep_their_answers_unless_revoked_after_forwarding() {
     never.revoke::<i32>();
     assert!(never.unanswered());
 }
+
+#[test]
+fn routes_the_calls_of_a_gate_connection() {
+    use Class::*;
+    // Without a subject, only `Restrict` and the quick calls are served.
+    assert_eq!(route(Restrict, false, true), Route::Restrict);
+    assert_eq!(route(Quick, false, true), Route::Fixed);
+    assert_eq!(route(WaitingLock, false, true), Route::Refuse);
+    assert_eq!(route(Other, false, true), Route::Refuse);
+    // With a subject and no answer, the quick calls answer at once and
+    // the others wait, the waiting lock apart from the rest.
+    assert_eq!(route(Restrict, true, true), Route::Restrict);
+    assert_eq!(route(Quick, true, true), Route::Fixed);
+    assert_eq!(route(WaitingLock, true, true), Route::Alone);
+    assert_eq!(route(Other, true, true), Route::Lane);
+    // Once the gate forwarded, the quick calls are forwarded too, each in
+    // a task of its own.
+    assert_eq!(route(Quick, true, false), Route::Alone);
+    assert_eq!(route(WaitingLock, true, false), Route::Alone);
+    assert_eq!(route(Other, true, false), Route::Lane);
+}

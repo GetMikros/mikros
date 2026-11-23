@@ -8,7 +8,7 @@
 
 mod forward;
 
-use crate::gate::{Answer, Arrival, Machine, Outcome, Target};
+use crate::gate::{Answer, Arrival, Class, Machine, Outcome, Route, Target, route};
 use crate::program::processes::Shared;
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -275,16 +275,17 @@ struct Connection {
     working: Cell<bool>,
 }
 
-/// Whether `request` is one of the four calls that a gate does not make
-/// wait behind another call of its connection (MIKSPEC-0094.R11).
-fn never_waits(request: &NodeRequest) -> bool {
-    matches!(
-        request,
+/// What `request` is to a gate connection.
+fn class(request: &NodeRequest) -> Class {
+    match request {
+        NodeRequest::Restrict(..) => Class::Restrict,
         NodeRequest::GetAttributes(..)
-            | NodeRequest::Access(..)
-            | NodeRequest::QueryFilesystem(..)
-            | NodeRequest::Clone(..)
-    )
+        | NodeRequest::Access(..)
+        | NodeRequest::QueryFilesystem(..)
+        | NodeRequest::Clone(..) => Class::Quick,
+        NodeRequest::Lock(q, _) if q.wait => Class::WaitingLock,
+        _ => Class::Other,
+    }
 }
 
 async fn serve(
@@ -333,69 +334,33 @@ impl Connection {
     }
 
     async fn handle(self: &Rc<Self>, request: NodeRequest, server: &Rc<NodeAsyncServer>) {
-        use NodeRequest as R;
         let s = server.server();
-        // Before an answer, and never forwarded, the four answer on their
-        // own.
+        // Before an answer, and never forwarded, the four quick calls
+        // answer on their own.
         let unanswered = self
             .state
             .as_ref()
             .is_none_or(|state| state.machine.borrow().unanswered());
-        // The calls that never wait, and `Restrict`.
-        let request = match request {
-            R::GetAttributes(_, r) if unanswered => {
-                let _ = r.reply(
-                    s,
-                    Ok(NodeGetAttributesResponse {
-                        attributes: attributes(),
-                    }),
-                );
+        let route = route(class(&request), self.state.is_some(), unanswered);
+        let state = match (route, self.state.clone()) {
+            (Route::Alone | Route::Lane, Some(state)) => state,
+            (Route::Restrict, _) => {
+                if let NodeRequest::Restrict(q, r) = request {
+                    let _ = r.reply(s, self.restrict(q));
+                }
                 return;
             }
-            R::Access(_, r) if unanswered => {
-                let _ = r.reply(
-                    s,
-                    Ok(NodeAccessResponse {
-                        rights: Rights::READ,
-                    }),
-                );
-                return;
-            }
-            R::QueryFilesystem(_, r) if unanswered => {
-                let _ = r.reply(s, Err(Error::NotSupported));
-                return;
-            }
-            R::Clone(q, r) if unanswered => {
-                let cloned = match self.rights.contains(q.rights) {
-                    true => {
-                        self.spawn(q.node, q.rights);
-                        Ok(NodeCloneResponse {})
-                    }
-                    false => Err(Error::AccessDenied),
-                };
-                let _ = r.reply(s, cloned);
-                return;
-            }
-            R::Restrict(q, r) => {
-                let _ = r.reply(s, self.restrict(q));
-                return;
-            }
-            other => other,
-        };
-        let Some(state) = self.state.clone() else {
-            refuse(request, s, Error::AccessDenied);
-            return;
+            (Route::Fixed, _) => return self.fixed(request, s),
+            _ => return refuse(request, s, Error::AccessDenied),
         };
         let (connection, server) = (self.clone(), server.clone());
-        // The four quick calls never wait behind another call, and the
-        // others go one after the other: a call that waits for the
+        // A call that needs no turn goes in a task of its own: the quick
+        // calls, and a lock that waits for another holder, which may take
+        // as long as that holder keeps it, its own `Unlock` included.
+        // The others go one after the other: a call that waits for the
         // answer, or that the folder takes long to answer, holds up only
         // those after it.
-        // A lock that waits for another holder, which may take as long as
-        // that holder keeps it, is no turn that the calls after it wait
-        // for, its own `Unlock` included.
-        let lock_waits = matches!(&request, NodeRequest::Lock(q, _) if q.wait);
-        if never_waits(&request) || lock_waits {
+        if route == Route::Alone {
             self.gate.shared.spawner.spawn(async move {
                 connection.serve(&state, request, server.server()).await;
             });
@@ -415,6 +380,37 @@ impl Connection {
                 connection.serve(&state, request, server.server()).await;
             }
         });
+    }
+
+    /// Answers a quick call as a gate does before it has an answer.
+    fn fixed(&self, request: NodeRequest, s: &NodeServer) {
+        use NodeRequest as R;
+        let _ = match request {
+            R::GetAttributes(_, r) => r.reply(
+                s,
+                Ok(NodeGetAttributesResponse {
+                    attributes: attributes(),
+                }),
+            ),
+            R::Access(_, r) => r.reply(
+                s,
+                Ok(NodeAccessResponse {
+                    rights: Rights::READ,
+                }),
+            ),
+            R::QueryFilesystem(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Clone(q, r) => {
+                let cloned = match self.rights.contains(q.rights) {
+                    true => {
+                        self.spawn(q.node, q.rights);
+                        Ok(NodeCloneResponse {})
+                    }
+                    false => Err(Error::AccessDenied),
+                };
+                r.reply(s, cloned)
+            }
+            other => return refuse(other, s, Error::AccessDenied),
+        };
     }
 
     /// Does what the gate does with `request` of a call that needs an

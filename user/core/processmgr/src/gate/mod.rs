@@ -158,5 +158,47 @@ impl<W> Machine<W> {
     }
 }
 
+/// What a call of the file system protocol is to a gate connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    Restrict,
+    /// `GetAttributes`, `Access`, `QueryFilesystem` and `Clone`.
+    Quick,
+    /// A `Lock` that waits for another holder.
+    WaitingLock,
+    /// Every other call.
+    Other,
+}
+
+/// What a gate connection does with a call (MIKSPEC-0094.R11).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Binds a new connection to the subject, or fails with `BAD_STATE`.
+    Restrict,
+    /// Answers the quick call itself, as before an answer.
+    Fixed,
+    /// Fails with `ACCESS_DENIED`: the connection has no subject.
+    Refuse,
+    /// Waits for the answer and forwards or fails, in a task of its own,
+    /// so that no call waits behind it.
+    Alone,
+    /// The same, but after the calls that arrived before it.
+    Lane,
+}
+
+/// The route of a call of `class` on a connection that has a subject or
+/// not, where `unanswered` says that the quick calls are still answered
+/// by the gate itself (`Machine::unanswered`; always for a connection
+/// without a subject).
+pub fn route(class: Class, has_subject: bool, unanswered: bool) -> Route {
+    match class {
+        Class::Restrict => Route::Restrict,
+        Class::Quick if unanswered => Route::Fixed,
+        _ if !has_subject => Route::Refuse,
+        Class::Quick | Class::WaitingLock => Route::Alone,
+        Class::Other => Route::Lane,
+    }
+}
+
 #[cfg(test)]
 mod tests;
