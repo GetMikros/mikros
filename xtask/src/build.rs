@@ -69,6 +69,10 @@ pub struct Args {
     /// The build kind.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
+    /// The edition of the system: `server`, or `desktop`, which adds the
+    /// compositor's stand-ins for the greeter and the shell.
+    #[arg(long, value_enum, default_value_t = Edition::Server)]
+    pub edition: Edition,
 }
 
 /// The paths of the built components.
@@ -114,11 +118,35 @@ const PROBE_SHELL: (&str, &str) = (
     "user/tests/greeter-probe/shell.yaml",
 );
 
+/// The editions of the system.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Edition {
+    /// The system whose users log in on the text console.
+    Server,
+    /// The system with the compositor and the stand-ins for the greeter and
+    /// the shell, whose user is logged in by the greeter. For development.
+    Desktop,
+}
+
+impl Edition {
+    /// The boot image that builds this edition.
+    fn boot_image(self) -> BootImage {
+        match self {
+            Edition::Server => BootImage::System,
+            Edition::Desktop => BootImage::Desktop,
+        }
+    }
+}
+
 /// The boot images that can be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootImage {
     /// The system's boot image.
     System,
+    /// The system's boot image, with the system of the desktop edition: the
+    /// compositor's stand-ins for the greeter and the shell, and the user
+    /// that the greeter logs in.
+    Desktop,
     /// The system's boot image, with a test image's system: the system
     /// tests and selftest besides the system's components.
     SystemTests,
@@ -128,7 +156,13 @@ pub enum BootImage {
 
 /// Builds every component of the build kind `kind`.
 pub fn build(kind: Kind) -> Result<Built> {
-    build_for(kind, BootImage::System)
+    build_edition(kind, Edition::Server)
+}
+
+/// Builds every component of the build kind `kind`, with the system of the
+/// edition `edition`.
+pub fn build_edition(kind: Kind, edition: Edition) -> Result<Built> {
+    build_for(kind, edition.boot_image())
 }
 
 /// Builds every component of the build kind `kind`, and a test image's
@@ -248,8 +282,12 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
     let mut dawn_image = None;
     let mut dawn_desktop_image = None;
     let (boot_image, system_image) = match boot {
-        BootImage::System | BootImage::SystemTests => {
+        BootImage::System | BootImage::Desktop | BootImage::SystemTests => {
             let tests = boot == BootImage::SystemTests;
+            // The desktop edition and the test images have the stand-ins
+            // for the greeter and the shell.
+            let with_desktop = tests || boot == BootImage::Desktop;
+            let headers = crate::vulkan::headers()?.join("include");
             let components = crate::components::all()?;
             // What only test images hold is built for them alone.
             let built = |runtime| -> Vec<String> {
@@ -312,7 +350,6 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                         .arg(crate::workspace_root().join("user/tests/vulkan-c/square.comp")),
                 )
                 .context("compiling the shader of vulkan-c")?;
-                let headers = crate::vulkan::headers()?.join("include");
                 let mut args = strict.to_vec();
                 args.extend([
                     format!("-I{}", headers.display()),
@@ -331,10 +368,14 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 )?;
                 println!("built    {}", program.display());
                 only_tests.push(("system/bin/tests/vulkan-c".to_owned(), program));
-                only_tests.extend(greeter_probe(
-                    &wayland, &vulkan, &headers, &sdl, &xkbcommon,
-                )?);
             }
+            // The stand-ins for the greeter and the shell, which are test
+            // programs and system apps.
+            let desktop_apps = if with_desktop {
+                greeter_probe(&wayland, &vulkan, &headers, &sdl, &xkbcommon)?
+            } else {
+                Vec::new()
+            };
             // The system fonts and the fontconfig configuration that names
             // them as the defaults.
             for file in crate::fonts::FILES {
@@ -371,22 +412,21 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 .iter()
                 .chain(&login)
                 .chain(&only_tests)
+                .chain(&desktop_apps)
                 .map(|(at, path)| (at.as_str(), path.as_path()))
                 .collect();
-            let name = match tests {
-                true => "system-tests.img",
-                false => "system.img",
+            // The desktop system: the whole system without the session
+            // settings, so that a desktop counts as installed, with shell
+            // settings that name the greeter probe, and with the user that
+            // the probe logs in.
+            let shell = crate::workspace_root().join(PROBE_SHELL.1);
+            let users = if with_desktop {
+                desktop_users(kind)?
+            } else {
+                PathBuf::new()
             };
-            let system_image = boot_image(kind, name, &whole)?;
-            println!("built    {}", system_image.display());
-            if tests {
-                // The desktop run's system: the same without the session
-                // settings, so that a desktop counts as installed, with
-                // shell settings that name the greeter probe, and with
-                // the user that the probe logs in.
-                let shell = crate::workspace_root().join(PROBE_SHELL.1);
-                let users = desktop_users(kind)?;
-                let desktop_members: Vec<(&str, &Path)> = whole
+            let desktop_members: Vec<(&str, &Path)> = if with_desktop {
+                whole
                     .iter()
                     .copied()
                     .filter(|&(at, _)| at != SESSION_SETTINGS)
@@ -394,7 +434,22 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                         (PROBE_SHELL.0, shell.as_path()),
                         ("state/accounts/users", users.as_path()),
                     ])
-                    .collect();
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if !tests {
+                check_no_tests(&whole)?;
+                check_no_tests(&desktop_members)?;
+            }
+            let (name, members) = match boot {
+                BootImage::SystemTests => ("system-tests.img", &whole),
+                BootImage::Desktop => ("system-desktop.img", &desktop_members),
+                _ => ("system.img", &whole),
+            };
+            let system_image = boot_image(kind, name, members)?;
+            println!("built    {}", system_image.display());
+            if tests {
                 let desktop = boot_image(kind, "desktop.img", &desktop_members)?;
                 println!("built    {}", desktop.display());
                 desktop_image = Some(desktop);
@@ -2489,7 +2544,7 @@ fn dir_name(dir: &str) -> String {
 }
 
 pub fn run(args: &Args) -> Result<()> {
-    build(args.kind).map(drop)
+    build_edition(args.kind, args.edition).map(drop)
 }
 
 /// The target the kernel is built for.
@@ -2884,6 +2939,20 @@ fn sdl_probe(
     Ok(program)
 }
 
+/// Fails if `members` holds what only test images hold: the system tests,
+/// selftest and its manifest.
+fn check_no_tests(members: &[(&str, &Path)]) -> Result<()> {
+    for (at, _) in members {
+        if at.starts_with("system/bin/tests/")
+            || *at == "system/bin/selftest"
+            || *at == "system/programs/system.selftest.yaml"
+        {
+            bail!("{at} is in a system that is not a test image's");
+        }
+    }
+    Ok(())
+}
+
 /// The directory that `c_build` builds `name` in.
 fn c_dir(name: &str) -> PathBuf {
     crate::workspace_root().join("target/c").join(name)
@@ -2977,6 +3046,31 @@ fn cargo_build(package: &str, bin: &str, target: &str, kind: Kind) -> Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_edition_has_its_boot_image() {
+        assert_eq!(Edition::Server.boot_image(), BootImage::System);
+        assert_eq!(Edition::Desktop.boot_image(), BootImage::Desktop);
+    }
+
+    #[test]
+    fn a_system_that_is_not_a_test_image_holds_no_test() {
+        let file = Path::new("file");
+        let fine = [
+            ("system/bin/msh", file),
+            ("system/bin/tests", file),
+            ("system/programs/system.msh.yaml", file),
+        ];
+        assert!(check_no_tests(&fine).is_ok());
+        for at in [
+            "system/bin/tests/webgpu",
+            "system/bin/selftest",
+            "system/programs/system.selftest.yaml",
+        ] {
+            let error = check_no_tests(&[("system/bin/msh", file), (at, file)]).unwrap_err();
+            assert!(error.to_string().contains(at));
+        }
+    }
 
     #[test]
     fn instruments_only_the_fuzz_kernel() {
