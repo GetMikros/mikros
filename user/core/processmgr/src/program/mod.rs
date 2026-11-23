@@ -13,6 +13,8 @@ mod init;
 mod launcher;
 mod namespace;
 mod output;
+#[allow(dead_code)]
+mod pending;
 mod portable;
 mod processes;
 mod records;
