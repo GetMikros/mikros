@@ -34,3 +34,8 @@ options = [
     "-Ddtd_validation=false",
     "-Ddefault_library=static",
 ]
+
+# Only the desktop edition of the system installs the library
+# (MIKSPEC-0023.R53).
+[editions]
+"libraries/libwayland.dlib" = ["desktop"]

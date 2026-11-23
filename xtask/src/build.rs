@@ -129,6 +129,14 @@ pub enum Edition {
 }
 
 impl Edition {
+    /// Every edition that the build defines.
+    pub const ALL: [Edition; 2] = [Edition::Server, Edition::Desktop];
+
+    /// The edition named `name`, if the build defines one.
+    pub fn from_name(name: &str) -> Option<Edition> {
+        Edition::ALL.into_iter().find(|e| e.name() == name)
+    }
+
     /// The edition's name on the command line.
     pub fn name(self) -> &'static str {
         match self {
@@ -431,8 +439,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 &xkbcommon,
                 &freetype,
                 &keymaps,
-                &wayland.library,
-                &vulkan_members(&vulkan, &mesa, &llvm),
+                &ported_members(edition, &wayland.library, &vulkan, &mesa, &llvm)?,
             )?;
             let whole: Vec<(&str, &Path)> = early
                 .iter()
@@ -2171,8 +2178,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 &xkbcommon,
                 &freetype,
                 &keymaps,
-                &wayland.library,
-                &vulkan_members(&vulkan, &mesa, &llvm),
+                &ported_members(boot.edition(), &wayland.library, &vulkan, &mesa, &llvm)?,
             )?;
             let first_boot: Vec<(&str, &Path)> = members
                 .iter()
@@ -2319,28 +2325,69 @@ fn desktop_users(kind: Kind) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The files of Vulkan that the system image holds: the loader `loader`,
-/// lavapipe, the CPU driver, from `mesa`, with its manifest where
-/// drivers' manifests go, and LLVM's library from `llvm`, which it needs.
-fn vulkan_members(loader: &Path, mesa: &Path, llvm: &Path) -> Vec<(String, PathBuf)> {
-    vec![
+/// The libraries and files of ports that the system image of the edition
+/// `edition` holds, among those that only some editions install, which each
+/// port's `port.toml` names (MIKSPEC-0023.R53): the Wayland client library
+/// `wayland`; the Vulkan loader `loader`; lavapipe, the CPU driver, from
+/// `mesa`, with its manifest where drivers' manifests go; and LLVM's library
+/// from `llvm`, which it needs, with the C++ runtimes of the same port. A port
+/// whose `[editions]` table names another path fails.
+fn ported_members(
+    edition: Edition,
+    wayland: &Path,
+    loader: &Path,
+    mesa: &Path,
+    llvm: &Path,
+) -> Result<Vec<(String, PathBuf)>> {
+    let libraries = |name: &str| format!("libraries/{name}");
+    let all = [
         (
-            format!("system/libraries/{}", crate::vulkan::LOADER),
+            "wayland",
+            libraries(crate::wayland::LIBRARY),
+            wayland.to_path_buf(),
+        ),
+        (
+            "vulkan-loader",
+            libraries(crate::vulkan::LOADER),
             loader.join("libraries").join(crate::vulkan::LOADER),
         ),
         (
-            format!("system/libraries/{}", crate::mesa::DRIVER),
+            "mesa",
+            libraries(crate::mesa::DRIVER),
             mesa.join("libraries").join(crate::mesa::DRIVER),
         ),
         (
-            format!("system/{}", crate::mesa::MANIFEST),
+            "mesa",
+            crate::mesa::MANIFEST.to_owned(),
             mesa.join(crate::mesa::MANIFEST),
         ),
         (
-            "system/libraries/libLLVM.dlib".into(),
+            "llvm",
+            libraries("libLLVM.dlib"),
             llvm.join("lib/libLLVM.dlib"),
         ),
-    ]
+    ];
+    // The C++ runtimes, shared.
+    let lib = crate::sysroot::dir().join("libraries");
+    let runtimes = ["libc++.dlib", "libc++abi.dlib", "libunwind.dlib"]
+        .map(|name| ("llvm", libraries(name), lib.join(name)));
+    let mut members = Vec::new();
+    for port in crate::ports::EDITION_PORTS {
+        let files: Vec<&(&str, String, PathBuf)> = all
+            .iter()
+            .chain(&runtimes)
+            .filter(|(of, _, _)| *of == port)
+            .collect();
+        let port = crate::ports::load(port)?;
+        let paths: Vec<&str> = files.iter().map(|(_, path, _)| path.as_str()).collect();
+        port.check_editions(&paths)?;
+        for (_, path, source) in files {
+            if port.installed_in(path, edition) {
+                members.push((format!("system/{path}"), source.clone()));
+            }
+        }
+    }
+    Ok(members)
 }
 
 /// The members of the system image that logging in on the text console
@@ -2357,8 +2404,7 @@ fn login_members(
     xkbcommon: &crate::ports::Built,
     freetype: &crate::ports::Built,
     keymaps: &crate::ports::Built,
-    wayland: &Path,
-    vulkan: &[(String, PathBuf)],
+    ported: &[(String, PathBuf)],
 ) -> Result<Vec<(String, PathBuf)>> {
     let mut members = Vec::new();
     for component in crate::components::all()? {
@@ -2384,32 +2430,9 @@ fn login_members(
             xkbcommon.install.join("libraries/libxkbcommon.dlib"),
         ),
     ]);
-    // The libraries of the compositor and of the programs that draw.
-    if edition == Edition::Desktop {
-        members.push((
-            format!("system/libraries/{}", crate::wayland::LIBRARY),
-            wayland.to_path_buf(),
-        ));
-    }
-    // The C++ runtimes, shared.
-    let lib = crate::sysroot::dir().join("libraries");
-    members.extend([
-        (
-            "system/libraries/libc++.dlib".into(),
-            lib.join("libc++.dlib"),
-        ),
-        (
-            "system/libraries/libc++abi.dlib".into(),
-            lib.join("libc++abi.dlib"),
-        ),
-        (
-            "system/libraries/libunwind.dlib".into(),
-            lib.join("libunwind.dlib"),
-        ),
-    ]);
-    if edition == Edition::Desktop {
-        members.extend_from_slice(vulkan);
-    }
+    // The libraries of the compositor and of the programs that draw, which
+    // only some editions install.
+    members.extend_from_slice(ported);
     let keymap_data = keymaps.install.join("share/xkeyboard-config-2");
     let mut keymap_files = Vec::new();
     crate::port_tests::collect(&keymap_data, &mut keymap_files)?;
@@ -3085,6 +3108,9 @@ mod tests {
 
     #[test]
     fn each_edition_has_its_boot_image() {
+        assert_eq!(Edition::from_name("server"), Some(Edition::Server));
+        assert_eq!(Edition::from_name("desktop"), Some(Edition::Desktop));
+        assert_eq!(Edition::from_name("tablet"), None);
         assert_eq!(Edition::Server.boot_image(), BootImage::System);
         assert_eq!(Edition::Desktop.boot_image(), BootImage::Desktop);
     }

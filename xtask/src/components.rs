@@ -332,10 +332,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
                     .collect::<Option<Vec<_>>>()
                     .with_context(|| format!("{name}: `editions` holds a non-string"))?;
                 for edition in &editions {
-                    if ![Edition::Server, Edition::Desktop]
-                        .iter()
-                        .any(|e| e.name() == edition)
-                    {
+                    if Edition::from_name(edition).is_none() {
                         bail!("{name}: unknown edition `{edition}`");
                     }
                 }

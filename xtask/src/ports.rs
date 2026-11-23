@@ -5,7 +5,10 @@
 //!   `sha256`, and the directory `dir` that holds the source once it is
 //!   unpacked;
 //! - `[build]`: the `options` that a Meson project is configured with;
-//! - `[tests]`: `data`, the directories of its source that its tests read.
+//! - `[tests]`: `data`, the directories of its source that its tests read;
+//! - `[editions]`: for a library or file of the port that only some editions
+//!   of the system install, its path in `/system` and the names of those
+//!   editions (MIKSPEC-0023.R53). What is not named is in every edition.
 //!
 //! Its changes are patch files, in `patches/`. The
 //! Meson projects are built here, the others by modules of their own.
@@ -13,6 +16,10 @@
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::PathBuf;
+
+/// The ports whose `[editions]` tables the build reads, because it takes
+/// files from them for the system image.
+pub const EDITION_PORTS: [&str; 4] = ["wayland", "vulkan-loader", "mesa", "llvm"];
 
 /// A ported project.
 pub struct Port {
@@ -30,6 +37,32 @@ pub struct Port {
     /// The directories of its source, relative to it, that its tests
     /// read.
     pub test_data: Vec<String>,
+    /// The editions that install a path of `/system`, for the paths that
+    /// only some editions install.
+    pub editions: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl Port {
+    /// Fails if the `[editions]` table names a path that is not one of
+    /// `files`, the files that the build takes from the port, given as paths
+    /// in `/system`.
+    pub fn check_editions(&self, files: &[&str]) -> Result<()> {
+        match self.editions.keys().find(|k| !files.contains(&k.as_str())) {
+            Some(path) => bail!(
+                "the [editions] table of {} names {path}, which is not a file of the port",
+                self.name
+            ),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the edition `edition` installs the file `path` of the
+    /// port, given as a path in `/system`, such as `libraries/libx.dlib`.
+    pub fn installed_in(&self, path: &str, edition: crate::build::Edition) -> bool {
+        self.editions
+            .get(path)
+            .is_none_or(|names| names.iter().any(|n| n == edition.name()))
+    }
 }
 
 /// The port `name`, from its `port.toml`.
@@ -42,7 +75,11 @@ pub fn load(name: &str) -> Result<Port> {
 
 fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
     let table: toml::Table = text.parse()?;
-    only(&table, "the file", &["source", "build", "tests"])?;
+    only(
+        &table,
+        "the file",
+        &["source", "build", "tests", "editions"],
+    )?;
     let source = table
         .get("source")
         .and_then(|s| s.as_table())
@@ -60,6 +97,20 @@ fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
             }
         }
     };
+    let mut editions = std::collections::BTreeMap::new();
+    if let Some(t) = table.get("editions") {
+        let t = t.as_table().context("[editions] is not a table")?;
+        for key in t.keys() {
+            let names = strings(t, key)?;
+            if let Some(unknown) = names
+                .iter()
+                .find(|n| crate::build::Edition::from_name(n).is_none())
+            {
+                bail!("[editions] names the unknown edition `{unknown}` for {key}");
+            }
+            editions.insert(key.clone(), names);
+        }
+    }
     Ok(Port {
         name: name.to_owned(),
         dir,
@@ -68,6 +119,7 @@ fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
         source: string(source, "dir")?,
         options: section("build", &["options"])?,
         test_data: section("tests", &["data"])?,
+        editions,
     })
 }
 
@@ -160,6 +212,62 @@ mod tests {
         let xkbcommon = load("xkbcommon").unwrap();
         let option = format!("-Dtest-data-dir={}/test/data", test_source(&xkbcommon));
         assert!(xkbcommon.options.contains(&option));
+    }
+
+    #[test]
+    fn a_port_names_the_editions_that_install_its_files() {
+        use crate::build::Edition;
+        let source = "[source]\nurl = \"u\"\nsha256 = \"s\"\ndir = \"d\"\n";
+        let text = format!("{source}[editions]\n\"libraries/libx.dlib\" = [\"desktop\"]\n");
+        let port = parse("x", PathBuf::new(), &text).unwrap();
+        assert!(port.installed_in("libraries/libx.dlib", Edition::Desktop));
+        assert!(!port.installed_in("libraries/libx.dlib", Edition::Server));
+        assert!(port.installed_in("libraries/liby.dlib", Edition::Server));
+        let unknown = format!("{source}[editions]\n\"a\" = [\"tablet\"]\n");
+        assert!(parse("x", PathBuf::new(), &unknown).is_err());
+    }
+
+    #[test]
+    fn a_table_that_names_no_file_of_the_port_fails() {
+        let source = "[source]\nurl = \"u\"\nsha256 = \"s\"\ndir = \"d\"\n";
+        let text = format!("{source}[editions]\n\"libraries/libx.dlib\" = [\"desktop\"]\n");
+        let port = parse("x", PathBuf::new(), &text).unwrap();
+        assert!(
+            port.check_editions(&["libraries/libx.dlib", "libraries/liby.dlib"])
+                .is_ok()
+        );
+        let error = port.check_editions(&["libraries/liby.dlib"]).unwrap_err();
+        assert!(error.to_string().contains("libraries/libx.dlib"));
+    }
+
+    #[test]
+    fn the_desktop_libraries_are_only_in_the_desktop_edition() {
+        use crate::build::Edition;
+        for (port, path) in [
+            ("wayland", "libraries/libwayland.dlib"),
+            ("vulkan-loader", "libraries/libvulkan.dlib"),
+            ("mesa", "libraries/libvulkan_lvp.dlib"),
+            ("mesa", "share/vulkan/icd.d/lvp_icd.x86_64.json"),
+            ("llvm", "libraries/libLLVM.dlib"),
+        ] {
+            let port = load(port).unwrap();
+            assert!(port.installed_in(path, Edition::Desktop), "{path}");
+            assert!(!port.installed_in(path, Edition::Server), "{path}");
+        }
+    }
+
+    #[test]
+    fn only_the_ports_that_the_build_reads_have_an_editions_table() {
+        let dir = crate::workspace_root().join("user/ports");
+        for entry in fs::read_dir(dir).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if !EDITION_PORTS.contains(&name.as_str()) {
+                assert!(
+                    load(&name).unwrap().editions.is_empty(),
+                    "{name} has an [editions] table that the build never reads"
+                );
+            }
+        }
     }
 
     #[test]

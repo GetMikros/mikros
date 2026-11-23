@@ -19,3 +19,8 @@
 url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/llvm-project-23.1.4.src.tar.xz"
 sha256 = "819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2"
 dir = "llvm-project-23.1.4.src"
+
+# Only the desktop edition of the system installs libLLVM.dlib, which
+# lavapipe needs; the C++ runtimes are in every edition (MIKSPEC-0023.R53).
+[editions]
+"libraries/libLLVM.dlib" = ["desktop"]

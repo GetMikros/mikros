@@ -80,3 +80,9 @@ options = [
     "-Dvideo-codecs=",
     "-Dspirv-tools=disabled",
 ]
+
+# Only the desktop edition of the system installs the driver and its
+# manifest (MIKSPEC-0023.R53).
+[editions]
+"libraries/libvulkan_lvp.dlib" = ["desktop"]
+"share/vulkan/icd.d/lvp_icd.x86_64.json" = ["desktop"]
