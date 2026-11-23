@@ -2794,6 +2794,17 @@ pub(crate) fn c_build(
     linking: Linking,
     args: &[String],
 ) -> Result<PathBuf> {
+    c_build_with(name, "-O2", sources, linking, args)
+}
+
+/// Like `c_build`, with the optimization option `optimization`.
+pub(crate) fn c_build_with(
+    name: &str,
+    optimization: &str,
+    sources: &[&str],
+    linking: Linking,
+    args: &[String],
+) -> Result<PathBuf> {
     let root = crate::workspace_root();
     let sysroot = crate::sysroot::build()?;
     let dir = c_dir(name);
@@ -2806,7 +2817,7 @@ pub(crate) fn c_build(
         "--config={}",
         crate::sysroot::config(&sysroot).display()
     ));
-    command.arg("-O2");
+    command.arg(optimization);
     let program = match linking {
         Linking::Static => {
             command.arg("-static-pie");
@@ -2929,6 +2940,8 @@ fn greeter_probe(
         name: "Greeter probe",
         description: "The greeter of the desktop run",
         executable: name,
+        portable: false,
+        installable: false,
         shell_parts: "  - roles: [greeter]\n    executable: greeter-probe\n    \
                       arguments: [\"--login\", dee, dee-password]\n",
         files: vec![(name.to_owned(), program.clone(), true)],
@@ -2981,6 +2994,8 @@ fn shell_probe<'a>(
         name: "Shell probe",
         description: "The shell of the desktop run",
         executable: "greeter-probe",
+        portable: false,
+        installable: false,
         shell_parts: parts,
         files: vec![
             ("greeter-probe".to_owned(), greeter, true),
@@ -3047,7 +3062,7 @@ fn check_no_tests(members: &[(&str, &Path)]) -> Result<()> {
 }
 
 /// The directory that `c_build` builds `name` in.
-fn c_dir(name: &str) -> PathBuf {
+pub(crate) fn c_dir(name: &str) -> PathBuf {
     crate::workspace_root().join("target/c").join(name)
 }
 

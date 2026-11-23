@@ -18,6 +18,8 @@ pub struct SystemApp<'a> {
     pub description: &'a str,
     /// The path, in the package, of the program that runs the app.
     pub executable: &'a str,
+    pub portable: bool,
+    pub installable: bool,
     /// The manifest's `shell_parts`: the lines of its list, indented.
     pub shell_parts: &'a str,
     /// Each file by its path in the package, with whether it is
@@ -34,9 +36,16 @@ fn manifest(app: &SystemApp, checksum: &str) -> Result<String> {
     }
     let text = format!(
         "id: {}\nkind: app\nversion: {}\nname: \"{}\"\ndescription: \"{}\"\n\
-         checksum: {checksum}\nexecutable: {}\nportable: false\ninstallable: false\n\
+         checksum: {checksum}\nexecutable: {}\nportable: {}\ninstallable: {}\n\
          shell_parts:\n{}",
-        app.id, app.version, app.name, app.description, app.executable, app.shell_parts
+        app.id,
+        app.version,
+        app.name,
+        app.description,
+        app.executable,
+        app.portable,
+        app.installable,
+        app.shell_parts
     );
     mikros_mika::manifest::Manifest::parse(text.as_bytes())
         .map_err(|e| anyhow!("the manifest of {} is invalid: {e:?}", app.id))?;
@@ -82,6 +91,8 @@ mod tests {
             name: "Probe",
             description: "A probe",
             executable: "probe",
+            portable: false,
+            installable: false,
             shell_parts: "  - roles: [greeter]\n    executable: probe\n",
             files,
         }

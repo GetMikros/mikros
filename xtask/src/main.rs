@@ -49,6 +49,7 @@ mod sdl;
 mod secure_boot;
 mod setup;
 mod standin;
+mod standin_build;
 mod symbolize;
 mod sysroot;
 mod system_apps;
