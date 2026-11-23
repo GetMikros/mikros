@@ -33,7 +33,7 @@ diff -ruN a/clang/lib/Driver/CMakeLists.txt b/clang/lib/Driver/CMakeLists.txt
 diff -ruN a/clang/lib/Driver/ToolChains/Mikros.h b/clang/lib/Driver/ToolChains/Mikros.h
 --- a/clang/lib/Driver/ToolChains/Mikros.h
 +++ b/clang/lib/Driver/ToolChains/Mikros.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,101 @@
 +//===--- Mikros.h - Mikros ToolChain Implementation -------------*- C++ -*-===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -120,6 +120,12 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.h b/clang/lib/Driver/ToolChains/M
 +  std::string findLibrary(const llvm::opt::ArgList &Args, llvm::StringRef Name,
 +                          bool Static) const;
 +
++  /// The path of the file that `-l:<File>` names, which may hold folders:
++  /// the first of that name in the directories of `-L` and then the
++  /// toolchain's. Empty when there is none.
++  std::string findFile(const llvm::opt::ArgList &Args,
++                       llvm::StringRef File) const;
++
 +protected:
 +  Tool *buildLinker() const override;
 +};
@@ -132,7 +138,7 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.h b/clang/lib/Driver/ToolChains/M
 diff -ruN a/clang/lib/Driver/ToolChains/Mikros.cpp b/clang/lib/Driver/ToolChains/Mikros.cpp
 --- a/clang/lib/Driver/ToolChains/Mikros.cpp
 +++ b/clang/lib/Driver/ToolChains/Mikros.cpp
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,219 @@
 +//===--- Mikros.cpp - Mikros ToolChain Implementation -----------*- C++ -*-===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -230,7 +236,8 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.cpp b/clang/lib/Driver/ToolChains
 +
 +  // LLD looks for lib<Name>.so and lib<Name>.a only, so each -l<Name>
 +  // becomes the path of lib<Name>.dlib or lib<Name>.slib, the latter
-+  // also between -Bstatic and -Bdynamic.
++  // also between -Bstatic and -Bdynamic, and each -l:<File> the path of
++  // that file in the folders of -L and then the sysroot's.
 +  ArgStringList InputArgs;
 +  AddLinkerInputs(TC, Inputs, Args, InputArgs, JA);
 +  bool StaticNow = IsStatic;
@@ -240,7 +247,15 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.cpp b/clang/lib/Driver/ToolChains
 +      StaticNow = true;
 +    else if (S == "-Bdynamic" || S == "--Bdynamic")
 +      StaticNow = IsStatic;
-+    if (S.starts_with("-l") && !S.starts_with("-l:")) {
++    if (S.starts_with("-l:")) {
++      // A file by name, in the directories of -L and then the sysroot's
++      // libraries/, which LLD would search only in those of -L.
++      std::string Path = TC.findFile(Args, S.drop_front(3));
++      if (!Path.empty()) {
++        CmdArgs.push_back(Args.MakeArgString(Path));
++        continue;
++      }
++    } else if (S.starts_with("-l")) {
 +      std::string Path = TC.findLibrary(Args, S.drop_front(2), StaticNow);
 +      if (!Path.empty()) {
 +        CmdArgs.push_back(Args.MakeArgString(Path));
@@ -307,6 +322,21 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.cpp b/clang/lib/Driver/ToolChains
 +      if (getVFS().exists(Path))
 +        return std::string(Path);
 +    }
++  }
++  return {};
++}
++
++std::string Mikros::findFile(const ArgList &Args, llvm::StringRef File) const {
++  llvm::SmallVector<std::string, 8> Dirs;
++  for (const Arg *A : Args.filtered(options::OPT_L))
++    Dirs.push_back(A->getValue());
++  for (const std::string &Dir : getFilePaths())
++    Dirs.push_back(Dir);
++  for (const std::string &Dir : Dirs) {
++    llvm::SmallString<256> Path(Dir);
++    llvm::sys::path::append(Path, File);
++    if (getVFS().exists(Path))
++      return std::string(Path);
 +  }
 +  return {};
 +}

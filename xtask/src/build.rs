@@ -539,11 +539,14 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 &[],
             )?;
             println!("built    {}", files_c.display());
+            // Linked with the C library also by file name, which the
+            // driver finds in the sysroot's libraries without a -L
+            // (MIKSPEC-0062.R16).
             let hello_dynamic = c_build(
                 "hello-c-dynamic",
                 &["user/tests/hello-c/hello.c"],
                 Linking::Dynamic,
-                &[],
+                &["-l:libc.dlib".to_string()],
             )?;
             println!("built    {}", hello_dynamic.display());
             let raw_syscall = c_build(
