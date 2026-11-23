@@ -30,9 +30,22 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// What a question for a client names as the service that asks for it:
+/// the caller's app ID when its kernel object ID is not the client's,
+/// except for the process manager, which asks only for the processes it
+/// starts, and empty otherwise (MIKSPEC-0037.R54).
+pub fn via(caller_app: &str, caller_koid: u64, client_koid: u64) -> String {
+    match caller_koid == client_koid || caller_app == PROCESS_MANAGER {
+        true => String::new(),
+        false => caller_app.into(),
+    }
+}
+
 /// The app ID of the service manager, which the broker trusts from its
 /// start.
 pub const SERVICE_MANAGER: &str = "system.servicemgr";
+/// The app ID of the process manager, whose questions name no service.
+pub const PROCESS_MANAGER: &str = "system.processmgr";
 /// The permissions the service manager holds from the start.
 pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
     "system.identity.set",

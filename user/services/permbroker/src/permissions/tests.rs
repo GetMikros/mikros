@@ -775,3 +775,10 @@ fn keeps_portable_apps_grants_apart_and_never_a_builds() {
         Ok((Decision::Undetermined, false))
     );
 }
+
+#[test]
+fn a_question_names_the_service_that_asks_for_a_client() {
+    assert_eq!(via(APP, 5, 5), "");
+    assert_eq!(via("system.devicemgr", 5, 6), "system.devicemgr");
+    assert_eq!(via(PROCESS_MANAGER, 5, 6), "");
+}

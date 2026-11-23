@@ -659,11 +659,8 @@ async fn decide_request(
 ) -> Result<BrokerRequestResponse, Status> {
     inner.authorize(caller, Call::Request)?;
     // The service that asks for a permission of one of its clients, which
-    // a question names besides the client (MIKSPEC-0037.R46).
-    let via = match caller.koid == q.client.koid {
-        true => String::new(),
-        false => caller.app_id.clone(),
-    };
+    // a question names besides the client (MIKSPEC-0037.R54).
+    let via = crate::permissions::via(&caller.app_id, caller.koid, q.client.koid);
     let decision = inner
         .request(&q.client, via, &q.permission, q.reason)
         .await?;

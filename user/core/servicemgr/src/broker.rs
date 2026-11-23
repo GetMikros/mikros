@@ -27,6 +27,9 @@ const PROCESS_MANAGER_PERMISSIONS: &[&str] = &[
     "system.filesystems.mount",
     "system.unions.create",
     "system.permissions.read",
+    // To ask for the permissions of the processes it starts
+    // (MIKSPEC-0034.R49).
+    "system.permissions.request",
     // For users' folders of installed apps (MIKSPEC-0101.R38).
     "system.subvolumes.manage",
 ];
