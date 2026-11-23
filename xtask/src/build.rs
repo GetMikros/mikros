@@ -129,18 +129,15 @@ pub struct Built {
     /// desktop run's system with the Dawn window program as the shell
     /// probe's switcher part.
     pub dawn_desktop_image: Option<PathBuf>,
+    /// The accounts that the stand-ins of the system add, and the file
+    /// that holds their password, when it holds stand-ins with accounts.
+    pub stand_in_account: Option<crate::standin_build::Account>,
     /// Where xkbcommon was built.
     pub xkbcommon: crate::ports::Built,
 }
 
 /// The member of the session settings, which turn the desktop off.
 const SESSION_SETTINGS: &str = "config/session.yaml";
-/// The shell settings of the desktop run's system, by their member and
-/// their file in the repository.
-const PROBE_SHELL: (&str, &str) = (
-    "config/desktop/shell.yaml",
-    "user/tests/greeter-probe/shell.yaml",
-);
 
 /// The editions of the system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -333,13 +330,14 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
     let mut desktop_image = None;
     let mut dawn_image = None;
     let mut dawn_desktop_image = None;
+    let mut stand_in_account = None;
     let (boot_image, system_image) = match boot {
         BootImage::System | BootImage::Desktop | BootImage::SystemTests => {
             let tests = boot == BootImage::SystemTests;
             // The desktop edition and the test images have the stand-ins
             // for the greeter and the shell, and the account that the
             // greeter logs in, except in the production kind
-            // (MIKSPEC-0023.R54, MIKSPEC-0023.R52).
+            // (MIKSPEC-0023.R59, MIKSPEC-0023.R52).
             let with_desktop = (tests || boot == BootImage::Desktop) && kind != Kind::Production;
             let headers = crate::vulkan::headers()?.join("include");
             let components = crate::components::all()?;
@@ -428,13 +426,31 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 println!("built    {}", program.display());
                 only_tests.push(("system/bin/tests/vulkan-c".to_owned(), program));
             }
-            // The stand-ins for the greeter and the shell, which are test
-            // programs and system apps.
-            let desktop_apps = if with_desktop {
-                greeter_probe(&wayland, &vulkan, &headers, &sdl, &xkbcommon)?
+            // The stand-ins that the image holds, built from their files
+            // (MIKSPEC-0023.R59): an image of the edition holds those that
+            // name it, and a test image holds them all.
+            let stand_ins = if with_desktop {
+                let all = crate::standin::find(&crate::workspace_root().join("user"))?;
+                let held: Vec<&crate::standin::StandIn> = all
+                    .iter()
+                    .filter(|s| tests || s.in_edition(edition))
+                    .collect();
+                crate::standin_build::build(
+                    &all,
+                    &held,
+                    &crate::standin_build::Ports {
+                        wayland: &wayland,
+                        vulkan_loader: &vulkan,
+                        vulkan_headers: &headers,
+                        sdl: &sdl,
+                        xkbcommon: &xkbcommon,
+                    },
+                    kind,
+                )?
             } else {
-                Vec::new()
+                crate::standin_build::Held::default()
             };
+            stand_in_account = stand_ins.account.clone();
             // The system fonts and the fontconfig configuration that names
             // them as the defaults.
             for file in crate::fonts::FILES {
@@ -471,28 +487,24 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 .iter()
                 .chain(&login)
                 .chain(&only_tests)
-                .chain(&desktop_apps)
+                .chain(&stand_ins.apps)
                 .map(|(at, path)| (at.as_str(), path.as_path()))
                 .collect();
-            // The desktop system: the whole system without the session
-            // settings, so that a desktop counts as installed, with shell
-            // settings that name the greeter probe, and with the user that
-            // the probe logs in.
-            let shell = crate::workspace_root().join(PROBE_SHELL.1);
-            let users = if with_desktop {
-                desktop_users(kind)?
-            } else {
-                PathBuf::new()
-            };
+            // The desktop system: the whole system with what the stand-ins
+            // install and their account, and without the session settings
+            // when a stand-in is needed for the desktop to count as
+            // installed.
             let desktop_members: Vec<(&str, &Path)> = if with_desktop {
                 whole
                     .iter()
                     .copied()
-                    .filter(|&(at, _)| at != SESSION_SETTINGS)
-                    .chain([
-                        (PROBE_SHELL.0, shell.as_path()),
-                        ("state/accounts/users", users.as_path()),
-                    ])
+                    .filter(|&(at, _)| !(stand_ins.enables_desktop && at == SESSION_SETTINGS))
+                    .chain(
+                        stand_ins
+                            .installs
+                            .iter()
+                            .map(|(at, path)| (at.as_str(), path.as_path())),
+                    )
                     .collect()
             } else {
                 Vec::new()
@@ -505,7 +517,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 BootImage::SystemTests => ("system-tests.img", &whole),
                 // The production kind's desktop edition has the compositor
                 // but not the stand-ins, so its session settings, which keep
-                // the desktop off, stay (MIKSPEC-0023.R54).
+                // the desktop off, stay (MIKSPEC-0023.R59).
                 BootImage::Desktop if with_desktop => ("system-desktop.img", &desktop_members),
                 BootImage::Desktop => ("system-desktop.img", &whole),
                 _ => ("system.img", &whole),
@@ -550,17 +562,17 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                     // system with its shell probe's switcher part replaced
                     // by the Dawn window program.
                     if with_desktop {
-                        let folder = format!("system/apps/{SHELL_PROBE}/");
-                        let greeter = desktop_members
+                        let shell = stand_ins
+                            .app_files
                             .iter()
-                            .find(|(at, _)| *at == format!("{folder}greeter-probe"))
-                            .map(|(_, path)| path.to_path_buf())
-                            .context("the desktop system has no shell probe")?;
-                        let parts = shell_probe_parts(DAWN_SWITCHER);
-                        let window = dawn_test.window.to_path_buf();
-                        let shell = shell_probe(&parts, greeter, DAWN_SWITCHER, window);
+                            .find(|a| a.app.id == SHELL_APP)
+                            .context("the stand-ins have no shell app")?;
+                        let folder = format!("system/apps/{SHELL_APP}/");
+                        let (app, files) = dawn_shell_app(shell, dawn_test.window)?;
                         let dir = c_dir(DAWN_SWITCHER).join("app");
-                        let members = crate::system_apps::members(&shell, &dir)?;
+                        let password = stand_ins.account.as_ref().map(|a| a.password.as_str());
+                        let members =
+                            crate::standin_build::app_members(&app, &files, password, &dir)?;
                         let dawn_desktop: Vec<(&str, &Path)> = desktop_members
                             .iter()
                             .copied()
@@ -2302,6 +2314,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
         desktop_image,
         dawn_image,
         dawn_desktop_image,
+        stand_in_account,
         xkbcommon,
     })
 }
@@ -2331,30 +2344,6 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
         .join(kind.name());
     fs::create_dir_all(&dir)?;
     let path = dir.join("accounts-users");
-    fs::write(&path, encode(&users)).with_context(|| format!("writing {}", path.display()))?;
-    Ok(path)
-}
-
-/// Writes the users file of the desktop run for `kind` and returns its
-/// path: `dee`, an administrator whose login mode is `CONSOLE`, with the
-/// password `dee-password`, which the greeter probe logs in. A fixed salt
-/// keeps the file the same from one build to the next.
-fn desktop_users(kind: Kind) -> Result<PathBuf> {
-    use mikros_userdb::{Kind as UserKind, LoginMode, Users, encode, hash};
-    let mut users = Users::new();
-    let salt = [7; hash::SALT_LEN];
-    let phc = hash::hash(b"dee-password", &salt).context("hashing a password")?;
-    let id = users
-        .create("dee", "Dee", UserKind::Admin, phc)
-        .map_err(|r| anyhow::anyhow!("adding dee: {r:?}"))?;
-    users
-        .set_login_mode(id, LoginMode::Console)
-        .map_err(|r| anyhow::anyhow!("setting the login mode of dee: {r:?}"))?;
-    let dir = crate::workspace_root()
-        .join("target/boot")
-        .join(kind.name());
-    fs::create_dir_all(&dir)?;
-    let path = dir.join("desktop-users");
     fs::write(&path, encode(&users)).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
@@ -2842,209 +2831,35 @@ pub(crate) fn c_build_with(
     Ok(program)
 }
 
-/// The members of the system apps of the desktop run's greeter and of
-/// its user session's shell, both the C program of
-/// `user/tests/greeter-probe`, with the client code of
-/// xdg-shell that the build host's `wayland-scanner` of `wayland`
-/// generates for it, linked with libwayland and the Vulkan loader in
-/// `vulkan`, whose headers are in `headers`.
-fn greeter_probe(
-    wayland: &crate::wayland::Built,
-    vulkan: &Path,
-    headers: &Path,
-    sdl: &Path,
-    xkbcommon: &crate::ports::Built,
-) -> Result<Vec<(String, PathBuf)>> {
-    let name = "greeter-probe";
-    let dir = c_dir(name);
-    fs::create_dir_all(&dir)?;
-    // The client code of xdg-shell, and of the compositor's buffer and
-    // shell protocols, with that of xdg-activation, which the shell's
-    // names.
-    let staged = crate::wayland::protocols()?;
-    let own = crate::workspace_root().join("user/bin/compositor/protocols");
-    crate::wayland::install_protocols()?;
-    let tablet = crate::sysroot::dir().join("share/wayland-protocols/stable/tablet/tablet-v2.xml");
-    let mut code = Vec::new();
-    for (xml, stem) in [
-        (staged.join("xdg-shell.xml"), "xdg-shell"),
-        (own.join("mikros-buffer-v1.xml"), "mikros-buffer-v1"),
-        (staged.join("xdg-activation-v1.xml"), "xdg-activation-v1"),
-        (own.join("mikros-shell-v1.xml"), "mikros-shell-v1"),
-        (own.join("mikros-material-v1.xml"), "mikros-material-v1"),
-        (staged.join("cursor-shape-v1.xml"), "cursor-shape-v1"),
-        // The protocols of the protocols client.
-        (staged.join("viewporter.xml"), "viewporter"),
-        (
-            staged.join("fractional-scale-v1.xml"),
-            "fractional-scale-v1",
-        ),
-        (staged.join("presentation-time.xml"), "presentation-time"),
-        (
-            staged.join("keyboard-shortcuts-inhibit-unstable-v1.xml"),
-            "keyboard-shortcuts-inhibit-unstable-v1",
-        ),
-        (
-            staged.join("wlr-layer-shell-unstable-v1.xml"),
-            "wlr-layer-shell-unstable-v1",
-        ),
-        // Only for the tablet tool's interface, which cursor-shape names.
-        (tablet.clone(), "tablet-v2"),
-    ] {
-        let source = dir.join(format!("{stem}-protocol.c"));
-        for (mode, out) in [
-            (
-                "client-header",
-                dir.join(format!("{stem}-client-protocol.h")),
-            ),
-            ("private-code", source.clone()),
-        ] {
-            crate::port::run(
-                Command::new(wayland.scanner_program())
-                    .arg(mode)
-                    .arg(&xml)
-                    .arg(out),
-            )
-            .with_context(|| format!("generating the {stem} code of greeter-probe"))?;
-        }
-        code.push(source.display().to_string());
-    }
-    let args = [
-        "-Wall".to_string(),
-        "-Wextra".into(),
-        "-Werror".into(),
-        format!("-I{}", headers.display()),
-        format!("-I{}", dir.display()),
-        wayland.library.display().to_string(),
-        vulkan
-            .join("libraries")
-            .join(crate::vulkan::LOADER)
-            .display()
-            .to_string(),
-    ];
-    let mut sources = vec![
-        "user/tests/greeter-probe/greeter.c",
-        "user/tests/greeter-probe/wallpaper.c",
-        "user/tests/greeter-probe/panel.c",
-        "user/tests/greeter-probe/window.c",
-        "user/tests/greeter-probe/protocols.c",
-        "user/tests/greeter-probe/protocols_input.c",
-    ];
-    sources.extend(code.iter().map(String::as_str));
-    let program = c_build(name, &sources, Linking::Dynamic, &args)?;
-    println!("built    {}", program.display());
-    let sdl_program = sdl_probe(wayland, vulkan, headers, sdl, xkbcommon)?;
-    let greeter = crate::system_apps::SystemApp {
-        id: "system.mikros.greeter_probe",
-        version: "1.0.0",
-        name: "Greeter probe",
-        description: "The greeter of the desktop run",
-        executable: name,
-        portable: false,
-        installable: false,
-        shell_parts: "  - roles: [greeter]\n    executable: greeter-probe\n    \
-                      arguments: [\"--login\", dee, dee-password]\n",
-        files: vec![(name.to_owned(), program.clone(), true)],
-    };
-    let parts = shell_probe_parts("sdl-probe");
-    let shell = shell_probe(&parts, program, "sdl-probe", sdl_program);
-    let mut members = crate::system_apps::members(&greeter, &dir.join("app"))?;
-    members.extend(crate::system_apps::members(&shell, &dir.join("app"))?);
-    Ok(members)
-}
+/// The ID of the shell app of the desktop run, whose switcher part the Dawn
+/// run's system changes.
+const SHELL_APP: &str = "system.mikros.shell_probe";
 
-/// The ID of the shell probe, the system app that is the shell of the
-/// desktop run's user session.
-const SHELL_PROBE: &str = "system.mikros.shell_probe";
-
-/// The name of the switcher part's program in the Dawn run's shell probe.
+/// The name of the switcher part's program in the Dawn run's shell app.
 const DAWN_SWITCHER: &str = "dawn-sdl";
 
-/// The `shell_parts` of the shell probe: its desktop part hands the
-/// compositor a wallpaper of a test colour, its taskbar part shows a panel
-/// of haze, its start-menu part connects to the service manager's Control
-/// and so asks a question, and its switcher part is the program
-/// `switcher`, a window that only has to show.
-fn shell_probe_parts(switcher: &str) -> String {
-    format!(
-        "  - roles: [desktop]\n    executable: greeter-probe\n    \
-         arguments: [\"--wallpaper\"]\n  \
-         - roles: [taskbar]\n    executable: greeter-probe\n    \
-         arguments: [\"--panel\"]\n  \
-         - roles: [start-menu]\n    executable: greeter-probe\n    \
-         arguments: [\"--control\"]\n  \
-         - roles: [switcher]\n    executable: {switcher}\n    \
-         arguments: []\n"
-    )
-}
+/// The role of the shell part that the Dawn run's window program replaces.
+const SWITCHER_ROLE: &str = "switcher";
 
-/// The shell probe with the greeter probe `greeter` for its desktop,
-/// taskbar and start-menu parts and the program `switcher`, which is
-/// installed as `executable`, for its switcher part; `parts` is
-/// `shell_probe_parts(executable)`.
-fn shell_probe<'a>(
-    parts: &'a str,
-    greeter: PathBuf,
-    executable: &str,
-    switcher: PathBuf,
-) -> crate::system_apps::SystemApp<'a> {
-    crate::system_apps::SystemApp {
-        id: SHELL_PROBE,
-        version: "1.0.0",
-        name: "Shell probe",
-        description: "The shell of the desktop run",
-        executable: "greeter-probe",
-        portable: false,
-        installable: false,
-        shell_parts: parts,
-        files: vec![
-            ("greeter-probe".to_owned(), greeter, true),
-            (executable.to_owned(), switcher, true),
-        ],
-    }
-}
-
-/// Builds the SDL part of the desktop run, `user/tests/sdl-probe`: a
-/// window of SDL's Wayland driver that Vulkan clears and presents. SDL3 is
-/// linked statically, from `sdl`'s install, and the libraries that it
-/// needs, Wayland and xkbcommon, and the Vulkan loader dynamically.
-fn sdl_probe(
-    wayland: &crate::wayland::Built,
-    vulkan: &Path,
-    headers: &Path,
-    sdl: &Path,
-    xkbcommon: &crate::ports::Built,
-) -> Result<PathBuf> {
-    let args = [
-        "-Wall".to_string(),
-        "-Wextra".into(),
-        "-Werror".into(),
-        format!("-I{}", headers.display()),
-        format!("-I{}", sdl.join("include").display()),
-        sdl.join("libraries")
-            .join(crate::sdl::LIBRARY)
-            .display()
-            .to_string(),
-        wayland.library.display().to_string(),
-        xkbcommon
-            .install
-            .join("libraries/libxkbcommon.dlib")
-            .display()
-            .to_string(),
-        vulkan
-            .join("libraries")
-            .join(crate::vulkan::LOADER)
-            .display()
-            .to_string(),
-    ];
-    let program = c_build(
-        "sdl-probe",
-        &["user/tests/sdl-probe/sdl.c"],
-        Linking::Dynamic,
-        &args,
-    )?;
-    println!("built    {}", program.display());
-    Ok(program)
+/// The shell app `shell` of the stand-ins with its switcher part's program
+/// replaced by the Dawn window program `window`, installed as
+/// `DAWN_SWITCHER`, as the app and the files of its package.
+fn dawn_shell_app(
+    shell: &crate::standin_build::BuiltApp,
+    window: &Path,
+) -> Result<(crate::standin::App, crate::standin_build::PackageFiles)> {
+    let mut app = shell.app.clone();
+    let part = app
+        .parts
+        .iter_mut()
+        .find(|p| p.roles.iter().any(|r| r == SWITCHER_ROLE))
+        .context("the shell app has no switcher part")?;
+    let replaced = std::mem::replace(&mut part.executable, DAWN_SWITCHER.to_owned());
+    app.files.retain(|f| f.name != replaced);
+    let mut files = shell.files.clone();
+    files.retain(|(name, _, _)| *name != replaced);
+    files.push((DAWN_SWITCHER.to_owned(), window.to_path_buf(), true));
+    Ok((app, files))
 }
 
 /// Fails if `members` holds what only test images hold: the system tests,

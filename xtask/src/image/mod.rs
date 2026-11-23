@@ -39,10 +39,12 @@ pub struct Args {
     /// in on the text console and which has no compositor, programs that
     /// start the desktop, or libraries that only they need. For now the
     /// desktop edition has stand-ins for the greeter and the shell and the
-    /// administrator `dee`, password `dee-password`, whom the greeter logs
-    /// in on text console 1, where `desktop` starts the desktop; Ctrl-Alt-F1
-    /// shows the desktop and Ctrl-Alt-F2 the console. The production kind
-    /// has neither, and its desktop edition keeps the desktop off.
+    /// administrator `dee`, whom the greeter logs in on text console 1,
+    /// where `desktop` starts the desktop; Ctrl-Alt-F1 shows the desktop and
+    /// Ctrl-Alt-F2 the console. The password of `dee` is made for each
+    /// image, printed, and written to a file next to the image. The
+    /// production kind has no stand-ins, and its desktop edition keeps the
+    /// desktop off.
     /// Boot an image with `cargo xtask run`, with the same edition.
     #[arg(long, value_enum, default_value_t = Edition::Desktop, conflicts_with = "tests")]
     pub edition: Edition,
@@ -224,18 +226,32 @@ pub fn run(args: &Args) -> Result<()> {
         },
         key.as_ref(),
     )?;
-    if args.edition == Edition::Desktop && args.kind != Kind::Production {
-        println!(
-            "desktop edition: this image has the stand-ins for the greeter and the shell and the \
-             account dee, password dee-password, which the greeter logs in on text console 1; \
-             for development only (MIKSPEC-0023.R56)"
-        );
+    if args.kind != Kind::Production && (args.tests || args.edition == Edition::Desktop) {
+        match (&built.stand_in_account, args.tests) {
+            (Some(account), false) => {
+                let copy = out.with_extension("password");
+                fs::copy(&account.file, &copy)
+                    .with_context(|| format!("writing {}", copy.display()))?;
+                println!(
+                    "stand-ins: this image holds stand-ins for the greeter and the shell, and the \
+                     account {}, whose password is {}, which is also in {}, a secret of \
+                     development (MIKSPEC-0023.R59)",
+                    account.names.join(", "),
+                    account.password,
+                    copy.display()
+                );
+            }
+            _ => println!(
+                "stand-ins: this image holds stand-ins for the greeter and the shell, for \
+                 development only (MIKSPEC-0023.R59)"
+            ),
+        }
     }
     if args.kind == Kind::Staging {
         println!(
             "staging image: built as production is, with the stand-ins of its edition; for \
              development and testing, not production, and not to be published \
-             (MIKSPEC-0023.R57)"
+             (MIKSPEC-0023.R60)"
         );
     }
     Ok(())

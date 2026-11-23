@@ -5,9 +5,6 @@
 //! that `cargo xtask` resolves later are the ports, headers and protocol
 //! origins below.
 
-// Nothing builds from these descriptions yet; the next commits do.
-#![allow(dead_code)]
-
 use crate::build::Edition;
 use anyhow::{Context, Result, bail};
 use std::fs;

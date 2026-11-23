@@ -637,7 +637,7 @@ pub fn run(args: &Args) -> Result<()> {
                 if args.kind == Kind::Production {
                     println!(
                         "desktop run skipped for the production kind, whose image has no \
-                         stand-ins for the greeter and the shell (MIKSPEC-0023.R54)"
+                         stand-ins for the greeter and the shell (MIKSPEC-0023.R59)"
                     );
                 } else {
                     crate::desktop::run(&args.machine, args.kind, &dir.join("desktop"), timeout)?;

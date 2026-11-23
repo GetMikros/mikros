@@ -2,9 +2,6 @@
 //! programs, writes the manifests of their system apps, and makes the account
 //! and the password of an image. Nothing here knows a particular stand-in.
 
-// The build of the images uses this from the next commit.
-#![allow(dead_code)]
-
 use crate::build::{Kind, Linking, c_build_with, c_dir};
 use crate::standin::{self, App, Origin, Part, Protocol, StandIn};
 use anyhow::{Context, Result, anyhow, bail};
@@ -78,15 +75,18 @@ pub struct Held {
     pub account: Option<Account>,
 }
 
+/// The files of a system app's package: each by its name in the package,
+/// with its path and whether it is executable.
+pub type PackageFiles = Vec<(String, PathBuf, bool)>;
+
 /// A system app and its files, by their names in the package.
 pub struct BuiltApp {
     pub app: App,
-    pub files: Vec<(String, PathBuf, bool)>,
-    /// Where the manifest is written.
-    pub dir: PathBuf,
+    pub files: PackageFiles,
 }
 
 /// The accounts that an image holds and their password.
+#[derive(Clone)]
 pub struct Account {
     pub names: Vec<String>,
     pub password: String,
@@ -395,7 +395,6 @@ pub fn build(all: &[StandIn], held: &[&StandIn], ports: &Ports, kind: Kind) -> R
             made.app_files.push(BuiltApp {
                 app: app.clone(),
                 files,
-                dir,
             });
         }
         for install in &stand_in.installs {
