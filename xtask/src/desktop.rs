@@ -73,6 +73,25 @@ const DRAG: i32 = 100;
 const WINDOW_COMMAND: &str = "slash s y s t e m slash a p p s slash s y s t e m dot m i k r o s dot \
     s h e l l shift-minus p r o b e slash g r e e t e r minus p r o b e spc minus minus w i n d o w \
     spc shift-7 ret";
+/// The protocols client (`--protocols` of the greeter probe), started the
+/// same way: a toplevel of `PROTOCOLS_SIZE`, `PARENT` colour, with a
+/// subsurface of 50 by 50 pixels at (10, 20), a cropped and scaled one
+/// whose left half, 60 by 40 pixels, shows at (100, 30), and a popup of 40
+/// by 30 pixels at (20, 120); and a layer surface of 24 pixels along the
+/// left edge of the screen. It says when it is ready.
+const PROTOCOLS_COMMAND: &str = "slash s y s t e m slash a p p s slash s y s t e m dot m i k r o s dot \
+    s h e l l shift-minus p r o b e slash g r e e t e r minus p r o b e spc minus minus p r o t o c \
+    o l s spc shift-7 ret";
+const PROTOCOLS_WAITING: &str = "greeter-probe: protocols waiting for the keyboard";
+const PROTOCOLS_READY: &str = "greeter-probe: protocols ready";
+const PROTOCOLS_FAILED: &str = "greeter-probe: protocols failed";
+const PROTOCOLS_SIZE: (usize, usize) = (240, 180);
+const PROTOCOLS_PARENT: [u8; 3] = [60, 140, 220];
+const PROTOCOLS_CHILD: [u8; 3] = [220, 60, 60];
+const PROTOCOLS_VIEW_LEFT: [u8; 3] = [240, 200, 0];
+const PROTOCOLS_VIEW_RIGHT: [u8; 3] = [0, 160, 160];
+const PROTOCOLS_LAYER: [u8; 3] = [20, 200, 120];
+const PROTOCOLS_POPUP: [u8; 3] = [250, 250, 60];
 const APP_COLOUR: [u8; 3] = [120, 60, 200];
 const APP_SIZE: (usize, usize) = (200, 150);
 /// From where the pointer is after the drag to the band outside the app
@@ -234,6 +253,61 @@ fn colour_bounds(ppm: &[u8], colour: [u8; 3]) -> Option<(usize, usize, usize, us
         });
     }
     bounds
+}
+
+/// Whether the screen dump `ppm` shows what the protocols client draws, or
+/// what is wrong with it: the toplevel, the subsurfaces and the popup in
+/// their places and sizes, and the layer surface along the left edge.
+fn protocols_shown(ppm: &[u8]) -> std::result::Result<(), String> {
+    let bounds = |colour| colour_bounds(ppm, colour);
+    let size = |(l, t, r, b): (usize, usize, usize, usize)| (r - l + 1, b - t + 1);
+    let Some(parent) = bounds(PROTOCOLS_PARENT) else {
+        return Err("the toplevel is not on the screen".into());
+    };
+    if size(parent) != PROTOCOLS_SIZE {
+        return Err(format!("the toplevel is {:?}", size(parent)));
+    }
+    let at = |name: &str, colour, offset: (usize, usize), want: (usize, usize)| {
+        let Some(found) = bounds(colour) else {
+            return Err(format!("{name} is not on the screen"));
+        };
+        if size(found) != want {
+            return Err(format!("{name} is {:?}, not {want:?}", size(found)));
+        }
+        let place = (
+            found.0.wrapping_sub(parent.0),
+            found.1.wrapping_sub(parent.1),
+        );
+        if place != offset {
+            return Err(format!(
+                "{name} lies at {place:?} of the toplevel, not {offset:?}"
+            ));
+        }
+        Ok(())
+    };
+    at(
+        "the synchronized subsurface",
+        PROTOCOLS_CHILD,
+        (10, 20),
+        (50, 50),
+    )?;
+    at(
+        "the cropped subsurface",
+        PROTOCOLS_VIEW_LEFT,
+        (100, 30),
+        (60, 40),
+    )?;
+    at("the popup", PROTOCOLS_POPUP, (20, 120), (40, 30))?;
+    if bounds(PROTOCOLS_VIEW_RIGHT).is_some() {
+        return Err("the part of the buffer outside the crop is shown".into());
+    }
+    let Some(layer) = bounds(PROTOCOLS_LAYER) else {
+        return Err("the layer surface is not on the screen".into());
+    };
+    if layer.0 != 0 || size(layer).0 != 24 || size(layer).1 < 600 {
+        return Err(format!("the layer surface is {layer:?}"));
+    }
+    Ok(())
 }
 
 /// Waits until the serial log `log` has at least `count` lines with `text`.
@@ -587,6 +661,45 @@ pub fn run_with(
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
         let what = "the console showed from dee's desktop";
         screen.until(&mut qemu, WALLPAPER, &gone, what)?;
+        // The protocols client, which has the keyboard once the other two
+        // windows are minimized, and the screen it draws.
+        crate::console::type_keys(&socket, PROTOCOLS_COMMAND)?;
+        std::thread::sleep(Duration::from_secs(3));
+        scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
+        let what = "the desktop showed for the protocols client";
+        screen.until(&mut qemu, WALLPAPER, &|share: f64| share > GONE, what)?;
+        // The client says that it waits for the keyboard once its shortcuts
+        // inhibitor exists, so that a Super and Down that reaches it after it
+        // got the keyboard is its own, not the compositor's.
+        scenario::wait_for_line(&log, PROTOCOLS_WAITING, &mut qemu, deadline)?;
+        for _ in 0..2 {
+            scenario::monitor(&socket, "sendkey meta_l-down")?;
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        loop {
+            let serial = fs::read_to_string(&log).unwrap_or_default();
+            if let Some(line) = serial.lines().find(|l| l.contains(PROTOCOLS_FAILED)) {
+                bail!("{}", line.trim_end());
+            }
+            if serial.contains(PROTOCOLS_READY) {
+                break;
+            }
+            if qemu.try_wait()?.is_some() {
+                bail!("QEMU exited before the protocols client was ready");
+            }
+            if Instant::now() > deadline {
+                bail!("timed out waiting for the protocols client");
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let ppm = scenario::screen_dump(&socket, &dump)?;
+        if let Err(why) = protocols_shown(&ppm) {
+            fs::write(dir.join("protocols.ppm"), &ppm)?;
+            bail!("the protocols client's screen is wrong: {why}");
+        }
+        scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
+        let what = "the console showed after the protocols client";
+        screen.until(&mut qemu, WALLPAPER, &gone, what)?;
         crate::console::type_keys(&socket, CLIENT_COMMAND)?;
         // The console after the command, which `client.ppm` keeps.
         std::thread::sleep(Duration::from_secs(5));
@@ -594,9 +707,9 @@ pub fn run_with(
             dir.join("client.ppm"),
             scenario::screen_dump(&socket, &dump)?,
         )?;
-        // The window of the app that the run started connected as well, so the
-        // client of this step is the second connection.
-        wait_for_lines(&log, CLIENT_CONNECTED, 2, &mut qemu, deadline)?;
+        // The windows of the app and of the protocols client connected as
+        // well, so the client of this step is the third connection.
+        wait_for_lines(&log, CLIENT_CONNECTED, 3, &mut qemu, deadline)?;
         crate::console::type_keys(&socket, "e x i t ret")?;
         scenario::wait_for_line(&log, DESKTOP_ENDED, &mut qemu, deadline).map(drop)
     })();
@@ -620,6 +733,55 @@ mod tests {
         let mut ppm = format!("P6\n{} 1\n255\n", pixels.len()).into_bytes();
         ppm.extend(pixels.iter().flatten());
         ppm
+    }
+
+    /// A screen of 1280 by 800 pixels of the wallpaper's colour, with the
+    /// rectangles `(left, top, width, height, colour)` drawn in order.
+    fn screen_with(rects: &[(usize, usize, usize, usize, [u8; 3])]) -> Vec<u8> {
+        let mut pixels = vec![WALLPAPER; 1280 * 800];
+        for &(left, top, width, height, colour) in rects {
+            for y in top..top + height {
+                for x in left..left + width {
+                    pixels[y * 1280 + x] = colour;
+                }
+            }
+        }
+        let mut ppm = b"P6\n1280 800\n255\n".to_vec();
+        ppm.extend(pixels.iter().flatten());
+        ppm
+    }
+
+    /// What the protocols client draws, with its toplevel at (500, 300).
+    fn protocols_screen(wrong: Option<&str>) -> Vec<u8> {
+        let (l, t) = (500, 300);
+        let mut rects = vec![
+            (0, 0, 24, 800, PROTOCOLS_LAYER),
+            (l, t, 240, 180, PROTOCOLS_PARENT),
+            (l + 10, t + 20, 50, 50, PROTOCOLS_CHILD),
+            (l + 100, t + 30, 60, 40, PROTOCOLS_VIEW_LEFT),
+            (l + 20, t + 120, 40, 30, PROTOCOLS_POPUP),
+        ];
+        match wrong {
+            Some("uncropped") => rects.push((l + 130, t + 30, 30, 40, PROTOCOLS_VIEW_RIGHT)),
+            Some("moved") => rects[2] = (l + 12, t + 20, 50, 50, PROTOCOLS_CHILD),
+            Some("narrow layer") => rects[0] = (0, 0, 20, 800, PROTOCOLS_LAYER),
+            Some("no popup") => {
+                rects.remove(4);
+            }
+            _ => {}
+        }
+        screen_with(&rects)
+    }
+
+    #[test]
+    fn checks_what_the_protocols_client_draws() {
+        assert_eq!(protocols_shown(&protocols_screen(None)), Ok(()));
+        for wrong in ["uncropped", "moved", "narrow layer", "no popup"] {
+            assert!(
+                protocols_shown(&protocols_screen(Some(wrong))).is_err(),
+                "{wrong}"
+            );
+        }
     }
 
     #[test]
