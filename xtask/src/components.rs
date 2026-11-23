@@ -21,6 +21,8 @@
 //!   library that needs the standard library, which only programs with
 //!   it use.
 //! - `kinds`: the build kinds that install it, when not all of them.
+//! - `editions`: the editions of the system that install it, when not all
+//!   of them: `desktop` for the compositor and what only the desktop uses.
 //! - `path`: the member name of the program instead, for `init`.
 //! - `completions`: the file name, in its package, of the declarations of
 //!   a program's arguments for msh, installed as
@@ -33,7 +35,7 @@
 //! - `cursors`: the folders, in its package, of cursor themes, each of
 //!   which `cursors::build` turns into `system/share/cursors/<folder>.curpack`.
 
-use crate::build::Kind;
+use crate::build::{Edition, Kind};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -80,6 +82,7 @@ pub struct Component {
     pub runtime: Runtime,
     manifest: Option<String>,
     kinds: Option<Vec<String>>,
+    editions: Option<Vec<String>>,
     path: Option<String>,
     completions: Option<String>,
     config: Vec<String>,
@@ -93,6 +96,13 @@ impl Component {
         self.kinds
             .as_ref()
             .is_none_or(|kinds| kinds.iter().any(|k| k == kind.name()))
+    }
+
+    /// Whether the edition `edition` installs the component.
+    pub fn in_edition(&self, edition: Edition) -> bool {
+        self.editions
+            .as_ref()
+            .is_none_or(|editions| editions.iter().any(|e| e == edition.name()))
     }
 
     /// The members that install the component in an image of the build
@@ -271,6 +281,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
                 "manifest",
                 "runtime",
                 "kinds",
+                "editions",
                 "path",
                 "completions",
                 "config",
@@ -312,6 +323,26 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             ),
             Some(_) => bail!("{name}: `kinds` is not a list"),
         };
+        let editions = match table.get("editions") {
+            None => None,
+            Some(Value::Array(editions)) => {
+                let editions = editions
+                    .iter()
+                    .map(|e| e.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+                    .with_context(|| format!("{name}: `editions` holds a non-string"))?;
+                for edition in &editions {
+                    if ![Edition::Server, Edition::Desktop]
+                        .iter()
+                        .any(|e| e.name() == edition)
+                    {
+                        bail!("{name}: unknown edition `{edition}`");
+                    }
+                }
+                Some(editions)
+            }
+            Some(_) => bail!("{name}: `editions` is not a list"),
+        };
         let list = |key: &str| -> Result<Vec<String>> {
             match table.get(key) {
                 None => Ok(Vec::new()),
@@ -338,6 +369,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             runtime,
             manifest: text("manifest")?,
             kinds,
+            editions,
             path: text("path")?,
             completions: text("completions")?,
             config,
@@ -447,6 +479,33 @@ mod tests {
         let elsewhere = serde_json::json!({ "packages": [package("files",
             serde_json::json!({"kind": "test", "image": "system"}))]});
         assert!(parse(&elsewhere).is_err());
+    }
+
+    #[test]
+    fn takes_only_the_editions_it_names() {
+        let metadata = serde_json::json!({ "packages": [
+            package("compositor",
+                serde_json::json!({"kind": "program", "image": "system", "editions": ["desktop"]})),
+            package("msh", serde_json::json!({"kind": "program", "image": "system"})),
+        ]});
+        let components = parse(&metadata).unwrap();
+        assert!(components[0].in_edition(Edition::Desktop));
+        assert!(!components[0].in_edition(Edition::Server));
+        assert!(components[1].in_edition(Edition::Desktop));
+        assert!(components[1].in_edition(Edition::Server));
+    }
+
+    #[test]
+    fn refuses_an_unknown_edition_and_a_list_that_is_not_one() {
+        for editions in [
+            serde_json::json!(["kiosk"]),
+            serde_json::json!("desktop"),
+            serde_json::json!([1]),
+        ] {
+            let metadata = serde_json::json!({ "packages": [package("x",
+                serde_json::json!({"kind": "program", "image": "system", "editions": editions}))]});
+            assert!(parse(&metadata).is_err());
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 [package.metadata.mikros]
 kind = "program"
 image = "system"
+editions = ["desktop"]
 completions = "desktop.msh"
 
 # The parts that only run on Mikros are left out of the host's tests.

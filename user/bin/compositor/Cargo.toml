@@ -23,6 +23,7 @@ mikros-xkb = { path = "../../lib/xkb" }
 [package.metadata.mikros]
 kind = "program"
 image = "system"
+editions = ["desktop"]
 manifest = "system.compositor.yaml"
 share = ["desktop/shell.yaml", "desktop/theme.yaml"]
 cursors = ["cursors/default"]

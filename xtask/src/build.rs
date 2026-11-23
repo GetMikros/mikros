@@ -129,6 +129,14 @@ pub enum Edition {
 }
 
 impl Edition {
+    /// The edition's name on the command line.
+    pub fn name(self) -> &'static str {
+        match self {
+            Edition::Server => "server",
+            Edition::Desktop => "desktop",
+        }
+    }
+
     /// The boot image that builds this edition.
     fn boot_image(self) -> BootImage {
         match self {
@@ -152,6 +160,18 @@ pub enum BootImage {
     SystemTests,
     /// The boot image of the integration tests, whose init runs them.
     Test,
+}
+
+impl BootImage {
+    /// The edition whose components the image holds: the server's, or all of
+    /// them, which the desktop edition, the test images and the test boot
+    /// image have.
+    fn edition(self) -> Edition {
+        match self {
+            BootImage::System => Edition::Server,
+            _ => Edition::Desktop,
+        }
+    }
 }
 
 /// Builds every component of the build kind `kind`.
@@ -289,11 +309,13 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
             let with_desktop = tests || boot == BootImage::Desktop;
             let headers = crate::vulkan::headers()?.join("include");
             let components = crate::components::all()?;
-            // What only test images hold is built for them alone.
+            let edition = boot.edition();
+            // What only test images hold is built for them alone, and what
+            // only the desktop edition holds for it and the test images.
             let built = |runtime| -> Vec<String> {
                 components
                     .iter()
-                    .filter(|c| c.runtime == runtime && c.in_kind(kind))
+                    .filter(|c| c.runtime == runtime && c.in_kind(kind) && c.in_edition(edition))
                     .filter(|c| tests || c.image != Image::Tests)
                     .map(|c| c.name.clone())
                     .collect()
@@ -309,7 +331,10 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
             // What only the test images hold, besides the system tests,
             // selftest for one: the Dawn run's system has these.
             let mut test_support = Vec::new();
-            for component in components.iter().filter(|c| c.in_kind(kind)) {
+            for component in components
+                .iter()
+                .filter(|c| c.in_kind(kind) && c.in_edition(edition))
+            {
                 let members = match component.image {
                     Image::Boot => &mut early,
                     Image::Tests if tests => &mut only_tests,
@@ -402,6 +427,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
             // manager starts them once the root is available.
             let login = login_members(
                 kind,
+                edition,
                 &xkbcommon,
                 &freetype,
                 &keymaps,
@@ -2141,6 +2167,7 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"].map(|f| fonts.ttf.join(f));
             let login = login_members(
                 kind,
+                boot.edition(),
                 &xkbcommon,
                 &freetype,
                 &keymaps,
@@ -2326,6 +2353,7 @@ fn vulkan_members(loader: &Path, mesa: &Path, llvm: &Path) -> Vec<(String, PathB
 /// must find in the boot image, are among the other members.
 fn login_members(
     kind: Kind,
+    edition: Edition,
     xkbcommon: &crate::ports::Built,
     freetype: &crate::ports::Built,
     keymaps: &crate::ports::Built,
@@ -2334,7 +2362,10 @@ fn login_members(
 ) -> Result<Vec<(String, PathBuf)>> {
     let mut members = Vec::new();
     for component in crate::components::all()? {
-        if component.image == Image::System && component.in_kind(kind) {
+        if component.image == Image::System
+            && component.in_kind(kind)
+            && component.in_edition(edition)
+        {
             let program = component_build(&component, kind)?;
             members.extend(component.members(kind, &program)?);
         }
@@ -2352,11 +2383,14 @@ fn login_members(
             "system/libraries/libxkbcommon.dlib".into(),
             xkbcommon.install.join("libraries/libxkbcommon.dlib"),
         ),
-        (
+    ]);
+    // The libraries of the compositor and of the programs that draw.
+    if edition == Edition::Desktop {
+        members.push((
             format!("system/libraries/{}", crate::wayland::LIBRARY),
             wayland.to_path_buf(),
-        ),
-    ]);
+        ));
+    }
     // The C++ runtimes, shared.
     let lib = crate::sysroot::dir().join("libraries");
     members.extend([
@@ -2373,7 +2407,9 @@ fn login_members(
             lib.join("libunwind.dlib"),
         ),
     ]);
-    members.extend_from_slice(vulkan);
+    if edition == Edition::Desktop {
+        members.extend_from_slice(vulkan);
+    }
     let keymap_data = keymaps.install.join("share/xkeyboard-config-2");
     let mut keymap_files = Vec::new();
     crate::port_tests::collect(&keymap_data, &mut keymap_files)?;
