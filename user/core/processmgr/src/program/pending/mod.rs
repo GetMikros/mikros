@@ -10,6 +10,7 @@ mod forward;
 
 use crate::gate::{Answer, Arrival, Machine, Outcome, Target};
 use crate::program::processes::Shared;
+use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -268,6 +269,22 @@ struct Connection {
     state: Option<Rc<SubjectState>>,
     /// The connection to the folder that this connection forwards to.
     bound: RefCell<Option<Rc<NodeAsyncClient>>>,
+    /// The calls that wait for their turn, which go one after the other.
+    lane: RefCell<VecDeque<NodeRequest>>,
+    /// Whether a task serves `lane`.
+    working: Cell<bool>,
+}
+
+/// Whether `request` is one of the four calls that a gate does not make
+/// wait behind another call of its connection (MIKSPEC-0094.R11).
+fn never_waits(request: &NodeRequest) -> bool {
+    matches!(
+        request,
+        NodeRequest::GetAttributes(..)
+            | NodeRequest::Access(..)
+            | NodeRequest::QueryFilesystem(..)
+            | NodeRequest::Clone(..)
+    )
 }
 
 async fn serve(
@@ -282,6 +299,8 @@ async fn serve(
         rights,
         state,
         bound: RefCell::new(None),
+        lane: RefCell::new(VecDeque::new()),
+        working: Cell::new(false),
     });
     while let Ok(request) = server.next().await {
         connection.handle(request, &server).await;
@@ -316,10 +335,6 @@ impl Connection {
     async fn handle(self: &Rc<Self>, request: NodeRequest, server: &Rc<NodeAsyncServer>) {
         use NodeRequest as R;
         let s = server.server();
-        let allowed = self
-            .state
-            .as_ref()
-            .is_some_and(|state| state.machine.borrow().allowed());
         // Before an answer, and never forwarded, the four answer on their
         // own.
         let unanswered = self
@@ -371,19 +386,41 @@ impl Connection {
             refuse(request, s, Error::AccessDenied);
             return;
         };
-        if allowed {
-            self.go_on(&state, request, s).await;
+        let (connection, server) = (self.clone(), server.clone());
+        // The four quick calls never wait behind another call, and the
+        // others go one after the other: a call that waits for the
+        // answer, or that the folder takes long to answer, holds up only
+        // those after it.
+        if never_waits(&request) {
+            self.gate.shared.spawner.spawn(async move {
+                connection.serve(&state, request, server.server()).await;
+            });
             return;
         }
-        let (connection, server) = (self.clone(), server.clone());
+        self.lane.borrow_mut().push_back(request);
+        if self.working.replace(true) {
+            return;
+        }
         self.gate.shared.spawner.spawn(async move {
-            let s = server.server();
-            match answer(&connection.gate, &state).await {
-                Outcome::Proceed => connection.go_on(&state, request, s).await,
-                Outcome::Denied => refuse(request, s, Error::AccessDenied),
-                Outcome::Failed(e) => refuse(request, s, e),
+            loop {
+                let next = connection.lane.borrow_mut().pop_front();
+                let Some(request) = next else {
+                    connection.working.set(false);
+                    break;
+                };
+                connection.serve(&state, request, server.server()).await;
             }
         });
+    }
+
+    /// Does what the gate does with `request` of a call that needs an
+    /// answer: waits for it, and forwards the call or fails it.
+    async fn serve(&self, state: &Rc<SubjectState>, request: NodeRequest, s: &NodeServer) {
+        match answer(&self.gate, state).await {
+            Outcome::Proceed => self.go_on(state, request, s).await,
+            Outcome::Denied => refuse(request, s, Error::AccessDenied),
+            Outcome::Failed(e) => refuse(request, s, e),
+        }
     }
 
     /// Binds a new connection of the gate to the subject in `q`, unless
