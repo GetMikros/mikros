@@ -48,6 +48,7 @@ mod scenario;
 mod sdl;
 mod secure_boot;
 mod setup;
+mod standin;
 mod symbolize;
 mod sysroot;
 mod system_apps;
