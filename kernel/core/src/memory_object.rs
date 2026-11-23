@@ -1308,11 +1308,19 @@ impl MemoryObject {
         let koid = self.header.koid();
         let _charge = crate::pager::charge_wait()?;
         loop {
+            // The thread registers before it looks at the mark: the end of
+            // a mark does not take the pages' lock, so a wake that came
+            // between the look and the registration would find nobody to
+            // wake. Registered first, a wake that comes after wakes the
+            // thread, and one that came before ended the mark, which the
+            // look then sees.
+            let thread = crate::pager::wait_for(koid, index)?;
             let pages = self.pages.lock();
             if !self.is_changing(index) {
+                drop(pages);
+                crate::pager::stop_waiting(koid, &thread);
                 return Ok(());
             }
-            let thread = crate::pager::wait_for(koid, index)?;
             drop(pages);
             let slept = crate::sched::wait_for_signals(&thread, i64::MAX);
             crate::pager::stop_waiting(koid, &thread);
