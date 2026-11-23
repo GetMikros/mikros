@@ -223,6 +223,12 @@ impl<P: Ports> Controller<P> {
         None
     }
 
+    /// Whether the output buffer holds a byte, which stops the controller
+    /// from taking in any other until it is read.
+    pub fn pending(&mut self) -> bool {
+        self.ports.status() & OUTPUT_FULL != 0
+    }
+
     /// The byte in the output buffer and the port it came from, if
     /// there is one.
     pub fn poll(&mut self) -> Option<(Port, u8)> {
