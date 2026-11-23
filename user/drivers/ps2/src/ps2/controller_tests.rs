@@ -250,3 +250,13 @@ fn led_bits_map_to_the_keyboard_command() {
     assert_eq!(led_byte(1 << LED_CAPSL), 4);
     assert_eq!(led_byte(KEYBOARD_LEDS), 7);
 }
+
+#[test]
+fn a_byte_in_the_output_buffer_is_pending_until_it_is_read() {
+    let mut controller = Controller::new(Fake::new(Some(0)));
+    assert!(!controller.pending());
+    controller.ports().answer(Port::Second, &[0x08]);
+    assert!(controller.pending());
+    assert_eq!(controller.poll(), Some((Port::Second, 0x08)));
+    assert!(!controller.pending());
+}

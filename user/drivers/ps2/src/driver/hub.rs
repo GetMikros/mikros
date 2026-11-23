@@ -37,6 +37,12 @@ impl Hub {
         }
     }
 
+    /// Whether a byte waits in the controller, which no interrupt will
+    /// announce when it arrived while the line was masked.
+    pub fn pending(&self) -> bool {
+        self.controller.borrow_mut().pending()
+    }
+
     /// Reads what the devices sent.
     pub fn drain(&self) {
         for _ in 0..DRAIN_MAX {

@@ -301,7 +301,18 @@ async fn keep(_manager: DeviceManagerAsyncClient) {
 async fn watch(hub: Rc<Hub>, interrupts: Rc<Vec<OwnedHandle>>, at: usize, reactor: Reactor) {
     let raw = interrupts[at].raw();
     while reactor.signals(raw, SIGNALED).await.is_ok() {
-        hub.drain();
-        let _ = mikros_rt::hardware::interrupt_ack(raw);
+        // The line is masked from one interrupt until it is acknowledged,
+        // and an edge that comes while it is masked is lost. A byte that
+        // arrived after the last read leaves the controller's output
+        // buffer full, and it takes in no other byte until that is read,
+        // so the buffer is looked at again once the line is open, and
+        // read, until it is empty with the line open.
+        loop {
+            hub.drain();
+            let _ = mikros_rt::hardware::interrupt_ack(raw);
+            if !hub.pending() {
+                break;
+            }
+        }
     }
 }
