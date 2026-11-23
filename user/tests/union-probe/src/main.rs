@@ -244,13 +244,112 @@ fn check(directory: &DirectoryClient, executor: &mut Executor) -> Result<(), i64
     )?;
     writes(&root, &union, &lower)?;
     revocable(&root, &union)?;
-    quick_calls(&union, executor)
+    quick_calls(&union, executor)?;
+    waiting_locks(&root, &union, executor)
 }
 
 /// How long the open has to reach the backing node, and how long the view
 /// has to answer a call that never waits.
 const SETTLE: i64 = 200_000_000;
 const QUICK: i64 = 3_000_000_000;
+
+/// A connection of `view`'s to the file `name` with `READ` and `WRITE`.
+async fn file_of(view: &NodeAsyncClient, reactor: &Reactor) -> Option<NodeAsyncClient> {
+    let (node, server) = endpoints::<Node>().ok()?;
+    ok(view.open("f".into(), OpenFlags(0), 0o644, RW, server).await)?;
+    Some(NodeAsyncClient::new(node, reactor.clone()))
+}
+
+/// Waits `SETTLE`, which ends early with false when `lock` is done.
+async fn settles<T>(reactor: &Reactor, lock: &mut (impl Future<Output = T> + Unpin)) -> bool {
+    let mut now = 0;
+    // SAFETY: the pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    let mut settle = pin!(reactor.sleep_until(now + SETTLE));
+    poll_fn(|cx| {
+        if core::pin::Pin::new(&mut *lock).poll(cx).is_ready() {
+            return Poll::Ready(false);
+        }
+        settle.as_mut().poll(cx).map(|_| true)
+    })
+    .await
+}
+
+/// Waits `SETTLE`.
+async fn pause(reactor: &Reactor) {
+    let mut now = 0;
+    // SAFETY: the pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    let _ = reactor.sleep_until(now + SETTLE).await;
+}
+
+/// Whether, through a view over the temporary file system's file, an
+/// `Unlock` is answered while a `Lock` that waits is waiting, the `Lock`
+/// is granted once the other holder lets go, and a `Lock` whose
+/// connection closed meanwhile never takes the lock (MIKSPEC-0049.R38,
+/// MIKSPEC-0051.R19).
+fn waiting_locks(
+    root: &NodeClient,
+    union: &UnionClient,
+    executor: &mut Executor,
+) -> Result<(), i64> {
+    let reactor = executor.reactor().clone();
+    let dir = mkdir(root, "waiting").ok_or(46)?;
+    file(&dir, "f", b"data").ok_or(46)?;
+    let (backing, server) = endpoints::<Node>().map_err(|_| 46)?;
+    ok(dir.clone(server, RW, FOREVER)).ok_or(46)?;
+    let (view, view_server) = endpoints::<Node>().map_err(|_| 46)?;
+    ok(union.create_revocable(backing, RW, 13, view_server, FOREVER)).ok_or(46)?;
+    let view = NodeAsyncClient::new(view, reactor.clone());
+    executor.block_on(async {
+        let holder = file_of(&view, &reactor).await.ok_or(47)?;
+        let waiter = file_of(&view, &reactor).await.ok_or(47)?;
+        ok(holder.lock(LockKind::Exclusive, 0, 4, false).await).ok_or(48)?;
+        let mut locking = pin!(waiter.lock(LockKind::Exclusive, 0, 4, true));
+        if !settles(&reactor, &mut locking).await {
+            return Err(49);
+        }
+        let mut now = 0;
+        // SAFETY: the pointer is valid for the call.
+        unsafe { sys::clock_get_monotonic(&mut now) };
+        let mut timeout = pin!(reactor.sleep_until(now + QUICK));
+        let mut unlocking = pin!(waiter.unlock(8, 1));
+        let answered = poll_fn(|cx| {
+            if locking.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(None);
+            }
+            if unlocking.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Some(true));
+            }
+            match timeout.as_mut().poll(cx).is_ready() {
+                true => Poll::Ready(Some(false)),
+                false => Poll::Pending,
+            }
+        })
+        .await;
+        if answered != Some(true) {
+            return Err(50);
+        }
+        ok(holder.unlock(0, 0).await).ok_or(51)?;
+        ok(locking.await).ok_or(51)?;
+        ok(waiter.unlock(0, 0).await).ok_or(51)?;
+        // A waiting lock whose connection closes never takes the lock.
+        let closing = file_of(&view, &reactor).await.ok_or(52)?;
+        ok(holder.lock(LockKind::Exclusive, 0, 4, false).await).ok_or(52)?;
+        {
+            let mut locking = pin!(closing.lock(LockKind::Exclusive, 0, 4, true));
+            if !settles(&reactor, &mut locking).await {
+                return Err(53);
+            }
+        }
+        drop(closing);
+        pause(&reactor).await;
+        ok(holder.unlock(0, 0).await).ok_or(54)?;
+        let third = file_of(&view, &reactor).await.ok_or(54)?;
+        ok(third.lock(LockKind::Exclusive, 0, 4, false).await).ok_or(55)?;
+        Ok(())
+    })
+}
 
 /// What a directory shows.
 fn directory_attributes() -> Attributes {
