@@ -9,7 +9,7 @@ use crate::program::portable::Portable;
 use crate::program::records::{Exit, Record, Records};
 use crate::program::start::{self, Transfer, duplicate};
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::rc::Rc;
+use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -43,6 +43,9 @@ const CHLD: u32 = 17;
 
 /// What the process manager's tasks share.
 pub struct Shared {
+    /// This value itself, for what keeps it: the gates of pending
+    /// entries.
+    me: Weak<Shared>,
     pub fs: Rc<Fs>,
     /// The `/dev` of every process.
     pub dev: Dev,
@@ -137,6 +140,13 @@ pub struct NewProcess {
 }
 
 impl Shared {
+    /// This value as the `Rc` it lives in.
+    pub fn rc(&self) -> Rc<Shared> {
+        self.me
+            .upgrade()
+            .expect("the process manager's state lives")
+    }
+
     pub fn new(
         fs: Rc<Fs>,
         namespaces: Rc<Namespaces>,
@@ -146,7 +156,8 @@ impl Shared {
         reactor: Reactor,
         spawner: Spawner,
     ) -> Rc<Shared> {
-        Rc::new(Shared {
+        Rc::new_cyclic(|me| Shared {
+            me: me.clone(),
             fs,
             process,
             dev: Dev::new(reactor.clone(), spawner.clone()),

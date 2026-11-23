@@ -63,12 +63,9 @@ struct SubjectState {
     master: RefCell<Option<Rc<NodeAsyncClient>>>,
 }
 
-/// A pending entry: for one user, the app of its view's key, and one
-/// permission.
+/// A pending entry, for one permission.
 pub struct Gate {
     shared: Rc<Shared>,
-    user: u32,
-    app_id: String,
     permission: &'static str,
     target: Target,
     /// The folder's path, for a folder.
@@ -247,8 +244,6 @@ pub async fn view(
 ) -> Option<ClientEnd<Node>> {
     let gate = Rc::new(Gate {
         shared: shared.clone(),
-        user,
-        app_id: app_id.into(),
         permission,
         target,
         path,

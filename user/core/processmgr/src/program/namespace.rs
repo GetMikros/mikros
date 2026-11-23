@@ -1257,6 +1257,18 @@ impl Namespaces {
                 };
                 add(&mut entries, &mut origins, none(volumes));
             }
+        } else if app.is_some() && user != 0 && user != GREETER_USER {
+            // Asked for on first use (MIKSPEC-0094.R2).
+            let grant = (user, app_id, crate::program::grants::VOLUMES);
+            let pending = (crate::gate::Target::Volumes, String::new());
+            let view = crate::program::pending::view(&shared.rc(), grant, pending, RW).await;
+            if let Some(directory) = view {
+                let volumes = NamespaceEntry {
+                    path: VOLUMES.into(),
+                    directory,
+                };
+                add(&mut entries, &mut origins, none(volumes));
+            }
         }
         // Libraries with kept versions are views of their versions, newest
         // first (MIKSPEC-0101.R51).
@@ -1687,6 +1699,28 @@ impl Namespaces {
                 }
             };
             if !holds {
+                // Asked for on first use (MIKSPEC-0094.R2).
+                let target = crate::gate::PENDING.iter().find(|(p, _)| *p == permission);
+                if let Some(&(_, target)) = target {
+                    let grant = (user, app_id, permission);
+                    let gate = crate::program::pending::view(
+                        &shared.rc(),
+                        grant,
+                        (target, path.clone()),
+                        rights,
+                    )
+                    .await;
+                    if let Some(view) = gate {
+                        add(
+                            entries,
+                            origins,
+                            none(NamespaceEntry {
+                                path,
+                                directory: view,
+                            }),
+                        );
+                    }
+                }
                 continue;
             }
             let Ok((folder, _)) = self.entry(shared, ready, &path, rights).await else {
