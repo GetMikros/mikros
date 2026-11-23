@@ -16,6 +16,7 @@ use alloc::string::String;
 use core::cell::{Cell, RefCell};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{
     AppNumbers, AppNumbersAsyncClient, Broker, BrokerAsyncClient, Decision,
 };
@@ -128,6 +129,26 @@ impl Permissions {
             .connect(PROTOCOL.into(), None, server.into_handle())
             .await;
         matches!(connected, Ok(Ok(_))).then(|| BrokerAsyncClient::new(client, reactor.clone()))
+    }
+
+    /// What the broker answers to a `Request` of `client` for
+    /// `permission` with no reason, which waits as long as the question
+    /// does. It uses a connection of its own, so that a waiting question
+    /// holds up no other call to the broker.
+    pub async fn request(
+        &self,
+        reactor: &Reactor,
+        client: ClientIdentity,
+        permission: &str,
+    ) -> Result<Decision, Status> {
+        let broker = self.watcher(reactor).await.ok_or(Status::BadState)?;
+        match broker
+            .request(client, permission.into(), String::new())
+            .await
+        {
+            Ok(r) => r.map(|r| r.decision),
+            Err(_) => Err(Status::PeerClosed),
+        }
     }
 
     /// Records whether the broker answered on its connection; one that

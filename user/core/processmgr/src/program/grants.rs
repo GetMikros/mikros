@@ -8,10 +8,11 @@
 //! made under a key that was revoked meanwhile is dropped, so that no
 //! namespace built across the revocation keeps it.
 
+use crate::program::pending::Gate;
 use crate::program::processes::Shared;
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::rc::Rc;
+use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -37,12 +38,18 @@ pub const VOLUMES: &str = "user.volumes.access";
 /// The first key; keys are never used again once revoked.
 const FIRST_KEY: u64 = 1 << 40;
 
+/// A grant: the user, the app ID and the permission.
+type GrantId = (u32, String, String);
+
 /// The current revocation key of each grant, by user, app and
 /// permission.
 #[derive(Default)]
 pub struct Grants {
     keys: RefCell<BTreeMap<(u32, String, String), u64>>,
     next: Cell<u64>,
+    /// The gates of the pending entries of each grant, which a
+    /// revocation closes (MIKSPEC-0094.R8).
+    gates: RefCell<BTreeMap<GrantId, Vec<Weak<Gate>>>>,
 }
 
 impl Grants {
@@ -57,6 +64,25 @@ impl Grants {
         self.next.set(self.next.get() + 1);
         self.keys.borrow_mut().insert(id, key);
         key
+    }
+
+    /// Adds `gate` as a gate of that grant.
+    pub fn add_gate(&self, user: u32, app_id: &str, permission: &str, gate: Weak<Gate>) {
+        let id = (user, String::from(app_id), String::from(permission));
+        let mut gates = self.gates.borrow_mut();
+        let list = gates.entry(id).or_default();
+        list.retain(|g| g.strong_count() > 0);
+        list.push(gate);
+    }
+
+    /// Revokes the gates of that grant, so that no call that is waiting
+    /// or starts afterwards goes on, and none asks again.
+    fn revoke_gates(&self, user: u32, app_id: &str, permission: &str) {
+        let id = (user, String::from(app_id), String::from(permission));
+        let list = self.gates.borrow_mut().remove(&id).unwrap_or_default();
+        for gate in list.iter().filter_map(Weak::upgrade) {
+            gate.revoke();
+        }
     }
 
     /// Whether `key` is still the key of that grant.
@@ -130,6 +156,9 @@ pub async fn watch(shared: Rc<Shared>, broker: BrokerAsyncClient) {
         let BrokerEvent::OnRevokedConfirmed(e) = event else {
             continue;
         };
+        // Before anything waits for the union server, so that no call
+        // that arrives meanwhile asks again.
+        shared.grants.revoke_gates(e.user, &e.app_id, &e.permission);
         if let Some(key) = shared.grants.revoked(e.user, &e.app_id, &e.permission) {
             let revoked = match union(&shared).await {
                 Some(union) => matches!(union.revoke(key).await, Ok(Ok(_))),
