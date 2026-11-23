@@ -29,6 +29,9 @@ impl Connection {
         })?;
         let range = range(q.start, q.length)?;
         poll_fn(|cx| {
+            if self.closed.get() {
+                return Poll::Ready(Err(Error::Io));
+            }
             let waker = q.wait.then_some(cx.waker());
             match self
                 .fs

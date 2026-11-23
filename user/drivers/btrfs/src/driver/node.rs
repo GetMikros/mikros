@@ -6,6 +6,7 @@
 
 use crate::driver::fs::{self, Fs, Open};
 use alloc::rc::Rc;
+use core::cell::Cell;
 use mikros_acl::Subject;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
@@ -31,6 +32,8 @@ pub(crate) struct Connection {
     pub(crate) folded: bool,
     /// The owner of the connection's locks and watches.
     pub(crate) owner: u64,
+    /// Whether the connection ended, which ends a lock that waits.
+    pub(crate) closed: Rc<Cell<bool>>,
 }
 
 /// Serves the connection on `end` to `open` until the client closes it
@@ -44,8 +47,9 @@ pub async fn serve(
     append: bool,
     folded: bool,
 ) {
-    let server = NodeAsyncServer::new(end, fs.reactor.clone());
+    let server = Rc::new(NodeAsyncServer::new(end, fs.reactor.clone()));
     let owner = fs.owner();
+    let closed = Rc::new(Cell::new(false));
     let mut connection = Connection {
         fs,
         open,
@@ -55,11 +59,31 @@ pub async fn serve(
         append,
         folded,
         owner,
+        closed: closed.clone(),
     };
     while let Ok(request) = server.next().await {
         match request {
-            // A lock that waits holds up the connection's other requests,
-            // as a waiting `fcntl` does.
+            // A lock that waits does not hold up the connection's other
+            // calls, `Unlock` included, and ends with the connection
+            // (MIKSPEC-0049.R38).
+            NodeRequest::Lock(q, r) if q.wait => {
+                let waiter = Connection {
+                    fs: connection.fs.clone(),
+                    open: connection.open.clone(),
+                    rights,
+                    subject: connection.subject,
+                    cursor: 0,
+                    append: false,
+                    folded,
+                    owner,
+                    closed: closed.clone(),
+                };
+                let server = server.clone();
+                connection.fs.spawner.spawn(async move {
+                    let locked = waiter.lock(q).await;
+                    let _ = r.reply(server.server(), locked.map(|()| NodeLockResponse {}));
+                });
+            }
             NodeRequest::Lock(q, r) => {
                 let locked = connection.lock(q).await;
                 let _ = r.reply(server.server(), locked.map(|()| NodeLockResponse {}));
@@ -68,6 +92,8 @@ pub async fn serve(
         }
     }
     let Connection { fs, open, .. } = connection;
+    // Before the locks go, which wakes the waiting ones.
+    closed.set(true);
     fs.unlock(&open, owner, (0, u64::MAX));
     fs.watches.end(owner);
 }
