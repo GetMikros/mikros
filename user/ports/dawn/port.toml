@@ -2,7 +2,7 @@
 # libwebgpu_dawn.slib with its Tint shader compiler, for the Vulkan and
 # Wayland platforms of Mikros, for tests. It is not installed in an image:
 # Elegance builds its own copy of Dawn and links it into its library. It is
-# built from the commit of the `mikros` branch of the Mikros fork,
+# built from the commit of the `mikros-shared` branch of the Mikros fork,
 # GetMikros/dawn, whose commits stand on the v20260911.162847 tag of
 # upstream and the alpha mode patch of Elegance (MIKSPEC-0062.R9). The
 # branch's changes:
@@ -12,16 +12,20 @@
 # - the CMake build selects the Vulkan, Wayland and Null backends, builds
 #   Tint as for an unknown system and leaves out the DRM, file descriptor
 #   memory and RenderDoc code;
-# - no external semaphore service, so no shared fences of semaphores.
+# - shared texture memory and shared fences of the OPAQUE_FD type, whose
+#   semaphores are kernel timelines, as the driver shares no binary ones: a
+#   shared texture has one timeline that every submit signals to a higher
+#   value, which an end of access hands out as a duplicate with the value to
+#   wait for, and a begin of access waits for the value that it is given.
 # Dawn's dependencies are the ports abseil, spirv-headers, spirv-tools and
 # vulkan-utility-libraries, and the Vulkan headers of
 # user/ports/vulkan-headers, whose directories xtask gives it; its source
 # generators need the host's Python packages jinja2 and markupsafe.
 
 [source]
-url = "https://github.com/GetMikros/dawn/archive/a93757a59da05dd3e09185f151a4af3a9d7a4e88.tar.gz"
-sha256 = "595de22f1c5b83005f5dd4ae9edf4a3999a149aa1dbb44cdc3b37b08d3f44a3d"
-dir = "dawn-a93757a59da05dd3e09185f151a4af3a9d7a4e88"
+url = "https://github.com/GetMikros/dawn/archive/ab53c47f8d3b0f7d3460822c33e895e61a75eea5.tar.gz"
+sha256 = "05b06312c633b88683fac61c02d3484dd520a327912253774791cd64dfeedb63"
+dir = "dawn-ab53c47f8d3b0f7d3460822c33e895e61a75eea5"
 
 [build]
 options = [
