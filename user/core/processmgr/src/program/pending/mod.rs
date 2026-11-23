@@ -273,6 +273,44 @@ struct Connection {
     lane: RefCell<VecDeque<NodeRequest>>,
     /// Whether a task serves `lane`.
     working: Cell<bool>,
+    closed: Closed,
+}
+
+/// Whether a gate connection is closed, and the tasks that wait for it.
+#[derive(Default)]
+struct Closed {
+    done: Cell<bool>,
+    wakers: RefCell<Vec<Waker>>,
+}
+
+impl Closed {
+    fn close(&self) {
+        self.done.set(true);
+        for waker in self.wakers.take() {
+            waker.wake();
+        }
+    }
+
+    /// Runs `future` until it ends or the connection closes: then None,
+    /// with `future` dropped, so that what it waits for at the folder,
+    /// a `Lock` among it, ends with it (MIKSPEC-0094.R13).
+    async fn unless<T>(&self, future: impl Future<Output = T>) -> Option<T> {
+        let mut future = core::pin::pin!(future);
+        poll_fn(|cx| {
+            if self.done.get() {
+                return Poll::Ready(None);
+            }
+            if let Poll::Ready(value) = future.as_mut().poll(cx) {
+                return Poll::Ready(Some(value));
+            }
+            let mut wakers = self.wakers.borrow_mut();
+            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await
+    }
 }
 
 /// What `request` is to a gate connection.
@@ -302,10 +340,13 @@ async fn serve(
         bound: RefCell::new(None),
         lane: RefCell::new(VecDeque::new()),
         working: Cell::new(false),
+        closed: Closed::default(),
     });
     while let Ok(request) = server.next().await {
         connection.handle(request, &server).await;
     }
+    // The calls that wait for the folder end with the connection.
+    connection.closed.close();
 }
 
 /// What a directory without an answer shows.
@@ -362,7 +403,8 @@ impl Connection {
         // those after it.
         if route == Route::Alone {
             self.gate.shared.spawner.spawn(async move {
-                connection.serve(&state, request, server.server()).await;
+                let serving = connection.serve(&state, request, server.server());
+                let _ = connection.closed.unless(serving).await;
             });
             return;
         }
@@ -377,7 +419,10 @@ impl Connection {
                     connection.working.set(false);
                     break;
                 };
-                connection.serve(&state, request, server.server()).await;
+                let serving = connection.serve(&state, request, server.server());
+                if connection.closed.unless(serving).await.is_none() {
+                    break;
+                }
             }
         });
     }
