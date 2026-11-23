@@ -1,5 +1,6 @@
 //! `cargo xtask image`: creates a bootable GPT disk image.
 
+mod demos;
 pub(crate) mod esp;
 pub(crate) mod gpt;
 pub(crate) mod owners;
@@ -43,6 +44,15 @@ pub struct Args {
     /// development only.
     #[arg(long, value_enum, default_value_t = Edition::Server, conflicts_with = "tests")]
     pub edition: Edition,
+    /// Install the files of DIRECTORY, laid out as /system, in the image:
+    /// `bin/` in /system/bin, `libraries/*.dlib` in /system/libraries and
+    /// `share/` in /system/share, so that programs and libraries built
+    /// outside this repository can run, for example on the desktop edition:
+    /// start them in the text console after `desktop`, and press Ctrl-Alt-F1
+    /// to see a window. Debug information is stripped, a library's soname
+    /// must be its file name, and no file replaces one of the system.
+    #[arg(long, value_name = "DIRECTORY", conflicts_with = "tests")]
+    pub demos: Option<PathBuf>,
     /// Create a live image, whose command line holds the word `live`, so
     /// that the system uses its root partition read-only and keeps no
     /// changes.
@@ -162,10 +172,30 @@ pub fn run(args: &Args) -> Result<()> {
             &secure_boot::key::default_dir()?,
         )?),
     };
+    // A directory that cannot be installed fails before the build.
+    let demos = match &args.demos {
+        Some(dir) => demos::collect(dir)?,
+        None => Vec::new(),
+    };
     let built = match args.tests {
         true => build::build_tests(args.kind)?,
         false => build::build_edition(args.kind, args.edition)?,
     };
+    let mut files = Vec::new();
+    for demo in demos {
+        files.push((demo.at, build::without_debug_info(args.kind, &demo.source)?));
+    }
+    if !files.is_empty() {
+        let bytes: u64 = files
+            .iter()
+            .map(|(_, p)| fs::metadata(p).map_or(0, |m| m.len()))
+            .sum();
+        println!(
+            "demos    {} files, {} MiB",
+            files.len(),
+            bytes.div_ceil(1 << 20)
+        );
+    }
     let out = path(args.kind, args.edition, args.live, args.tests);
     // An image for installing or releasing renews its partition GUIDs at
     // its first boot, so that the disks copied from it do not share them;
@@ -184,7 +214,10 @@ pub fn run(args: &Args) -> Result<()> {
         &out,
         &words.join(" "),
         &[],
-        Extras::default(),
+        Extras {
+            demos: &files,
+            ..Extras::default()
+        },
         key.as_ref(),
     )?;
     if args.edition == Edition::Desktop {
@@ -291,7 +324,7 @@ pub fn create_for_tests(kind: Kind, built: &build::Built, out: &Path, extra: &st
         &[],
         Extras {
             test_partitions: true,
-            previous: false,
+            ..Extras::default()
         },
         None,
     )
@@ -327,8 +360,8 @@ pub fn create_with_previous(
     extra: &str,
 ) -> Result<()> {
     let extras = Extras {
-        test_partitions: false,
         previous: true,
+        ..Extras::default()
     };
     create_parts(
         kind,
@@ -345,9 +378,11 @@ pub fn create_with_previous(
 /// What a disk holds besides the system: the partitions of `TEST_TYPES`,
 /// and a previous system version.
 #[derive(Clone, Copy, Default)]
-struct Extras {
+struct Extras<'a> {
     test_partitions: bool,
     previous: bool,
+    /// The files that go in the system version, by their paths in it.
+    demos: &'a [(String, PathBuf)],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -390,6 +425,7 @@ fn create_parts(
         &built.boot_image,
         &built.kernel,
         extras.previous,
+        extras.demos,
     )?;
     let mut parts = vec![
         Part {

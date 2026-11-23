@@ -2421,7 +2421,7 @@ fn test_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathB
 /// A copy of the ELF file `source` without its debug information, made
 /// again only when `source` is newer, or `source` itself when it is not
 /// an ELF file.
-fn without_debug_info(kind: Kind, source: &Path) -> Result<PathBuf> {
+pub(crate) fn without_debug_info(kind: Kind, source: &Path) -> Result<PathBuf> {
     let mut magic = [0u8; 4];
     let is_elf = File::open(source)
         .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic))

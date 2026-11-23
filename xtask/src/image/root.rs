@@ -223,17 +223,51 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Copies the files `demos` into the system version in the tree `root`, each
+/// to its path in the version, as a program that can be run. Fails if a file
+/// is there already, as every file of the system is.
+fn install_demos(root: &Path, demos: &[(String, PathBuf)]) -> Result<()> {
+    for (at, source) in demos {
+        let target = root.join(at);
+        if target.symlink_metadata().is_ok() {
+            bail!("{at} is in the system already, and a demo cannot replace it");
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, &target).with_context(|| format!("copying {}", source.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    Ok(())
+}
+
+/// The size of the file system that holds `demos`: the usual size, and the
+/// room for the files and the metadata that go with them.
+fn size_with(demos: &[(String, PathBuf)]) -> u64 {
+    let bytes: u64 = demos
+        .iter()
+        .map(|(_, p)| fs::metadata(p).map_or(0, |m| m.len()))
+        .sum();
+    SIZE + bytes + bytes / 8
+}
+
 /// Creates the root file system for `kind`, holding the files of the
 /// archive `boot_image` and then the system of the archive `system`,
 /// with `kernel` and the boot list of the files of `boot_image` in the
 /// system version, and returns the path of its image. With `previous`,
 /// `@system/previous` names a copy of that version, `previous_version`.
+/// The files `demos` are in the system version, but not in the boot list.
 pub fn create(
     kind: Kind,
     system: &Path,
     boot_image: &Path,
     kernel: &Path,
     previous: bool,
+    demos: &[(String, PathBuf)],
 ) -> Result<PathBuf> {
     let dir = crate::workspace_root().join("target/image");
     let tree = dir.join(format!("root-{}", kind.name()));
@@ -248,6 +282,7 @@ pub fn create(
     }
     copy_boot_image(&tree, &version, system)?;
     let root = tree.join("@system").join(&version);
+    install_demos(&root, demos)?;
     fs::copy(kernel, root.join("mikros"))
         .with_context(|| format!("copying {}", kernel.display()))?;
     fs::create_dir_all(root.join("boot"))?;
@@ -261,7 +296,7 @@ pub fn create(
     }
 
     let image = dir.join(format!("root-{}.btrfs", kind.name()));
-    File::create(&image)?.set_len(SIZE)?;
+    File::create(&image)?.set_len(size_with(demos))?;
     let versions: Vec<&str> = versions.iter().map(String::as_str).collect();
     let status = Command::new("mkfs.btrfs")
         .args(mkfs_args(&tree, &image, &versions, &folders(&tree)?))
@@ -278,6 +313,45 @@ pub fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installs_the_demos_as_programs_and_refuses_to_replace_a_file() {
+        let dir = std::env::temp_dir().join(format!("xtask-root-demos-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("root/bin")).unwrap();
+        fs::write(dir.join("root/bin/msh"), b"shell").unwrap();
+        fs::write(dir.join("demo"), b"demo").unwrap();
+        let demos = vec![
+            ("bin/demo".to_owned(), dir.join("demo")),
+            ("share/a/b".to_owned(), dir.join("demo")),
+        ];
+        install_demos(&dir.join("root"), &demos).unwrap();
+        assert_eq!(fs::read(dir.join("root/bin/demo")).unwrap(), b"demo");
+        assert_eq!(fs::read(dir.join("root/share/a/b")).unwrap(), b"demo");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.join("root/bin/demo"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+        let replacing = vec![("bin/msh".to_owned(), dir.join("demo"))];
+        let error = install_demos(&dir.join("root"), &replacing).unwrap_err();
+        assert!(error.to_string().contains("bin/msh"));
+        assert_eq!(fs::read(dir.join("root/bin/msh")).unwrap(), b"shell");
+    }
+
+    #[test]
+    fn makes_room_for_the_demos() {
+        let dir = std::env::temp_dir().join(format!("xtask-root-size-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("big"), vec![0u8; 8000]).unwrap();
+        assert_eq!(size_with(&[]), SIZE);
+        let demos = vec![("bin/big".to_owned(), dir.join("big"))];
+        assert_eq!(size_with(&demos), SIZE + 8000 + 1000);
+    }
 
     #[test]
     fn names_the_version_after_the_workspace_and_kind() {
