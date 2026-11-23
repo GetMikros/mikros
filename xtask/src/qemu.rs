@@ -6,6 +6,65 @@ use std::path::Path;
 
 pub const QEMU: &str = "qemu-system-x86_64";
 
+/// Whether this host's QEMU has the GTK display, which `-display help`
+/// lists.
+pub fn gtk_available() -> bool {
+    static GTK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GTK.get_or_init(|| {
+        std::process::Command::new(QEMU)
+            .args(["-display", "help"])
+            .output()
+            .is_ok_and(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .any(|line| line.trim() == "gtk")
+            })
+    })
+}
+
+/// What `cargo xtask run` and `cargo xtask debug` add to a machine
+/// (MIKSPEC-0023.R61): a USB tablet on a USB controller, so that the
+/// pointer has an absolute position, unless `ps2` leaves it out, and the
+/// GTK display with the cursor shown, which QEMU hides by default, when
+/// `gtk` says that the host has it and no display was asked for
+/// (`display_given`). With Venus, whose `-display` is already in `args`,
+/// the cursor is shown there too.
+pub fn interactive_args(args: &mut Vec<String>, ps2: bool, display_given: bool, gtk: bool) {
+    if !ps2 {
+        args.extend(
+            [
+                "-device",
+                "qemu-xhci,id=usb",
+                "-device",
+                "usb-tablet,bus=usb.0",
+            ]
+            .map(String::from),
+        );
+    }
+    if let Some(at) = args.iter().position(|a| a == "-display") {
+        if let Some(value) = args.get_mut(at + 1)
+            && value.starts_with("gtk")
+            && !value.contains("show-cursor")
+        {
+            value.push_str(",show-cursor=on");
+        }
+    } else if gtk && !display_given {
+        args.extend(["-display", "gtk,show-cursor=on"].map(String::from));
+    }
+}
+
+/// `arg` as a shell reads it back as one word.
+pub fn shell_quote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
+    match plain {
+        true => arg.to_owned(),
+        false => format!("'{}'", arg.replace('\'', "'\\''")),
+    }
+}
+
 /// The graphics device of the virtual machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Gpu {
@@ -209,6 +268,61 @@ pub fn args(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn words(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn run_gets_the_tablet_and_the_gtk_display_with_the_cursor() {
+        let mut args = words(&["-m", "3G"]);
+        interactive_args(&mut args, false, false, true);
+        assert_eq!(
+            args,
+            words(&[
+                "-m",
+                "3G",
+                "-device",
+                "qemu-xhci,id=usb",
+                "-device",
+                "usb-tablet,bus=usb.0",
+                "-display",
+                "gtk,show-cursor=on"
+            ])
+        );
+    }
+
+    #[test]
+    fn ps2_leaves_the_tablet_out() {
+        let mut args = Vec::new();
+        interactive_args(&mut args, true, false, true);
+        assert_eq!(args, words(&["-display", "gtk,show-cursor=on"]));
+    }
+
+    #[test]
+    fn another_display_or_a_host_without_gtk_adds_no_display() {
+        let mut vnc = Vec::new();
+        interactive_args(&mut vnc, true, true, true);
+        assert!(vnc.is_empty());
+        let mut headless = Vec::new();
+        interactive_args(&mut headless, true, false, false);
+        assert!(headless.is_empty());
+    }
+
+    #[test]
+    fn venus_shows_the_cursor_on_its_own_display() {
+        let mut args = words(&["-display", "gtk,gl=on"]);
+        interactive_args(&mut args, true, false, true);
+        assert_eq!(args, words(&["-display", "gtk,gl=on,show-cursor=on"]));
+    }
+
+    #[test]
+    fn arguments_are_quoted_for_a_shell() {
+        assert_eq!(shell_quote("q35,accel=kvm"), "q35,accel=kvm");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
+    }
 
     fn machine() -> MachineArgs {
         MachineArgs {

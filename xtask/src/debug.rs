@@ -35,6 +35,10 @@ pub struct Args {
     /// The build kind to debug.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
+    /// Leave out the USB tablet, so that the guest has only QEMU's PS/2
+    /// mouse.
+    #[arg(long)]
+    pub ps2: bool,
     #[command(flatten)]
     pub machine: MachineArgs,
 }
@@ -145,7 +149,12 @@ pub fn run(args: &Args) -> Result<()> {
     machine
         .memory
         .get_or_insert_with(|| qemu::DESKTOP_MEMORY.to_owned());
-    let mut qemu = start_halted(&machine, &disk, &log, port, &[])?;
+    let mut pointer = Vec::new();
+    // With Venus, the display is in the machine's arguments already.
+    let gtk = machine.gpu != qemu::Gpu::Venus && qemu::gtk_available();
+    qemu::interactive_args(&mut pointer, args.ps2, false, gtk);
+    let pointer: Vec<&str> = pointer.iter().map(String::as_str).collect();
+    let mut qemu = start_halted(&machine, &disk, &log, port, &pointer)?;
     println!("serial output goes to {}", log.display());
     let status = Command::new(gdb())
         .args(gdb_args(&built.kernel, port))
