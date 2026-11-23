@@ -7,6 +7,9 @@
 
 extern crate alloc;
 
+// Served by `program` once it is wired in.
+#[allow(dead_code)]
+mod gate;
 #[cfg(target_os = "mikros")]
 mod program;
 
