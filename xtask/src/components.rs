@@ -23,6 +23,8 @@
 //! - `kinds`: the build kinds that install it, when not all of them.
 //! - `editions`: the editions of the system that install it, when not all
 //!   of them: `desktop` for the compositor and what only the desktop uses.
+//! - `stand_in`: `true` for a stand-in (MIKSPEC-0023.R59), which an image
+//!   of the production kind does not hold.
 //! - `path`: the member name of the program instead, for `init`.
 //! - `completions`: the file name, in its package, of the declarations of
 //!   a program's arguments for msh, installed as
@@ -83,6 +85,7 @@ pub struct Component {
     manifest: Option<String>,
     kinds: Option<Vec<String>>,
     editions: Option<Vec<String>>,
+    stand_in: bool,
     path: Option<String>,
     completions: Option<String>,
     config: Vec<String>,
@@ -93,6 +96,10 @@ pub struct Component {
 impl Component {
     /// Whether the build kind `kind` installs the component.
     pub fn in_kind(&self, kind: Kind) -> bool {
+        // An image of the production kind holds no stand-in.
+        if self.stand_in && kind == Kind::Production {
+            return false;
+        }
         self.kinds
             .as_ref()
             .is_none_or(|kinds| kinds.iter().any(|k| k == kind.built_as().name()))
@@ -282,6 +289,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
                 "runtime",
                 "kinds",
                 "editions",
+                "stand_in",
                 "path",
                 "completions",
                 "config",
@@ -340,6 +348,11 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             }
             Some(_) => bail!("{name}: `editions` is not a list"),
         };
+        let stand_in = match table.get("stand_in") {
+            None => false,
+            Some(Value::Bool(stand_in)) => *stand_in,
+            Some(_) => bail!("{name}: `stand_in` is not true or false"),
+        };
         let list = |key: &str| -> Result<Vec<String>> {
             match table.get(key) {
                 None => Ok(Vec::new()),
@@ -367,6 +380,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             manifest: text("manifest")?,
             kinds,
             editions,
+            stand_in,
             path: text("path")?,
             completions: text("completions")?,
             config,
@@ -490,6 +504,23 @@ mod tests {
         assert!(!components[0].in_edition(Edition::Server));
         assert!(components[1].in_edition(Edition::Desktop));
         assert!(components[1].in_edition(Edition::Server));
+    }
+
+    #[test]
+    fn a_stand_in_is_not_in_the_production_kind() {
+        let metadata = serde_json::json!({ "packages": [
+            package("probe",
+                serde_json::json!({"kind": "program", "image": "system", "stand_in": true})),
+            package("msh", serde_json::json!({"kind": "program", "image": "system"})),
+        ]});
+        let components = parse(&metadata).unwrap();
+        assert!(components[0].in_kind(Kind::Debug));
+        assert!(components[0].in_kind(Kind::Staging));
+        assert!(!components[0].in_kind(Kind::Production));
+        assert!(components[1].in_kind(Kind::Production));
+        let bad = serde_json::json!({ "packages": [package("x",
+            serde_json::json!({"kind": "program", "image": "system", "stand_in": "yes"}))]});
+        assert!(parse(&bad).is_err());
     }
 
     #[test]
