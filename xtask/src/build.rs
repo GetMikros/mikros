@@ -69,9 +69,9 @@ pub struct Args {
     /// The build kind.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
-    /// The edition of the system: `server`, or `desktop`, which adds the
-    /// compositor's stand-ins for the greeter and the shell.
-    #[arg(long, value_enum, default_value_t = Edition::Server)]
+    /// The edition of the system: `desktop`, or `server`, which has no
+    /// desktop.
+    #[arg(long, value_enum, default_value_t = Edition::Desktop)]
     pub edition: Edition,
 }
 
@@ -184,7 +184,7 @@ impl BootImage {
 
 /// Builds every component of the build kind `kind`.
 pub fn build(kind: Kind) -> Result<Built> {
-    build_edition(kind, Edition::Server)
+    build_edition(kind, Edition::Desktop)
 }
 
 /// Builds every component of the build kind `kind`, with the system of the
@@ -313,8 +313,10 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
         BootImage::System | BootImage::Desktop | BootImage::SystemTests => {
             let tests = boot == BootImage::SystemTests;
             // The desktop edition and the test images have the stand-ins
-            // for the greeter and the shell.
-            let with_desktop = tests || boot == BootImage::Desktop;
+            // for the greeter and the shell, and the account that the
+            // greeter logs in, except in the production kind
+            // (MIKSPEC-0023.R54, MIKSPEC-0023.R52).
+            let with_desktop = (tests || boot == BootImage::Desktop) && kind != Kind::Production;
             let headers = crate::vulkan::headers()?.join("include");
             let components = crate::components::all()?;
             let edition = boot.edition();
@@ -477,15 +479,21 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
             }
             let (name, members) = match boot {
                 BootImage::SystemTests => ("system-tests.img", &whole),
-                BootImage::Desktop => ("system-desktop.img", &desktop_members),
+                // The production kind's desktop edition has the compositor
+                // but not the stand-ins, so its session settings, which keep
+                // the desktop off, stay (MIKSPEC-0023.R54).
+                BootImage::Desktop if with_desktop => ("system-desktop.img", &desktop_members),
+                BootImage::Desktop => ("system-desktop.img", &whole),
                 _ => ("system.img", &whole),
             };
             let system_image = boot_image(kind, name, members)?;
             println!("built    {}", system_image.display());
             if tests {
-                let desktop = boot_image(kind, "desktop.img", &desktop_members)?;
-                println!("built    {}", desktop.display());
-                desktop_image = Some(desktop);
+                if with_desktop {
+                    let desktop = boot_image(kind, "desktop.img", &desktop_members)?;
+                    println!("built    {}", desktop.display());
+                    desktop_image = Some(desktop);
+                }
                 if let Some(dawn_test) = dawn_test {
                     // The Dawn run's system: the system with selftest
                     // and what it needs of the test images, and the
@@ -517,30 +525,32 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                     // The Dawn run's desktop system: the desktop run's
                     // system with its shell probe's switcher part replaced
                     // by the Dawn window program.
-                    let folder = format!("system/apps/{SHELL_PROBE}/");
-                    let greeter = desktop_members
-                        .iter()
-                        .find(|(at, _)| *at == format!("{folder}greeter-probe"))
-                        .map(|(_, path)| path.to_path_buf())
-                        .context("the desktop system has no shell probe")?;
-                    let parts = shell_probe_parts(DAWN_SWITCHER);
-                    let window = dawn_test.window.to_path_buf();
-                    let shell = shell_probe(&parts, greeter, DAWN_SWITCHER, window);
-                    let dir = c_dir(DAWN_SWITCHER).join("app");
-                    let members = crate::system_apps::members(&shell, &dir)?;
-                    let dawn_desktop: Vec<(&str, &Path)> = desktop_members
-                        .iter()
-                        .copied()
-                        .filter(|(at, _)| !at.starts_with(&folder))
-                        .chain(
-                            members
-                                .iter()
-                                .map(|(at, path)| (at.as_str(), path.as_path())),
-                        )
-                        .collect();
-                    let image = boot_image(kind, "dawn-desktop.img", &dawn_desktop)?;
-                    println!("built    {}", image.display());
-                    dawn_desktop_image = Some(image);
+                    if with_desktop {
+                        let folder = format!("system/apps/{SHELL_PROBE}/");
+                        let greeter = desktop_members
+                            .iter()
+                            .find(|(at, _)| *at == format!("{folder}greeter-probe"))
+                            .map(|(_, path)| path.to_path_buf())
+                            .context("the desktop system has no shell probe")?;
+                        let parts = shell_probe_parts(DAWN_SWITCHER);
+                        let window = dawn_test.window.to_path_buf();
+                        let shell = shell_probe(&parts, greeter, DAWN_SWITCHER, window);
+                        let dir = c_dir(DAWN_SWITCHER).join("app");
+                        let members = crate::system_apps::members(&shell, &dir)?;
+                        let dawn_desktop: Vec<(&str, &Path)> = desktop_members
+                            .iter()
+                            .copied()
+                            .filter(|(at, _)| !at.starts_with(&folder))
+                            .chain(
+                                members
+                                    .iter()
+                                    .map(|(at, path)| (at.as_str(), path.as_path())),
+                            )
+                            .collect();
+                        let image = boot_image(kind, "dawn-desktop.img", &dawn_desktop)?;
+                        println!("built    {}", image.display());
+                        dawn_desktop_image = Some(image);
+                    }
                 }
             }
             let early: Vec<(&str, &Path)> = early

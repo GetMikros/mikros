@@ -134,12 +134,17 @@ pub fn start_halted(
 
 pub fn run(args: &Args) -> Result<()> {
     let built = build::build(args.kind)?;
-    let disk = image::path(args.kind, Edition::Server, false, false);
+    let disk = image::path(args.kind, Edition::Desktop, false, false);
     // The kernel runs at the addresses of its debug information.
     image::create_with(args.kind, &built, &disk, image::KASLR_OFF, &[])?;
     let log = disk.with_extension("serial.log");
     let port = free_port()?;
-    let mut qemu = start_halted(&args.machine, &disk, &log, port, &[])?;
+    // The default edition is the desktop's, which gets more memory.
+    let mut machine = args.machine.clone();
+    machine
+        .memory
+        .get_or_insert_with(|| qemu::DESKTOP_MEMORY.to_owned());
+    let mut qemu = start_halted(&machine, &disk, &log, port, &[])?;
     println!("serial output goes to {}", log.display());
     let status = Command::new(gdb())
         .args(gdb_args(&built.kernel, port))

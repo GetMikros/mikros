@@ -12,10 +12,10 @@ pub struct Args {
     /// The build kind whose image to boot.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
-    /// The edition whose image to boot: `server`, or `desktop`, which gets
-    /// 3G of memory unless --memory says otherwise. Create the image with
+    /// The edition whose image to boot: `desktop`, which gets 3G of memory
+    /// unless --memory says otherwise, or `server`. Create the image with
     /// the same option of `cargo xtask image`.
-    #[arg(long, value_enum, default_value_t = Edition::Server)]
+    #[arg(long, value_enum, default_value_t = Edition::Desktop)]
     pub edition: Edition,
     /// Boot the live image instead.
     #[arg(long)]
@@ -34,8 +34,8 @@ pub fn run(args: &Args) -> Result<()> {
     let disk = image::path(args.kind, args.edition, args.live, false);
     if !disk.exists() {
         let edition = match args.edition {
-            Edition::Server => "",
-            Edition::Desktop => " --edition desktop",
+            Edition::Server => " --edition server",
+            Edition::Desktop => "",
         };
         bail!(
             "{} does not exist; create it with `cargo xtask image{edition}`",

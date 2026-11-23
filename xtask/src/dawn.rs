@@ -223,6 +223,13 @@ fn test(args: &Args, install: &Path) -> Result<()> {
         bail!("{passed} tests passed, two were expected");
     }
     println!("ok       the Dawn tests passed");
+    if args.kind == crate::build::Kind::Production {
+        println!(
+            "skipped  the Dawn window for the production kind, whose image has no \
+             stand-ins for the greeter and the shell (MIKSPEC-0023.R54)"
+        );
+        return Ok(());
+    }
     let system = built
         .dawn_desktop_image
         .as_deref()

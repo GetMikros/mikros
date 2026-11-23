@@ -35,22 +35,25 @@ pub struct Args {
     /// The build kind to put in the image.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
-    /// The edition of the system: `server`, or `desktop`, which adds the
-    /// compositor and the stand-ins for the greeter and the shell. Boot a
-    /// desktop image with `cargo xtask run --edition desktop`: the greeter
-    /// logs in the administrator `dee`, password `dee-password`, on text
-    /// console 1, where `desktop` starts dee's desktop; Ctrl-Alt-F1 shows
-    /// the desktop and Ctrl-Alt-F2 the console. The desktop edition is for
-    /// development only.
-    #[arg(long, value_enum, default_value_t = Edition::Server, conflicts_with = "tests")]
+    /// The edition of the system: `desktop`, or `server`, whose users log
+    /// in on the text console and which has no compositor, programs that
+    /// start the desktop, or libraries that only they need. For now the
+    /// desktop edition has stand-ins for the greeter and the shell and the
+    /// administrator `dee`, password `dee-password`, whom the greeter logs
+    /// in on text console 1, where `desktop` starts the desktop; Ctrl-Alt-F1
+    /// shows the desktop and Ctrl-Alt-F2 the console. The production kind
+    /// has neither, and its desktop edition keeps the desktop off.
+    /// Boot an image with `cargo xtask run`, with the same edition.
+    #[arg(long, value_enum, default_value_t = Edition::Desktop, conflicts_with = "tests")]
     pub edition: Edition,
     /// Install the files of DIRECTORY, laid out as /system, in the image:
     /// `bin/` in /system/bin, `libraries/*.dlib` in /system/libraries and
     /// `share/` in /system/share, so that programs and libraries built
     /// outside this repository can run, for example on the desktop edition:
     /// start them in the text console after `desktop`, and press Ctrl-Alt-F1
-    /// to see a window. Debug information is stripped, a library's soname
-    /// must be its file name, and no file replaces one of the system.
+    /// to see a window. Debug information is stripped; each program and
+    /// library must record its ABI levels, a library's soname must be its
+    /// file name, and no file replaces one of the system.
     #[arg(long, value_name = "DIRECTORY", conflicts_with = "tests")]
     pub demos: Option<PathBuf>,
     /// Create a live image, whose command line holds the word `live`, so
@@ -73,12 +76,13 @@ pub struct Args {
 }
 
 /// Where the image of a build kind is written: one of the desktop edition
-/// with `edition`, a live one with `live`, a test image with `tests`.
+/// with `edition`, a live one with `live`, a test image with `tests`, which
+/// has no edition.
 pub fn path(kind: Kind, edition: Edition, live: bool, tests: bool) -> PathBuf {
     let name = format!(
         "mikros-{}{}{}{}.img",
         kind.name(),
-        if edition == Edition::Desktop {
+        if edition == Edition::Desktop && !tests {
             "-desktop"
         } else {
             ""
@@ -220,10 +224,11 @@ pub fn run(args: &Args) -> Result<()> {
         },
         key.as_ref(),
     )?;
-    if args.edition == Edition::Desktop {
+    if args.edition == Edition::Desktop && args.kind != Kind::Production {
         println!(
-            "desktop edition: the greeter logs in dee, password dee-password, on text console 1, \
-             for development only; boot it with cargo xtask run --edition desktop"
+            "desktop edition: this image has the stand-ins for the greeter and the shell and the \
+             account dee, password dee-password, which the greeter logs in on text console 1; \
+             for development only (MIKSPEC-0023.R54)"
         );
     }
     Ok(())
@@ -486,6 +491,10 @@ mod tests {
             "mikros-debug-desktop-live.img"
         );
         assert_eq!(name(Edition::Server, false, true), "mikros-debug-tests.img");
+        assert_eq!(
+            name(Edition::Desktop, false, true),
+            "mikros-debug-tests.img"
+        );
     }
 
     #[test]
