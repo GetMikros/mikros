@@ -139,8 +139,10 @@ pub fn build_tests(kind: Kind) -> Result<Built> {
 
 /// The programs of the Dawn run.
 pub struct DawnTest<'a> {
-    /// The program that is the only system test of the Dawn run's system.
+    /// The program that is a system test of the Dawn run's system.
     pub compute: &'a Path,
+    /// The program that is the other system test of the Dawn run's system.
+    pub shared: &'a Path,
     /// The program that is the shell probe's switcher part in the Dawn
     /// run's desktop system.
     pub window: &'a Path,
@@ -399,14 +401,17 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                 if let Some(dawn_test) = dawn_test {
                     // The Dawn run's system: the system with selftest
                     // and what it needs of the test images, and the
-                    // Dawn test program as the only test.
+                    // two Dawn test programs as the only tests.
                     let at = "system/bin/tests/webgpu";
                     let dawn: Vec<(&str, &Path)> = early
                         .iter()
                         .chain(&login)
                         .chain(&test_support)
                         .map(|(at, path)| (at.as_str(), path.as_path()))
-                        .chain([(at, dawn_test.compute)])
+                        .chain([
+                            (at, dawn_test.compute),
+                            ("system/bin/tests/dawn-shared", dawn_test.shared),
+                        ])
                         .collect();
                     let loader = format!("system/libraries/{}", crate::vulkan::LOADER);
                     for needed in [

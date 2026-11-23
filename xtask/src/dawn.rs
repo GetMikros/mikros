@@ -10,9 +10,10 @@
 //! extensions. The build takes a long time, which is why it is a command
 //! of its own and not a part of `cargo xtask build`.
 //!
-//! With `--test` the command also builds two programs and boots two
+//! With `--test` the command also builds three programs and boots two
 //! systems. `user/tests/webgpu` runs a compute shader through Dawn's C API
-//! on the CPU Vulkan driver; it is the only system test of a system of its
+//! on the CPU Vulkan driver, and `user/tests/dawn-shared` shares an image
+//! between Vulkan and Dawn; they are the system tests of a system of their
 //! own, which is booted with selftest, as `cargo xtask test` does its
 //! system tests. `user/tests/dawn-sdl` renders a frame with Dawn to a
 //! window of SDL3's Wayland driver; it is the switcher part of the shell
@@ -118,6 +119,33 @@ fn build_program(install: &Path) -> Result<PathBuf> {
     )
 }
 
+/// Builds the program of `install`'s Dawn that shares an image with Vulkan: as
+/// the test program is linked, with the Vulkan loader, whose headers it uses
+/// for the part that is not Dawn's.
+fn build_shared_program(install: &Path) -> Result<PathBuf> {
+    let vulkan = crate::vulkan::loader()?;
+    let headers = crate::vulkan::headers()?.join("include");
+    let mut args = link_args(install)?;
+    args.extend([
+        "-Werror".to_string(),
+        format!("-I{}", headers.display()),
+        vulkan
+            .join("libraries")
+            .join(crate::vulkan::LOADER)
+            .display()
+            .to_string(),
+    ]);
+    build::c_build(
+        "dawn-shared",
+        &[
+            "user/tests/dawn-shared/dawn_shared.cpp",
+            "user/tests/dawn-shared/producer.cpp",
+        ],
+        Linking::Dynamic,
+        &args,
+    )
+}
+
 /// Builds the window program of `install`'s Dawn, which draws to a window of
 /// SDL3's: linked as the test program is, with SDL3, statically, and the
 /// libraries that it needs, Wayland, xkbcommon and the Vulkan loader,
@@ -161,12 +189,15 @@ fn build_window_program(install: &Path) -> Result<PathBuf> {
 fn test(args: &Args, install: &Path) -> Result<()> {
     let compute = build_program(install)?;
     println!("built    {}", compute.display());
+    let shared = build_shared_program(install)?;
+    println!("built    {}", shared.display());
     let window = build_window_program(install)?;
     println!("built    {}", window.display());
     let built = build::build_dawn_test(
         args.kind,
         &DawnTest {
             compute: &compute,
+            shared: &shared,
             window: &window,
         },
     )?;
@@ -188,10 +219,10 @@ fn test(args: &Args, install: &Path) -> Result<()> {
         &dir,
         timeout,
     )?;
-    if passed != 1 {
-        bail!("{passed} tests passed, one was expected");
+    if passed != 2 {
+        bail!("{passed} tests passed, two were expected");
     }
-    println!("ok       the Dawn test passed");
+    println!("ok       the Dawn tests passed");
     let system = built
         .dawn_desktop_image
         .as_deref()
