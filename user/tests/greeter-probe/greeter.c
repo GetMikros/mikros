@@ -453,6 +453,7 @@ static int client(void)
 int wallpaper(const char *file);
 int panel(void);
 int window(void);
+int protocols(void);
 
 int main(int argc, char **argv)
 {
@@ -462,6 +463,8 @@ int main(int argc, char **argv)
 		return client();
 	if (argc == 2 && strcmp(argv[1], "--window") == 0)
 		return window();
+	if (argc == 2 && strcmp(argv[1], "--protocols") == 0)
+		return protocols();
 	if (argc >= 2 && strcmp(argv[1], "--wallpaper") == 0)
 		return wallpaper(argc >= 3 ? argv[2] : NULL);
 	if (argc == 2 && strcmp(argv[1], "--panel") == 0)

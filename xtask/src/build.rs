@@ -2709,6 +2709,21 @@ fn greeter_probe(
         (own.join("mikros-shell-v1.xml"), "mikros-shell-v1"),
         (own.join("mikros-material-v1.xml"), "mikros-material-v1"),
         (staged.join("cursor-shape-v1.xml"), "cursor-shape-v1"),
+        // The protocols of the protocols client.
+        (staged.join("viewporter.xml"), "viewporter"),
+        (
+            staged.join("fractional-scale-v1.xml"),
+            "fractional-scale-v1",
+        ),
+        (staged.join("presentation-time.xml"), "presentation-time"),
+        (
+            staged.join("keyboard-shortcuts-inhibit-unstable-v1.xml"),
+            "keyboard-shortcuts-inhibit-unstable-v1",
+        ),
+        (
+            staged.join("wlr-layer-shell-unstable-v1.xml"),
+            "wlr-layer-shell-unstable-v1",
+        ),
         // Only for the tablet tool's interface, which cursor-shape names.
         (tablet.clone(), "tablet-v2"),
     ] {
@@ -2748,6 +2763,8 @@ fn greeter_probe(
         "user/tests/greeter-probe/wallpaper.c",
         "user/tests/greeter-probe/panel.c",
         "user/tests/greeter-probe/window.c",
+        "user/tests/greeter-probe/protocols.c",
+        "user/tests/greeter-probe/protocols_input.c",
     ];
     sources.extend(code.iter().map(String::as_str));
     let program = c_build(name, &sources, Linking::Dynamic, &args)?;
