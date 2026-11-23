@@ -5,6 +5,7 @@
 
 mod app;
 mod grants;
+mod pending;
 
 use mikros_command::Directory;
 use mikros_mika::format::{Builder, MANIFEST, checksum_text};
@@ -61,6 +62,7 @@ pub fn main() -> ExitCode {
         Some("app") => app::checks(),
         Some("write") => app::write_public(),
         Some("hold") => app::hold(),
+        Some("pending") => app::pending(),
         _ => all(),
     };
     match checked {
@@ -193,11 +195,15 @@ fn wait_service(name: &str, ok: impl Fn(Option<String>) -> bool, code: u8) -> Re
 }
 
 fn all() -> Result<(), Failed> {
-    // First, so that ada's two passwords come one after the other: the
+    // ada's two passwords: the first install for every user, and the
     // documents folder for the app, which an administrator allows.
-    grants::allow()?;
     let installer = installer()?;
     service(&installer)?;
+    // Before ada decides any folder for the app.
+    let app = format!("/apps/{DAEMON}/bin/idle");
+    let mut pending = pending::Pending::start(&app)?;
+    pending.denied()?;
+    pending.allowed()?;
     driver(&installer)?;
     refused_drivers(&installer)?;
     kept(&installer)?;
@@ -205,8 +211,9 @@ fn all() -> Result<(), Failed> {
     components(&installer)?;
     at_once()?;
     forged()?;
-    run_app(&format!("/apps/{DAEMON}/bin/idle"))?;
-    grants::revoke_while_open(&format!("/apps/{DAEMON}/bin/idle"))?;
+    run_app(&app)?;
+    grants::revoke_while_open(&app)?;
+    pending.revoked()?;
     let _ = std::fs::remove_file("/users/ada/documents/global-check-note");
     remove(&installer, DAEMON, 13)?;
     wait_service(SERVICE, |s| s.is_none(), 14)

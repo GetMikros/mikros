@@ -42,11 +42,15 @@ const GLOBAL_CHECK: &str = "g l o b a l minus c h e c k ret";
 const GLOBAL_STATUS: &str = "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
      shift-bracket_left spc e x i t spc shift-9 1 0 0 spc shift-equal spc shift-4 s t a t u s \
      shift-0 spc shift-bracket_right ret";
-/// How long global-check has to ask for authorization, first for a grant
-/// and then, once it made its first package, for an install.
+/// How long global-check has to ask for authorization for an install,
+/// once it made its first package.
 const GLOBAL_ASKS: Duration = Duration::from_secs(10);
 /// What the service manager logs once global-check removed the package
 /// with a service, its last check but one.
+/// What the process manager logs when the pending entry of the app's process
+/// asks for the pictures folder, just before global-check sets the grant
+/// that ada's second password allows.
+const GLOBAL_GRANT: &str = "process-manager: asking user.pictures.access";
 const GLOBAL_DONE: &str = "the service org.example.daemon.idle of a package was removed";
 /// How many times the run's timeout the setup run may take. Its msh
 /// session also pages with less, asks for authorization twelve times,
@@ -475,12 +479,13 @@ pub fn run_setup(
     // whose check takes up to ANSWER.
     let mut after = vec![
         Step::Keys(GLOBAL_CHECK),
-        // ada's password for the grant that global-check sets first, and
-        // then for its first install for every user.
+        // ada's password for its first install for every user, and then
+        // for the grant that it sets once the app's process runs.
         Step::Sleep(GLOBAL_ASKS),
         Step::Keys("a d a minus p w ret"),
         Step::Sleep(ANSWER),
-        Step::Sleep(GLOBAL_ASKS),
+        Step::Wait(GLOBAL_GRANT),
+        Step::Sleep(SETTLE),
         Step::Keys("a d a minus p w ret"),
         // msh reads the status line once global-check exits, so that a
         // failed check ends the session at once.

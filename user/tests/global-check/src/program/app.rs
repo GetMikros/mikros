@@ -141,6 +141,62 @@ pub fn hold() -> Result<(), Failed> {
     Ok(())
 }
 
+/// The process that starts before any folder is decided: it lists its
+/// pending entries, and then does what it is told on its input, which
+/// `pending.rs` drives.
+pub fn pending() -> Result<(), Failed> {
+    use std::io::{BufRead, Read};
+    use std::os::unix::fs::PermissionsExt;
+    let names: Vec<String> = std::fs::read_dir("/users/ada")
+        .or(failed(67, "listing ada's home"))?
+        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+        .collect();
+    ensure(
+        ["documents", "pictures"]
+            .iter()
+            .all(|n| names.iter().any(|name| name == n)),
+        67,
+        &format!("the pending entries in {names:?}"),
+    )?;
+    let shown = std::fs::metadata("/users/ada/pictures").or(failed(67, "the pictures entry"))?;
+    ensure(
+        shown.is_dir() && shown.permissions().mode() & 0o777 == 0o555,
+        67,
+        "the pictures entry before an answer",
+    )?;
+    println!("ready");
+    let mut input = std::io::stdin().lock();
+    let mut line = String::new();
+    let mut next = |line: &mut String| {
+        line.clear();
+        let _ = input.read_line(line);
+        line.trim().to_string()
+    };
+    ensure(next(&mut line) == "pictures", 68, "the first word")?;
+    let refused = std::fs::File::open("/users/ada/pictures/none");
+    ensure(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied),
+        68,
+        &format!("the denied pictures folder gave {refused:?}"),
+    )?;
+    println!("denied");
+    ensure(next(&mut line) == "documents", 69, "the second word")?;
+    documents().map_err(|Failed(_, what)| Failed(69, what))?;
+    let mut open = std::fs::File::open(NOTE).or(failed(69, "opening the note"))?;
+    println!("allowed");
+    ensure(next(&mut line) == "after", 70, "the third word")?;
+    let mut bytes = Vec::new();
+    ensure(
+        open.read_to_end(&mut bytes).is_err() && std::fs::read(NOTE).is_err(),
+        70,
+        "the note after the revocation",
+    )?;
+    println!("closed");
+    Ok(())
+}
+
 /// Its public folder, made once, which a later process of the app
 /// writes to (MIKSPEC-0101.R53).
 fn public() -> Result<(), Failed> {
