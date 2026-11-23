@@ -48,7 +48,21 @@ diff -ruN a/src/vulkan/runtime/vk_semaphore.c b/src/vulkan/runtime/vk_semaphore.
     if (type->export_sync_file && semaphore_type == VK_SEMAPHORE_TYPE_BINARY)
        handle_types |= VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
  
-@@ -721,3 +731,52 @@
+@@ -548,6 +558,13 @@
+    const VkExternalSemaphoreHandleTypeFlagBits handle_type =
+       pImportSemaphoreFdInfo->handleType;
+ 
++#ifdef VK_USE_PLATFORM_MIKROS
++   /* The semaphores that are shared are timelines, which are imported
++    * permanently only. */
++   if (pImportSemaphoreFdInfo->flags != 0)
++      return vk_error(semaphore, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++#endif
++
+    struct vk_sync *temporary = NULL, *sync;
+    if (pImportSemaphoreFdInfo->flags & VK_SEMAPHORE_IMPORT_TEMPORARY_BIT) {
+       /* From the Vulkan 1.2.194 spec:
+@@ -721,3 +738,52 @@
  }
  
  #endif /* !defined(_WIN32) */
@@ -66,7 +80,7 @@ diff -ruN a/src/vulkan/runtime/vk_semaphore.c b/src/vulkan/runtime/vk_semaphore.
 +
 +   if (pImportSemaphoreHandleInfo->handleType !=
 +          VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_BIT_MIKROS ||
-+       (pImportSemaphoreHandleInfo->flags & VK_SEMAPHORE_IMPORT_TEMPORARY_BIT))
++       pImportSemaphoreHandleInfo->flags != 0)
 +      return vk_error(semaphore, VK_ERROR_INVALID_EXTERNAL_HANDLE);
 +
 +   struct vk_sync *sync = &semaphore->permanent;
@@ -104,15 +118,17 @@ diff -ruN a/src/vulkan/runtime/vk_semaphore.c b/src/vulkan/runtime/vk_semaphore.
 diff -ruN a/src/gallium/frontends/lavapipe/lvp_mikros_sync.c b/src/gallium/frontends/lavapipe/lvp_mikros_sync.c
 --- /dev/null
 +++ b/src/gallium/frontends/lavapipe/lvp_mikros_sync.c
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,141 @@
 +#include "lvp_private.h"
 +
 +#include <mikros/startup.h>
 +#include <mikros/syscalls.h>
 +
-+#define SAME_RIGHTS (1u << 31)
 +#define HANDLE_DESCRIPTOR 10u
 +#define OBJECT_TIMELINE 14u
++/* The rights of an exported timeline, which an imported one needs:
++ * DUPLICATE, TRANSFER, READ, WAIT, SIGNAL and INSPECT. */
++#define TIMELINE_RIGHTS ((1u << 0) | (1u << 1) | (1u << 2) | (1u << 6) | (1u << 7) | (1u << 9))
 +#define STATUS_TIMED_OUT (-21)
 +
 +struct lvp_mikros_timeline {
@@ -181,6 +197,10 @@ diff -ruN a/src/gallium/frontends/lavapipe/lvp_mikros_sync.c b/src/gallium/front
 +       ((uint32_t)info[16] | (uint32_t)info[17] << 8 | (uint32_t)info[18] << 16 |
 +        (uint32_t)info[19] << 24) != OBJECT_TIMELINE)
 +      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
++   uint32_t rights = (uint32_t)info[20] | (uint32_t)info[21] << 8 | (uint32_t)info[22] << 16 |
++                     (uint32_t)info[23] << 24;
++   if ((rights & TIMELINE_RIGHTS) != TIMELINE_RIGHTS)
++      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
 +   struct lvp_mikros_timeline *t = to_timeline(sync);
 +   mikros_handle_close(t->timeline);
 +   t->timeline = handle;
@@ -190,7 +210,7 @@ diff -ruN a/src/gallium/frontends/lavapipe/lvp_mikros_sync.c b/src/gallium/front
 +static VkResult
 +lvp_mikros_timeline_export(struct vk_device *device, struct vk_sync *sync, uint32_t *handle)
 +{
-+   if (mikros_handle_duplicate(to_timeline(sync)->timeline, SAME_RIGHTS, handle) != 0)
++   if (mikros_handle_duplicate(to_timeline(sync)->timeline, TIMELINE_RIGHTS, handle) != 0)
 +      return vk_error(device, VK_ERROR_TOO_MANY_OBJECTS);
 +   return VK_SUCCESS;
 +}
@@ -264,20 +284,19 @@ diff -ruN a/src/gallium/frontends/lavapipe/lvp_device.c b/src/gallium/frontends/
  #endif
  
  #ifdef VK_USE_PLATFORM_ANDROID_KHR
-@@ -172,9 +173,12 @@
+@@ -172,8 +173,11 @@
     .MIKROS_external_memory_handle         = true,
  #endif
     .KHR_external_semaphore                = true,
 -#ifdef HAVE_LIBDRM
 +#if defined(HAVE_LIBDRM) || defined(VK_USE_PLATFORM_MIKROS)
     .KHR_external_semaphore_fd             = true,
- #endif
++#endif
 +#ifdef VK_USE_PLATFORM_MIKROS
 +   .MIKROS_external_semaphore_handle      = true,
-+#endif
+ #endif
     .KHR_shader_float_controls             = true,
     .KHR_shader_float_controls2            = true,
-    .KHR_get_memory_requirements2          = true,
 @@ -1548,9 +1552,15 @@
     for (unsigned i = 0; i < ARRAY_SIZE(device->drv_options); i++)
        device->drv_options[i] = device->pscreen->nir_options[MIN2(i, MESA_SHADER_COMPUTE)];
@@ -315,7 +334,7 @@ diff -ruN a/src/gallium/frontends/lavapipe/lvp_device.c b/src/gallium/frontends/
        struct lvp_pipe_sync *sync =
           vk_sync_as_lvp_pipe_sync(submit->signals[i].sync);
        lvp_pipe_sync_signal_with_fence(device, sync, queue->last_fence);
-@@ -3031,6 +3054,12 @@
+@@ -3038,6 +3061,12 @@
     const VkPhysicalDeviceExternalSemaphoreInfo *pExternalSemaphoreInfo,
     VkExternalSemaphoreProperties               *pExternalSemaphoreProperties)
  {

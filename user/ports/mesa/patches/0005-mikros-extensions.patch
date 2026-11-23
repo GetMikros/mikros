@@ -199,10 +199,11 @@ diff -ruN a/src/vulkan/registry/vk.xml b/src/vulkan/registry/vk.xml
          <type category="struct" name="VkImportMemoryZirconHandleInfoFUCHSIA" structextends="VkMemoryAllocateInfo">
              <member values="VK_STRUCTURE_TYPE_IMPORT_MEMORY_ZIRCON_HANDLE_INFO_FUCHSIA"><type>VkStructureType</type> <name>sType</name></member>
              <member optional="true">const <type>void</type>*                      <name>pNext</name></member>
-@@ -16392,6 +16426,30 @@
+@@ -16391,6 +16425,30 @@
+             <param><type>int</type> <name>fd</name></param>
              <param><type>VkMemoryFdPropertiesKHR</type>* <name>pMemoryFdProperties</name></param>
          </command>
-         <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_TOO_MANY_OBJECTS,VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
++        <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_TOO_MANY_OBJECTS,VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
 +            <proto><type>VkResult</type> <name>vkGetMemoryHandleMIKROS</name></proto>
 +            <param><type>VkDevice</type> <name>device</name></param>
 +            <param>const <type>VkMemoryGetHandleInfoMIKROS</type>* <name>pGetHandleInfo</name></param>
@@ -226,10 +227,9 @@ diff -ruN a/src/vulkan/registry/vk.xml b/src/vulkan/registry/vk.xml
 +            <param><type>VkDevice</type> <name>device</name></param>
 +            <param>const <type>VkImportSemaphoreHandleInfoMIKROS</type>* <name>pImportSemaphoreHandleInfo</name></param>
 +        </command>
-+        <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_TOO_MANY_OBJECTS,VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
+         <command successcodes="VK_SUCCESS" errorcodes="VK_ERROR_TOO_MANY_OBJECTS,VK_ERROR_OUT_OF_HOST_MEMORY,VK_ERROR_UNKNOWN,VK_ERROR_VALIDATION_FAILED">
              <proto><type>VkResult</type> <name>vkGetMemoryZirconHandleFUCHSIA</name></proto>
              <param><type>VkDevice</type> <name>device</name></param>
-             <param>const <type>VkMemoryGetZirconHandleInfoFUCHSIA</type>* <name>pGetZirconHandleInfo</name></param>
 @@ -27713,6 +27771,35 @@
                  <command name="vkGetSemaphoreZirconHandleFUCHSIA" />
              </require>
@@ -250,7 +250,7 @@ diff -ruN a/src/vulkan/registry/vk.xml b/src/vulkan/registry/vk.xml
 +                <command name="vkGetMemoryHandlePropertiesMIKROS" />
 +            </require>
 +        </extension>
-+        <extension name="VK_MIKROS_external_semaphore_handle" number="9002" type="device" depends="VK_KHR_external_semaphore_capabilities+VK_KHR_external_semaphore" author="MIKROS" contact="Mikros" platform="mikros" supported="vulkan" nofeatures="true">
++        <extension name="VK_MIKROS_external_semaphore_handle" number="9002" type="device" depends="VK_KHR_external_semaphore_capabilities+VK_KHR_external_semaphore+(VK_KHR_timeline_semaphore,VK_VERSION_1_2)" author="MIKROS" contact="Mikros" platform="mikros" supported="vulkan" nofeatures="true">
 +            <require>
 +                <enum value="1" name="VK_MIKROS_EXTERNAL_SEMAPHORE_HANDLE_SPEC_VERSION" />
 +                <enum value="&quot;VK_MIKROS_external_semaphore_handle&quot;" name="VK_MIKROS_EXTERNAL_SEMAPHORE_HANDLE_EXTENSION_NAME" />

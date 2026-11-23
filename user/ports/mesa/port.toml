@@ -36,7 +36,8 @@
 #   of a handle's properties tries the import.
 # - 0008: lavapipe's timeline semaphores are kernel timelines, offered
 #   through VK_MIKROS_external_semaphore_handle and
-#   VK_KHR_external_semaphore_fd.
+#   VK_KHR_external_semaphore_fd; an export has the rights of a timeline
+#   that is shared, an import needs all of them, and import flags are 0.
 # - 0009: the Wayland platform does without wayland-server on Mikros,
 #   which has the client library alone.
 # - 0010: swapchain images of the image type of Mikros are linear, with
