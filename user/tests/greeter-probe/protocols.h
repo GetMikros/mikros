@@ -35,6 +35,7 @@ struct probe {
 	struct wl_keyboard *keyboard;
 	struct wl_data_device *data_device;
 	int parent_configured, layer_configured, popup_configured;
+	int top_configured, top_closed;
 	uint32_t layer_width, layer_height;
 	int32_t popup_rect[4];
 	uint32_t fractional_scale;

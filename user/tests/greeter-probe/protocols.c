@@ -45,6 +45,7 @@ enum {
 	PARENT_W = 240,
 	PARENT_H = 180,
 	LAYER_BOTTOM = 1,
+	LAYER_TOP = 2,
 	ANCHOR_LEFT_TOP_BOTTOM = 7,
 };
 
@@ -289,6 +290,30 @@ static void layer_closed(void *data, struct zwlr_layer_surface_v1 *surface)
 	report("greeter-probe: protocols: the layer surface was closed");
 }
 
+/* A layer surface above the windows, which the compositor may give only to
+ * a client that holds a permission: until it is asked, it is not
+ * configured, and when the answer is no, it is closed. */
+static void top_configure(void *data, struct zwlr_layer_surface_v1 *surface, uint32_t serial,
+			  uint32_t width, uint32_t height)
+{
+	struct probe *p = data;
+	(void)width, (void)height;
+	zwlr_layer_surface_v1_ack_configure(surface, serial);
+	p->top_configured = 1;
+}
+
+static void top_closed(void *data, struct zwlr_layer_surface_v1 *surface)
+{
+	struct probe *p = data;
+	(void)surface;
+	p->top_closed = 1;
+}
+
+static const struct zwlr_layer_surface_v1_listener top_listener = {
+	.configure = top_configure,
+	.closed = top_closed,
+};
+
 static const struct zwlr_layer_surface_v1_listener layer_listener = {
 	.configure = layer_configure,
 	.closed = layer_closed,
@@ -394,6 +419,15 @@ int protocols(void)
 	attach(layer_surface, layer_buffer, 24, (int)p.layer_height);
 	wl_surface_commit(layer_surface);
 
+	/* A layer surface in the layer `top`, which the run's compositor
+	 * refuses, as nobody answers its question. */
+	struct wl_surface *top_surface = wl_compositor_create_surface(p.compositor);
+	struct zwlr_layer_surface_v1 *top = zwlr_layer_shell_v1_get_layer_surface(
+		p.layer_shell, top_surface, NULL, LAYER_TOP, "protocols-top");
+	zwlr_layer_surface_v1_add_listener(top, &top_listener, &p);
+	zwlr_layer_surface_v1_set_size(top, 50, 50);
+	wl_surface_commit(top_surface);
+
 	/* The subsurfaces: the synchronized one is shown with its parent's
 	 * commit, the other, desynchronized and cropped by a viewport, at its own. */
 	struct wl_surface *child = wl_compositor_create_surface(p.compositor);
@@ -462,6 +496,11 @@ int protocols(void)
 		return fail(24, "the feedback of the commit was %s",
 			    p.discarded ? "discarded" : "not answered");
 	stage("the feedback was presented");
+	if (!until(&p, &p.top_closed))
+		return fail(27, "the layer surface in the layer top was not closed");
+	if (p.top_configured)
+		return fail(28, "the layer surface in the layer top was configured");
+	stage("the layer surface in the layer top was refused");
 	input_inhibit(&p, parent);
 	report("greeter-probe: protocols waiting for the keyboard");
 	if (!until(&p, &p.focused))
