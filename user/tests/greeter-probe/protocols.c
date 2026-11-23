@@ -496,11 +496,7 @@ int protocols(void)
 		return fail(24, "the feedback of the commit was %s",
 			    p.discarded ? "discarded" : "not answered");
 	stage("the feedback was presented");
-	if (!until(&p, &p.top_closed))
-		return fail(27, "the layer surface in the layer top was not closed");
-	if (p.top_configured)
-		return fail(28, "the layer surface in the layer top was configured");
-	stage("the layer surface in the layer top was refused");
+
 	input_inhibit(&p, parent);
 	report("greeter-probe: protocols waiting for the keyboard");
 	if (!until(&p, &p.focused))
@@ -510,6 +506,16 @@ int protocols(void)
 	int failed = input_clipboard(&p);
 	if (failed)
 		return failed;
+	/* The question about the layer top is answered with a no when nobody
+	 * answers it, which takes the session manager's time to give up. */
+	for (int waited = 0; !p.top_closed && waited < 3 * WAIT_MS; waited += 100)
+		if (pump(p.display, 100) < 0)
+			return fail(27, "the connection broke");
+	if (!p.top_closed)
+		return fail(27, "the layer surface in the layer top was not closed");
+	if (p.top_configured)
+		return fail(28, "the layer surface in the layer top was configured");
+	stage("the layer surface in the layer top was refused");
 	report("greeter-probe: protocols ready");
 	while (pump(p.display, 1000) >= 0)
 		;
