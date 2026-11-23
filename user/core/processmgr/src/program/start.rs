@@ -2,7 +2,7 @@
 //! namespace names, and sending the startup transfer on its bootstrap
 //! channel.
 
-use crate::namespace::{self, Origin, Programs};
+use crate::program::namespace::{self, Origin, Programs};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;

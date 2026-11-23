@@ -1,10 +1,10 @@
 //! Serving init: registering it as process ID 1 and starting the
 //! service manager.
 
-use crate::namespace::{Namespaces, Programs};
-use crate::processes::{NewProcess, Shared, bind, koid};
-use crate::records::{INIT_PID, Record};
-use crate::start::{self, duplicate};
+use crate::program::namespace::{Namespaces, Programs};
+use crate::program::processes::{NewProcess, Shared, bind, koid};
+use crate::program::records::{INIT_PID, Record};
+use crate::program::start::{self, duplicate};
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -276,7 +276,7 @@ impl Manager {
         }
         // The output and error that processes are given go to the log
         // service once the process manager can connect to it.
-        let connect = crate::output::connect(self.shared.clone(), control.clone());
+        let connect = crate::program::output::connect(self.shared.clone(), control.clone());
         self.shared.spawner.spawn(connect);
         let shared = self.shared.clone();
         let me = own_identity(&self.shared)?;
@@ -286,7 +286,7 @@ impl Manager {
             // The folder grants' permissions, revoked with confirmation
             // (MIKSPEC-0050.R38, MIKSPEC-0037.R34).
             if let Some(broker) = shared.permissions.watcher(&reactor).await {
-                crate::grants::watch(shared.clone(), broker).await;
+                crate::program::grants::watch(shared.clone(), broker).await;
             }
         });
         Ok(InitBootstrapStartServiceManagerResponse { pid, process })

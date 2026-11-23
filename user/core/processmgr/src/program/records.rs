@@ -1,7 +1,7 @@
 //! The records of the processes the process manager knows.
 
-use crate::namespace::Programs;
-use crate::portable::Portable;
+use crate::program::namespace::Programs;
+use crate::program::portable::Portable;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
 use alloc::string::String;

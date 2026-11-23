@@ -6,8 +6,8 @@
 //! folder as its own. Either is refused when a package with its ID is
 //! installed.
 
-use crate::namespace::Programs;
-use crate::processes::Shared;
+use crate::program::namespace::Programs;
+use crate::program::processes::Shared;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -126,7 +126,7 @@ async fn installed(shared: &Shared, id: &str, user: u32) -> Result<bool, Status>
     if user == 0 {
         return Ok(false);
     }
-    let name = crate::users::name(shared, user).await?;
+    let name = crate::program::users::name(shared, user).await?;
     let local = format!("/users/{name}/apps/{id}/package");
     Ok(shared
         .namespaces
@@ -175,7 +175,7 @@ pub async fn package(
     let (given, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
     flat(package.clone(server, readable).await)?;
     let (files, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
-    let manifest = crate::users::open_package(shared, given, server).await?;
+    let manifest = crate::program::users::open_package(shared, given, server).await?;
     let manifest = Manifest::parse(&manifest).map_err(|_| Status::InvalidArgs)?;
     if !manifest.portable {
         return Err(Status::NotSupported);
@@ -187,7 +187,10 @@ pub async fn package(
     // The app's folder, next to the package: never one of a home folder's
     // own, made when it is missing.
     if user != 0 {
-        let home = format!("/users/{}", crate::users::name(shared, user).await?);
+        let home = format!(
+            "/users/{}",
+            crate::program::users::name(shared, user).await?
+        );
         if real_parent == home && HOME_FOLDERS.contains(&name) {
             return Err(Status::AccessDenied);
         }

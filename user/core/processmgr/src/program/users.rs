@@ -5,7 +5,7 @@
 //! from the install service. All are reached through the process
 //! manager's own directory.
 
-use crate::processes::Shared;
+use crate::program::processes::Shared;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
@@ -105,7 +105,7 @@ pub async fn subvolume(shared: &Shared, path: &str) -> Result<(), Status> {
     match subvolumes.create(path.into()).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(Error::NotSupported)) => Err(Status::NotSupported),
-        Ok(Err(e)) => Err(crate::namespace::status(e)),
+        Ok(Err(e)) => Err(crate::program::namespace::status(e)),
         Err(_) => Err(Status::PeerClosed),
     }
 }

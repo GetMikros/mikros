@@ -6,11 +6,11 @@
 //! `SetProcessGroup` and `KillGroup` are served; every other method fails
 //! with `NOT_SUPPORTED`.
 
-use crate::broker::{FULL_DISK, LIST_ALL, SET_IDENTITY, SET_USER, SIGNAL_ANY};
-use crate::portable::Portable;
-use crate::processes::{NewProcess, Shared};
-use crate::records::{Exit, Record, Records};
-use crate::start::{self, duplicate};
+use crate::program::broker::{FULL_DISK, LIST_ALL, SET_IDENTITY, SET_USER, SIGNAL_ANY};
+use crate::program::portable::Portable;
+use crate::program::processes::{NewProcess, Shared};
+use crate::program::records::{Exit, Record, Records};
+use crate::program::start::{self, duplicate};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -151,7 +151,7 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
             R::Fork(_, r) => {
                 let (shared, server) = (shared.clone(), server.clone());
                 shared.clone().spawner.spawn(async move {
-                    let commands = crate::commands::of(&shared).await;
+                    let commands = crate::program::commands::of(&shared).await;
                     let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
                     let command = app_id.is_some_and(|a| commands.has_app(&a));
                     let refused = if command { Status::AccessDenied } else { no };
@@ -165,7 +165,7 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 let result = match app_id.as_deref() == Some(SESSION_MANAGER) {
                     true => {
                         let end = request.server;
-                        let serving = crate::elevations::serve(shared.clone(), end);
+                        let serving = crate::program::elevations::serve(shared.clone(), end);
                         shared.spawner.spawn(serving);
                         Ok(LauncherOpenElevationsResponse {})
                     }
@@ -233,7 +233,7 @@ async fn new_process(
         (None, None) => portable_start(shared, caller, &request).await?,
         _ => None,
     };
-    let commands = crate::commands::of(shared).await;
+    let commands = crate::program::commands::of(shared).await;
     let records = shared.records.borrow();
     let from = records.get(caller).ok_or(Status::BadState)?;
     // A command's app ID starts nothing else with its permissions.
@@ -398,7 +398,7 @@ async fn command(
         CALLER_USER => user,
         user => user,
     };
-    let app_id = crate::users::command_owner(shared, &name, user).await?;
+    let app_id = crate::program::users::command_owner(shared, &name, user).await?;
     let entry = request
         .working_directory
         .as_deref()
@@ -429,11 +429,11 @@ async fn portable_start(
         user => user,
     };
     if let Some((portable, program)) =
-        crate::portable::package(shared, &programs, user, &request.path).await?
+        crate::program::portable::package(shared, &programs, user, &request.path).await?
     {
         return Ok(Some((Rc::new(portable), Some(program))));
     }
-    let built = crate::portable::build(shared, &programs, user, &request.path).await?;
+    let built = crate::program::portable::build(shared, &programs, user, &request.path).await?;
     Ok(built.map(|portable| (Rc::new(portable), None)))
 }
 
@@ -442,7 +442,7 @@ async fn portable_start(
 /// `users/<user>/apps/<id>/package/`, once normalized.
 fn in_package(program: &str, app_id: &str) -> bool {
     mikros_manifest::path::normalize(&format!("/{program}"))
-        .is_some_and(|normal| crate::namespace::package_of(&normal) == Some(app_id))
+        .is_some_and(|normal| crate::program::namespace::package_of(&normal) == Some(app_id))
 }
 
 /// Checks that process `caller` may give the new process of `program`, a

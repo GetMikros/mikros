@@ -36,8 +36,8 @@
 //! `/system/state/<app ID>`, both read and write, without listing them
 //! (MIKSPEC-0100.R14, MIKSPEC-0050.R46, MIKSPEC-0050.R47).
 
-use crate::portable::Portable;
-use crate::processes::Shared;
+use crate::program::portable::Portable;
+use crate::program::processes::Shared;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -337,7 +337,7 @@ fn join(real: &str, rest: &str) -> String {
 async fn user_name(shared: &Shared, user: u32) -> Result<String, Status> {
     match user {
         GREETER_USER => Ok(String::from(GREETER_NAME)),
-        _ => crate::users::name(shared, user).await,
+        _ => crate::program::users::name(shared, user).await,
     }
 }
 
@@ -566,7 +566,7 @@ impl Namespaces {
             .await
             .map_err(status)?;
             let layers = alloc::vec![version.directory, connection(&installed, RX).await?];
-            crate::users::merged(shared, layers, RX).await
+            crate::program::users::merged(shared, layers, RX).await
         };
         match made.await {
             Ok(view) => {
@@ -594,7 +594,7 @@ impl Namespaces {
             let kept = self.commands.borrow().clone();
             let folder = match kept {
                 Some(folder) => folder,
-                None => match crate::users::commands(shared).await {
+                None => match crate::program::users::commands(shared).await {
                     Ok(folder) => {
                         let folder = Rc::new(folder);
                         *self.commands.borrow_mut() = Some(folder.clone());
@@ -776,7 +776,7 @@ impl Namespaces {
             if layers.is_empty() {
                 continue;
             }
-            if let Ok(view) = crate::users::merged(shared, layers, RX).await {
+            if let Ok(view) = crate::program::users::merged(shared, layers, RX).await {
                 views.push((id, view));
             }
         }
@@ -988,7 +988,7 @@ impl Namespaces {
         };
         let ready = self.ready.borrow().clone();
         let Some(ready) = ready else {
-            let root = crate::start::root(&shared.fs)?;
+            let root = crate::program::start::root(&shared.fs)?;
             let entries = alloc::vec![
                 NamespaceEntry {
                     path: "/".into(),
@@ -1017,7 +1017,7 @@ impl Namespaces {
             // User 0 has no folder in /users, and so no name is needed.
             let name = match user {
                 0 => None,
-                _ => Some(crate::users::name(shared, user).await?),
+                _ => Some(crate::program::users::name(shared, user).await?),
             };
             add(
                 &mut entries,
@@ -1215,7 +1215,7 @@ impl Namespaces {
         if admin != 0 {
             let name = match user {
                 0 => None,
-                _ => Some(crate::users::name(shared, user).await?),
+                _ => Some(crate::program::users::name(shared, user).await?),
             };
             let home = name.as_ref().map(|name| format!("/users/{name}"));
             let folders = home.clone().map(|h| (h, RW)).into_iter();
@@ -1248,9 +1248,9 @@ impl Namespaces {
             .await
         {
             // A revocable view, as for the folder grants (MIKSPEC-0050.R38).
-            let grant = (user, app_id, crate::grants::VOLUMES);
+            let grant = (user, app_id, crate::program::grants::VOLUMES);
             let directory = shared.volumes.directory()?;
-            if let Some(view) = crate::grants::view(shared, grant, directory, RW).await {
+            if let Some(view) = crate::program::grants::view(shared, grant, directory, RW).await {
                 let volumes = NamespaceEntry {
                     path: VOLUMES.into(),
                     directory: view,
@@ -1388,7 +1388,7 @@ impl Namespaces {
                 Some(rest) => format!("state{rest}"),
                 None => String::from(folder.trim_start_matches('/')),
             };
-            match crate::users::subvolume(shared, &on_root).await {
+            match crate::program::users::subvolume(shared, &on_root).await {
                 // A root file system without subvolumes gets a folder.
                 Ok(()) | Err(Status::NotSupported) => {}
                 // Another start of the app made it meanwhile.
@@ -1426,7 +1426,7 @@ impl Namespaces {
             },
         ];
         let view = NodeAsyncClient::new(
-            crate::users::view(shared, layers, RWX).await?,
+            crate::program::users::view(shared, layers, RWX).await?,
             reactor.clone(),
         );
         let at = format!("{APPS}/{app_id}");
@@ -1664,7 +1664,7 @@ impl Namespaces {
         entries: &mut Vec<NamespaceEntry>,
         origins: &mut Vec<(String, Origin)>,
     ) -> Result<(), Status> {
-        let name = crate::users::name(shared, user).await?;
+        let name = crate::program::users::name(shared, user).await?;
         let client = || ClientIdentity {
             pid: 0,
             user,
@@ -1674,7 +1674,7 @@ impl Namespaces {
             portable_checksum: checksum.into(),
         };
         let mut held = BTreeMap::new();
-        for (path, rights, permission) in crate::grants::folders(&name) {
+        for (path, rights, permission) in crate::program::grants::folders(&name) {
             if entries.iter().any(|e| e.path == path) {
                 continue;
             }
@@ -1693,7 +1693,9 @@ impl Namespaces {
                 continue;
             };
             let grant = (user, app_id, permission);
-            if let Some(view) = crate::grants::view(shared, grant, folder.directory, rights).await {
+            if let Some(view) =
+                crate::program::grants::view(shared, grant, folder.directory, rights).await
+            {
                 add(
                     entries,
                     origins,
@@ -1758,7 +1760,7 @@ impl Namespaces {
             true => alloc::vec![own.directory, system.0.directory],
             false => alloc::vec![system.0.directory, own.directory],
         };
-        let view = crate::users::merged(shared, layers, RX).await?;
+        let view = crate::program::users::merged(shared, layers, RX).await?;
         Ok(none(NamespaceEntry {
             path: "/libraries".into(),
             directory: view,
@@ -2059,7 +2061,7 @@ async fn live_views(
                 writable: false,
             },
         ];
-        let view = crate::users::view(shared, layers, RWX).await?;
+        let view = crate::program::users::view(shared, layers, RWX).await?;
         made.push(Rc::new(NodeAsyncClient::new(view, reactor.clone())));
     }
     made.try_into().map_err(|_| Status::Io)

@@ -8,7 +8,7 @@
 //! made under a key that was revoked meanwhile is dropped, so that no
 //! namespace built across the revocation keeps it.
 
-use crate::processes::Shared;
+use crate::program::processes::Shared;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -73,7 +73,7 @@ impl Grants {
 }
 
 async fn union(shared: &Shared) -> Option<UnionAsyncClient> {
-    let client = crate::users::connect::<Union>(shared, UNION).await?;
+    let client = crate::program::users::connect::<Union>(shared, UNION).await?;
     Some(UnionAsyncClient::new(client, shared.reactor.clone()))
 }
 

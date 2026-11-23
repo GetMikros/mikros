@@ -4,7 +4,7 @@
 //! its kernel object ID, so that a later process with the same process
 //! ID is never taken for it.
 
-use crate::processes::Shared;
+use crate::program::processes::Shared;
 use alloc::rc::Rc;
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -73,7 +73,7 @@ async fn set_admin(shared: &Shared, koid: u64, admin: u32) -> Result<(), Status>
     };
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     let (client, server) = endpoints::<Directory>().map_err(|_| Status::NoResources)?;
-    crate::processes::bind(&control, identity, server).await?;
+    crate::program::processes::bind(&control, identity, server).await?;
     // The process may have ended, and its ID gone to another, while
     // the service manager bound it.
     if let Some(record) = shared

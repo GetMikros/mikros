@@ -1,13 +1,13 @@
 //! The state that serving init and every `Launcher` endpoint share, and
 //! starting a process with its whole startup transfer.
 
-use crate::broker::Permissions;
-use crate::devfs::Dev;
-use crate::launcher;
-use crate::namespace::{App, Namespaces, Programs};
-use crate::portable::Portable;
-use crate::records::{Exit, Record, Records};
-use crate::start::{self, Transfer, duplicate};
+use crate::program::broker::Permissions;
+use crate::program::devfs::Dev;
+use crate::program::launcher;
+use crate::program::namespace::{App, Namespaces, Programs};
+use crate::program::portable::Portable;
+use crate::program::records::{Exit, Record, Records};
+use crate::program::start::{self, Transfer, duplicate};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -47,7 +47,7 @@ pub struct Shared {
     /// The `/dev` of every process.
     pub dev: Dev,
     /// `/volumes`, for the processes that hold `user.volumes.access`.
-    pub volumes: Rc<crate::volumes::Volumes>,
+    pub volumes: Rc<crate::program::volumes::Volumes>,
     /// How the namespaces of new processes are built.
     pub namespaces: Rc<Namespaces>,
     /// The root budget.
@@ -74,7 +74,7 @@ pub struct Shared {
     /// What the permission broker says about permissions.
     pub permissions: Permissions,
     /// The keys of the folder grants (MIKSPEC-0050.R38).
-    pub grants: crate::grants::Grants,
+    pub grants: crate::program::grants::Grants,
     /// How many times a process terminated, stopped or was continued.
     changes: Cell<u64>,
     /// The tasks waiting for a process to terminate, stop or be
@@ -84,10 +84,10 @@ pub struct Shared {
     pub killed_sessions: RefCell<BTreeSet<u32>>,
     /// The commands, and whether they were read from the root file
     /// system's `/system`.
-    pub commands: RefCell<Option<(bool, Rc<crate::commands::Commands>)>>,
+    pub commands: RefCell<Option<(bool, Rc<crate::program::commands::Commands>)>>,
     /// The log service's `ProcessSources`, which the standard output and
     /// error that processes are given go to (MIKSPEC-0063.R21).
-    pub output: crate::output::Sink,
+    pub output: crate::program::output::Sink,
 }
 
 /// A process to start.
@@ -150,7 +150,7 @@ impl Shared {
             fs,
             process,
             dev: Dev::new(reactor.clone(), spawner.clone()),
-            volumes: crate::volumes::Volumes::new(reactor.clone(), spawner.clone()),
+            volumes: crate::program::volumes::Volumes::new(reactor.clone(), spawner.clone()),
             namespaces,
             budget,
             clock_page,
@@ -246,7 +246,7 @@ impl Shared {
                         identity.pid
                     );
                     return Err(match failed {
-                        Ok(Err(e)) => crate::namespace::status(e),
+                        Ok(Err(e)) => crate::program::namespace::status(e),
                         _ => Status::Io,
                     });
                 }
@@ -390,7 +390,7 @@ impl Shared {
             .await
             .inspect_err(|_| started.kill())?;
         // Standard output and error for a process started without them.
-        let kept = crate::output::give(&mut handles, &app_id);
+        let kept = crate::program::output::give(&mut handles, &app_id);
         let forwarded = app_id.clone();
         let transferred = self
             .transfer(
@@ -439,7 +439,7 @@ impl Shared {
         match recorded {
             Ok(watched) => {
                 self.spawner.spawn(self.clone().watch(pid, watched));
-                let forward = crate::output::forward(self.clone(), pid, forwarded, kept);
+                let forward = crate::program::output::forward(self.clone(), pid, forwarded, kept);
                 self.spawner.spawn(forward);
                 Ok(started.process)
             }

@@ -3,7 +3,7 @@
 //! without naming an app ID runs it with the manifest's app ID, and a
 //! process with such an app ID starts no other.
 
-use crate::processes::Shared;
+use crate::program::processes::Shared;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::rc::Rc;

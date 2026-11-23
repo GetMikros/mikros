@@ -9,7 +9,7 @@
 //! that the kernel takes. It tries to connect once a second, through a
 //! new directory of its own each time, and again after `Add` failed.
 
-use crate::processes::Shared;
+use crate::program::processes::Shared;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -257,7 +257,7 @@ async fn attempt(
     shared: &Shared,
     control: &ProcessDirectoryAsyncClient,
 ) -> Option<ProcessSourcesAsyncClient> {
-    let directory = crate::init::bind_own_directory(shared, control)
+    let directory = crate::program::init::bind_own_directory(shared, control)
         .await
         .ok()?;
     let directory = DirectoryAsyncClient::new(directory, shared.reactor.clone());
