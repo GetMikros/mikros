@@ -228,7 +228,14 @@ pub fn run(args: &Args) -> Result<()> {
         println!(
             "desktop edition: this image has the stand-ins for the greeter and the shell and the \
              account dee, password dee-password, which the greeter logs in on text console 1; \
-             for development only (MIKSPEC-0023.R54)"
+             for development only (MIKSPEC-0023.R56)"
+        );
+    }
+    if args.kind == Kind::Staging {
+        println!(
+            "staging image: built as production is, with the stand-ins of its edition; for \
+             development and testing, not production, and not to be published \
+             (MIKSPEC-0023.R57)"
         );
     }
     Ok(())

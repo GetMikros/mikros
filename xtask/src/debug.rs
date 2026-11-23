@@ -133,6 +133,7 @@ pub fn start_halted(
 }
 
 pub fn run(args: &Args) -> Result<()> {
+    args.kind.not_staging("debug")?;
     let built = build::build(args.kind)?;
     let disk = image::path(args.kind, Edition::Desktop, false, false);
     // The kernel runs at the addresses of its debug information.

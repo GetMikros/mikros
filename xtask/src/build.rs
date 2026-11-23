@@ -18,6 +18,10 @@ pub enum Kind {
     /// The production build's optimization with checks and diagnostic
     /// records, for faults that show only in optimized builds.
     Diag,
+    /// Production's build, with the stand-ins of the edition in its
+    /// images, for development and testing (MIKSPEC-0023.R55,
+    /// MIKSPEC-0023.R57).
+    Staging,
 }
 
 impl Kind {
@@ -28,13 +32,33 @@ impl Kind {
             Kind::Debug => "debug",
             Kind::Fuzz => "fuzz",
             Kind::Diag => "diag",
+            Kind::Staging => "staging",
+        }
+    }
+
+    /// The kind that the code and the version of an image are those of:
+    /// production for staging, which is built as production is
+    /// (MIKSPEC-0023.R55).
+    pub fn built_as(self) -> Kind {
+        match self {
+            Kind::Staging => Kind::Production,
+            other => other,
+        }
+    }
+
+    /// Fails for the commands that only build, image and run take
+    /// staging (MIKSPEC-0023.R55), and others do not define it.
+    pub fn not_staging(self, command: &str) -> Result<()> {
+        match self {
+            Kind::Staging => bail!("`cargo xtask {command}` does not take --kind staging"),
+            _ => Ok(()),
         }
     }
 
     /// The Cargo profile used for this kind.
     pub fn profile(self) -> &'static str {
         match self {
-            Kind::Production => "release",
+            Kind::Production | Kind::Staging => "release",
             Kind::Debug => "dev",
             Kind::Fuzz => "fuzz",
             Kind::Diag => "diag",
@@ -44,7 +68,7 @@ impl Kind {
     /// The directory Cargo writes the profile's output to.
     pub fn profile_dir(self) -> &'static str {
         match self {
-            Kind::Production => "release",
+            Kind::Production | Kind::Staging => "release",
             Kind::Debug => "debug",
             Kind::Fuzz => "fuzz",
             Kind::Diag => "diag",
@@ -3163,11 +3187,23 @@ mod tests {
         );
         assert!(kernel_args("mikrosboot", Kind::Diag).is_empty());
         assert!(Kind::Production.user_rustflags().is_empty());
+        assert!(Kind::Staging.user_rustflags().is_empty());
         assert!(
             Kind::Diag
                 .user_rustflags()
                 .contains(&"-Cforce-frame-pointers=yes")
         );
+    }
+
+    #[test]
+    fn staging_is_built_as_production_and_named_staging() {
+        assert_eq!(Kind::Staging.name(), "staging");
+        assert_eq!(Kind::Staging.built_as(), Kind::Production);
+        assert_eq!(Kind::Debug.built_as(), Kind::Debug);
+        assert_eq!(Kind::Staging.profile(), Kind::Production.profile());
+        assert_eq!(Kind::Staging.profile_dir(), Kind::Production.profile_dir());
+        assert!(Kind::Staging.not_staging("test").is_err());
+        assert!(Kind::Production.not_staging("test").is_ok());
     }
 
     #[test]

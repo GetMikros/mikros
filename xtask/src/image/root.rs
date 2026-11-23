@@ -14,7 +14,7 @@ const SIZE: u64 = 1 << 30;
 
 /// The name of the system version the image holds.
 pub fn version(kind: Kind) -> String {
-    format!("{}-{}", env!("CARGO_PKG_VERSION"), kind.name())
+    format!("{}-{}", env!("CARGO_PKG_VERSION"), kind.built_as().name())
 }
 
 /// The directories of a system version (MIKSPEC-0100.R2), with the empty
@@ -357,6 +357,8 @@ mod tests {
     fn names_the_version_after_the_workspace_and_kind() {
         assert_eq!(version(Kind::Debug), "0.0.0-debug");
         assert_eq!(version(Kind::Production), "0.0.0-production");
+        // A staging image holds production's files, its version too.
+        assert_eq!(version(Kind::Staging), "0.0.0-production");
         assert_eq!(version(Kind::Diag), "0.0.0-diag");
     }
 

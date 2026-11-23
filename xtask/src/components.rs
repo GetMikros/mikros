@@ -95,7 +95,7 @@ impl Component {
     pub fn in_kind(&self, kind: Kind) -> bool {
         self.kinds
             .as_ref()
-            .is_none_or(|kinds| kinds.iter().any(|k| k == kind.name()))
+            .is_none_or(|kinds| kinds.iter().any(|k| k == kind.built_as().name()))
     }
 
     /// Whether the edition `edition` installs the component.
@@ -512,5 +512,6 @@ mod tests {
         let components = parse(&metadata).unwrap();
         assert!(components[0].in_kind(Kind::Diag));
         assert!(!components[0].in_kind(Kind::Production));
+        assert!(!components[0].in_kind(Kind::Staging));
     }
 }

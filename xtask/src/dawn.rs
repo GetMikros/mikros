@@ -74,6 +74,7 @@ pub struct Args {
 }
 
 pub fn run(args: &Args) -> Result<()> {
+    args.kind.not_staging("dawn")?;
     let install = build()?;
     println!("built    {}", install.display());
     if args.test {

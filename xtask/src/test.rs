@@ -458,6 +458,7 @@ fn integration(
 }
 
 pub fn run(args: &Args) -> Result<()> {
+    args.kind.not_staging("test")?;
     let mut args = args.clone();
     args.machine
         .memory
