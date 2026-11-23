@@ -9,6 +9,7 @@
 //! `/system/share`. Nothing else is accepted, so that a demo cannot change
 //! what the system does, and no file of the demos replaces one of the
 //! system's: the root partition's tree refuses that when it installs them.
+//! Each program and library records its ABI levels (MIKSPEC-0068.R22).
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -93,6 +94,9 @@ fn collect_folder(
             if at.starts_with("libraries") {
                 check_library(&entry, &name)?;
             }
+            if at.starts_with("libraries") || at.starts_with("bin") {
+                check_abi_note(&entry)?;
+            }
             files.insert(path, entry);
         } else {
             bail!("{} is neither a file nor a folder", entry.display());
@@ -142,6 +146,49 @@ fn check_library(path: &Path, name: &str) -> Result<()> {
         .with_context(|| format!("{}: link it with -Wl,-soname,{name}", path.display()))
 }
 
+/// Fails unless the ELF file `path` records its ABI levels, in a note of the
+/// name `Mikros` and the type 1, whose target level is not below its minimum
+/// (MIKSPEC-0068.R22).
+fn check_abi_note(path: &Path) -> Result<()> {
+    let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    abi_levels(&data).with_context(|| path.display().to_string())?;
+    Ok(())
+}
+
+/// The minimum and target ABI levels that the ELF file `data` records.
+fn abi_levels(data: &[u8]) -> Result<(u32, u32)> {
+    use object::read::elf::{FileHeader, ProgramHeader};
+    let header = object::elf::FileHeader64::<object::Endianness>::parse(data)
+        .map_err(|_| anyhow::anyhow!("is no ELF file, so it has no ABI note"))?;
+    let endian = header.endian()?;
+    for segment in header.program_headers(endian, data)? {
+        let Some(notes) = segment.notes(endian, data)? else {
+            continue;
+        };
+        for note in notes {
+            let note = note?;
+            if note.name() == b"Mikros" && note.n_type(endian) == object::elf::NoteType(1) {
+                let desc = note.desc();
+                let (Some(minimum), Some(target), 8) = (
+                    desc.get(0..4).and_then(|b| b.try_into().ok()),
+                    desc.get(4..8).and_then(|b| b.try_into().ok()),
+                    desc.len(),
+                ) else {
+                    bail!("has an ABI note that is not two 32-bit levels");
+                };
+                let (minimum, target) = (u32::from_le_bytes(minimum), u32::from_le_bytes(target));
+                if target < minimum {
+                    bail!(
+                        "has an ABI note whose target level {target} is below its minimum {minimum}"
+                    );
+                }
+                return Ok((minimum, target));
+            }
+        }
+    }
+    bail!("has no ABI note (name Mikros, type 1)")
+}
+
 /// Fails unless the soname `found` of a library is its file name `name`, which
 /// is what the loader looks for.
 fn check_soname(name: &str, found: Option<&str>) -> Result<()> {
@@ -155,7 +202,45 @@ fn check_soname(name: &str, found: Option<&str>) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// A demos directory of the given files, each with its content.
+    /// A little-endian ELF64 file of one `PT_NOTE` segment, which holds the
+    /// ABI note of the levels `abi` if it has them.
+    fn elf(abi: Option<(u32, u32)>) -> Vec<u8> {
+        let mut note = Vec::new();
+        if let Some((minimum, target)) = abi {
+            for word in [7u32, 8, 1] {
+                note.extend(word.to_le_bytes());
+            }
+            note.extend(b"Mikros\0\0");
+            note.extend(minimum.to_le_bytes());
+            note.extend(target.to_le_bytes());
+        }
+        let mut file = vec![0x7f, b'E', b'L', b'F', 2, 1, 1];
+        file.resize(16, 0);
+        file.extend(3u16.to_le_bytes()); // e_type
+        file.extend(0x3eu16.to_le_bytes()); // e_machine
+        file.extend(1u32.to_le_bytes()); // e_version
+        file.extend([0u8; 8]); // e_entry
+        file.extend(64u64.to_le_bytes()); // e_phoff
+        file.extend([0u8; 8]); // e_shoff
+        file.extend([0u8; 4]); // e_flags
+        file.extend(64u16.to_le_bytes()); // e_ehsize
+        file.extend(56u16.to_le_bytes()); // e_phentsize
+        file.extend(1u16.to_le_bytes()); // e_phnum
+        file.extend(64u16.to_le_bytes()); // e_shentsize
+        file.extend([0u8; 4]); // e_shnum, e_shstrndx
+        file.extend(4u32.to_le_bytes()); // p_type: PT_NOTE
+        file.extend(4u32.to_le_bytes()); // p_flags
+        file.extend(120u64.to_le_bytes()); // p_offset
+        file.extend([0u8; 16]); // p_vaddr, p_paddr
+        file.extend((note.len() as u64).to_le_bytes()); // p_filesz
+        file.extend((note.len() as u64).to_le_bytes()); // p_memsz
+        file.extend(4u64.to_le_bytes()); // p_align
+        file.extend(note);
+        file
+    }
+
+    /// A demos directory of the given files, each with its content: the
+    /// programs are ELF files with an ABI note.
     fn make(files: &[&str]) -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -168,7 +253,11 @@ mod tests {
         for file in files {
             let path = dir.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, b"content").unwrap();
+            if file.starts_with("bin/") {
+                fs::write(&path, elf(Some((1, 1)))).unwrap();
+            } else {
+                fs::write(&path, b"content").unwrap();
+            }
         }
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -215,6 +304,24 @@ mod tests {
     #[test]
     fn refuses_names_that_differ_only_in_case() {
         assert!(reason(&make(&["bin/Demo", "bin/demo"])).contains("only in case"));
+    }
+
+    #[test]
+    fn a_program_records_its_abi_levels() {
+        assert_eq!(abi_levels(&elf(Some((2, 5)))).unwrap(), (2, 5));
+        let error = |data: &[u8]| format!("{:#}", abi_levels(data).unwrap_err());
+        assert!(error(&elf(None)).contains("no ABI note"));
+        assert!(error(&elf(Some((5, 2)))).contains("below its minimum"));
+        assert!(error(b"#!/bin/msh\n").contains("no ELF"));
+    }
+
+    #[test]
+    fn refuses_a_program_that_has_no_abi_note() {
+        let dir = make(&["bin/good"]);
+        assert!(collect(&dir).is_ok());
+        fs::write(dir.join("bin/bad"), elf(None)).unwrap();
+        let reason = reason(&dir);
+        assert!(reason.contains("bin/bad") && reason.contains("no ABI note"));
     }
 
     #[test]
