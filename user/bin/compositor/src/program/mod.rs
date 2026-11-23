@@ -38,7 +38,7 @@ use mikros_rt::interfaces::mikros::gpu::{
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::{ClientIdentity, DirectoryAsyncClient};
 use mikros_rt::interfaces::mikros::session::{SeatAsyncServer, SeatRequest};
-use output::Output;
+use output::{Output, Want};
 use render::{Haze, Layer, Look, Renderer, Under};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -195,7 +195,13 @@ impl Compositor {
                     *self.display_instance.borrow_mut() = Some(added.instance.clone());
                     *self.output.borrow_mut() = None;
                     let display = DisplayAsyncClient::new(added.display, self.reactor.clone());
-                    match Output::new(display, &self.renderer).await {
+                    match Output::new(
+                        display,
+                        &self.renderer,
+                        std::os::mikros::process::current().as_raw_handle(),
+                    )
+                    .await
+                    {
                         Ok(output) => {
                             let (width, height) = output.size();
                             mikros_rt::log!(
@@ -537,7 +543,30 @@ impl Compositor {
                 // (MIKSPEC-0066.R28).
                 let now_ms = milliseconds().into();
                 let mut next_cursor = None;
+                // On the display's cursor plane when it has one that takes
+                // the shape, and the shape's corner is on the output
+                // (MIKSPEC-0074.R20); otherwise drawn into the frame.
+                let on_plane = match (output.cursor_limit(), cursor) {
+                    (Some(limit), Cursor::Shape(shape)) => pointer
+                        .plane_image(now_ms, shape_name(shape), at, limit)
+                        .filter(|i| i.corner.0 >= 0 && i.corner.1 >= 0)
+                        .map(|i| {
+                            next_cursor = i.next;
+                            output.set_cursor(Some(Want {
+                                id: i.id,
+                                pixels: i.pixels,
+                                size: i.size,
+                                corner: i.corner,
+                            }));
+                        })
+                        .is_some(),
+                    _ => false,
+                };
+                if !on_plane {
+                    output.set_cursor(None);
+                }
                 let cursor_part = match (cursor, cursor_surface) {
+                    _ if on_plane => None,
                     (Cursor::Shape(shape), _) => pointer
                         .image(&self.renderer, now_ms, shape_name(shape), at)
                         .and_then(|(image, corner, next)| {
@@ -665,10 +694,17 @@ impl Compositor {
                 self.store.borrow().reach(point);
             }
             let mut presented = false;
-            if let Some(changed) = &changed {
-                match output.show(changed.as_deref()).await {
+            match &changed {
+                Some(changed) => match output.show(changed.as_deref()).await {
                     Ok(()) => presented = true,
                     Err(e) => mikros_rt::log!(Error, "compositor: showing a frame: {e:?}"),
+                },
+                // Only the pointer changed, which the cursor plane shows
+                // without a frame.
+                None => {
+                    if let Err(e) = output.show_cursor().await {
+                        mikros_rt::log!(Error, "compositor: showing the pointer: {e:?}");
+                    }
                 }
             }
             // Unless the display was given again meanwhile.

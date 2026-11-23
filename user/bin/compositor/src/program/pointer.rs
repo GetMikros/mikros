@@ -31,6 +31,23 @@ pub struct Pointer {
     size: u32,
     /// The last frame rasterized, and its hotspot in pixels.
     image: Option<(Key, HostBuffer, (i32, i32))>,
+    /// The last frame rasterized for the display's cursor plane, with its
+    /// hotspot and the number that tells it from the others.
+    plane: Option<(Key, cp::Image, u64)>,
+    /// How many images were rasterized for the cursor plane.
+    made: u64,
+}
+
+/// A pointer image for the display's cursor plane: premultiplied
+/// `0xAARRGGBB` pixels, `size` across and down, where its corner goes and
+/// the milliseconds until its next frame when it is animated.
+pub struct PlaneImage<'a> {
+    /// Differs from that of any other image rasterized.
+    pub id: u64,
+    pub pixels: &'a [u32],
+    pub size: u32,
+    pub corner: (i32, i32),
+    pub next: Option<u64>,
 }
 
 impl Pointer {
@@ -40,6 +57,8 @@ impl Pointer {
             pack: built_in(),
             size: POINTER_SIZE,
             image: None,
+            plane: None,
+            made: 0,
         }
     }
 
@@ -68,6 +87,43 @@ impl Pointer {
         if let Some((_, buffer, _)) = self.image.take() {
             renderer.forget_host(buffer);
         }
+        self.plane = None;
+    }
+
+    /// The cursor `shape` at `now_ms` with its hotspot at `at`, for a
+    /// cursor plane that takes images up to `limit` pixels across: none
+    /// when the pointer is larger than that.
+    pub fn plane_image(
+        &mut self,
+        now_ms: u64,
+        shape: &str,
+        at: (i32, i32),
+        limit: u32,
+    ) -> Option<PlaneImage<'_>> {
+        if self.size > limit {
+            return None;
+        }
+        let cursor = self.pack.cursor_or_default(shape);
+        let (frame, next) = frame_at(cursor, now_ms);
+        let key = Key {
+            theme: self.theme.clone(),
+            cursor: cursor.name.clone(),
+            frame,
+            size: self.size,
+        };
+        if self.plane.as_ref().is_none_or(|(k, _, _)| *k != key) {
+            let image = self.pack.rasterize(cursor, frame, self.size)?;
+            self.made += 1;
+            self.plane = Some((key, image, self.made));
+        }
+        let (_, image, id) = self.plane.as_ref()?;
+        Some(PlaneImage {
+            id: *id,
+            pixels: &image.pixels,
+            size: image.size,
+            corner: (at.0 - image.hotspot.0, at.1 - image.hotspot.1),
+            next,
+        })
     }
 
     /// The cursor `shape` at `now_ms` with its hotspot at `at`: its
