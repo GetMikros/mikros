@@ -15,12 +15,12 @@ use alloc::vec::Vec;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::task::Poll;
-use mikros_rt::exec::Executor;
+use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    Attributes, Error, Filesystem, FilesystemClient, Layer, MemoryFlags, Node, NodeAsyncClient,
-    NodeAsyncServer, NodeClient, NodeCloneResponse, NodeGetAttributesResponse, NodeRequest,
-    NodeType, OpenFlags, Rights, Union, UnionClient,
+    Attributes, Error, Filesystem, FilesystemClient, Layer, LockKind, MemoryFlags, Node,
+    NodeAsyncClient, NodeAsyncServer, NodeClient, NodeCloneResponse, NodeGetAttributesResponse,
+    NodeRequest, NodeType, NodeUnlockResponse, OpenFlags, Rights, Union, UnionClient,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -269,11 +269,15 @@ fn directory_attributes() -> Attributes {
     }
 }
 
-/// Whether a connection of a revocable view serves `GetAttributes` and
-/// `Clone` while an `Open` of it waits for its backing node, which never
-/// answers `Open` (MIKSPEC-0051.R18).
-fn quick_calls(union: &UnionClient, executor: &mut Executor) -> Result<(), i64> {
-    let (reactor, spawner) = (executor.reactor().clone(), executor.spawner().clone());
+/// A revocable view with `key` over a node that answers `GetAttributes`,
+/// `Clone` and `Unlock`, and holds every `Open` and every waiting `Lock`
+/// unanswered.
+fn stalled_view(
+    union: &UnionClient,
+    key: u64,
+    reactor: &Reactor,
+    spawner: &Spawner,
+) -> Result<NodeAsyncClient, i64> {
     let (backing, server) = endpoints::<Node>().map_err(|_| 40)?;
     let served = reactor.clone();
     spawner.spawn(async move {
@@ -281,6 +285,7 @@ fn quick_calls(union: &UnionClient, executor: &mut Executor) -> Result<(), i64> 
         // The calls of `Open` that are never answered.
         let mut held = Vec::new();
         let mut kept = Vec::new();
+        let mut held_locks = Vec::new();
         while let Ok(request) = server.next().await {
             match request {
                 NodeRequest::GetAttributes(_, r) => {
@@ -289,6 +294,10 @@ fn quick_calls(union: &UnionClient, executor: &mut Executor) -> Result<(), i64> 
                     let _ = r.reply(server.server(), Ok(reply));
                 }
                 NodeRequest::Open(q, r) => held.push((q, r)),
+                NodeRequest::Lock(q, r) => held_locks.push((q, r)),
+                NodeRequest::Unlock(_, r) => {
+                    let _ = r.reply(server.server(), Ok(NodeUnlockResponse {}));
+                }
                 NodeRequest::Clone(q, r) => {
                     kept.push(q.node);
                     let _ = r.reply(server.server(), Ok(NodeCloneResponse {}));
@@ -299,8 +308,17 @@ fn quick_calls(union: &UnionClient, executor: &mut Executor) -> Result<(), i64> 
         }
     });
     let (view, view_server) = endpoints::<Node>().map_err(|_| 40)?;
-    ok(union.create_revocable(backing, RW, 11, view_server, FOREVER)).ok_or(40)?;
-    let view = NodeAsyncClient::new(view, reactor.clone());
+    ok(union.create_revocable(backing, RW, key, view_server, FOREVER)).ok_or(40)?;
+    Ok(NodeAsyncClient::new(view, reactor.clone()))
+}
+
+/// Whether a connection of a revocable view serves `GetAttributes` and
+/// `Clone` while an `Open` of it waits for its backing node, which never
+/// answers `Open` (MIKSPEC-0051.R18), and `Unlock` while a `Lock` that
+/// waits is still waiting.
+fn quick_calls(union: &UnionClient, executor: &mut Executor) -> Result<(), i64> {
+    let (reactor, spawner) = (executor.reactor().clone(), executor.spawner().clone());
+    let view = stalled_view(union, 11, &reactor, &spawner)?;
     let (_node, node_server) = endpoints::<Node>().map_err(|_| 40)?;
     let (_cloned, clone_server) = endpoints::<Node>().map_err(|_| 40)?;
     executor.block_on(async {
@@ -338,6 +356,39 @@ fn quick_calls(union: &UnionClient, executor: &mut Executor) -> Result<(), i64> 
                 (true, _) => Poll::Ready(Ok(())),
                 (false, true) => Poll::Ready(Err(42)),
                 _ => Poll::Pending,
+            }
+        })
+        .await
+    })?;
+    let view = stalled_view(union, 12, &reactor, &spawner)?;
+    executor.block_on(async {
+        let mut locking = pin!(view.lock(LockKind::Exclusive, 0, 0, true));
+        let mut now = 0;
+        // SAFETY: the pointer is valid for the call.
+        unsafe { sys::clock_get_monotonic(&mut now) };
+        let mut settle = pin!(reactor.sleep_until(now + SETTLE));
+        let waited = poll_fn(|cx| {
+            if locking.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(false);
+            }
+            settle.as_mut().poll(cx).map(|_| true)
+        })
+        .await;
+        if !waited {
+            return Err(43);
+        }
+        let mut timeout = pin!(reactor.sleep_until(now + QUICK));
+        let mut unlocking = pin!(view.unlock(0, 0));
+        poll_fn(|cx| {
+            if locking.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Err(43));
+            }
+            if unlocking.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Ok(()));
+            }
+            match timeout.as_mut().poll(cx).is_ready() {
+                true => Poll::Ready(Err(44)),
+                false => Poll::Pending,
             }
         })
         .await

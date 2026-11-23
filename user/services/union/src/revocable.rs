@@ -142,7 +142,8 @@ enum Event {
 /// the domain is revoked, which closes both. The calls go one after the
 /// other in the order they arrive, except that, while one waits for
 /// `backing`, a call that never waits is served as it arrives
-/// (MIKSPEC-0051.R18).
+/// (MIKSPEC-0051.R18), and a lock that waits does not hold up the calls
+/// after it.
 pub async fn serve(
     domain: Rc<Domain>,
     backing: NodeAsyncClient,
@@ -199,7 +200,11 @@ pub async fn serve(
                     break;
                 }
                 let busy = current.is_some() || !queued.is_empty();
-                match busy && never_waits(&request) {
+                // A lock that waits for another holder may wait for as
+                // long as that holder keeps it, so what comes after it,
+                // its own `Unlock` included, does not wait behind it.
+                let lock_waits = matches!(&request, NodeRequest::Lock(q, _) if q.wait);
+                match lock_waits || (busy && never_waits(&request)) {
                     true => meanwhile.push(Box::pin(connection.handle(request, server.server()))),
                     false => queued.push_back(request),
                 }
