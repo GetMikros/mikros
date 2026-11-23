@@ -391,7 +391,11 @@ impl Connection {
         // others go one after the other: a call that waits for the
         // answer, or that the folder takes long to answer, holds up only
         // those after it.
-        if never_waits(&request) {
+        // A lock that waits for another holder, which may take as long as
+        // that holder keeps it, is no turn that the calls after it wait
+        // for, its own `Unlock` included.
+        let lock_waits = matches!(&request, NodeRequest::Lock(q, _) if q.wait);
+        if never_waits(&request) || lock_waits {
             self.gate.shared.spawner.spawn(async move {
                 connection.serve(&state, request, server.server()).await;
             });
