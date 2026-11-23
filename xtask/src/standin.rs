@@ -10,6 +10,7 @@
 
 use crate::build::Edition;
 use anyhow::{Context, Result, bail};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The file that describes a stand-in.
@@ -519,9 +520,312 @@ pub fn parse(text: &str, dir: &Path) -> Result<StandIn> {
     })
 }
 
+/// Adds the folders below `dir` that hold the file of a stand-in to `found`,
+/// in the order of their paths. Folders named `target` hold build output and
+/// are not searched.
+fn scan(dir: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .collect::<std::io::Result<_>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    if entries.iter().any(|e| e.file_name() == FILE) {
+        found.push(dir.to_owned());
+    }
+    for entry in entries {
+        let kind = entry.file_type()?;
+        if kind.is_dir() && entry.file_name() != "target" {
+            scan(&entry.path(), found)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every stand-in below `root`, by the files `stand-in.toml` that the
+/// folders below it hold, in the order of their paths, or the first reason
+/// why one is wrong.
+pub fn find(root: &Path) -> Result<Vec<StandIn>> {
+    let mut folders = Vec::new();
+    scan(root, &mut folders)?;
+    let mut standins: Vec<StandIn> = Vec::new();
+    for dir in folders {
+        let path = dir.join(FILE);
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let standin = parse(&text, &dir).with_context(|| format!("in {}", path.display()))?;
+        if let Some(other) = standins.iter().find(|s| s.name == standin.name) {
+            bail!(
+                "{} and {} are both the stand-in {}",
+                other.dir.display(),
+                dir.display(),
+                standin.name
+            );
+        }
+        standins.push(standin);
+    }
+    for standin in &standins {
+        for used in &standin.uses {
+            if !standins.iter().any(|s| &s.name == used) {
+                bail!("{} uses {used}, which is no stand-in", standin.name);
+            }
+        }
+    }
+    order(&standins)?;
+    Ok(standins)
+}
+
+/// The names of `standins` so that each follows the stand-ins that it uses,
+/// or an error when they use each other in a circle.
+pub fn order(standins: &[StandIn]) -> Result<Vec<String>> {
+    let mut done: Vec<String> = Vec::new();
+    while done.len() < standins.len() {
+        let next = standins
+            .iter()
+            .find(|s| !done.contains(&s.name) && s.uses.iter().all(|u| done.contains(u)));
+        match next {
+            Some(s) => done.push(s.name.clone()),
+            None => bail!("the stand-ins use each other in a circle"),
+        }
+    }
+    Ok(done)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EXAMPLE: &str = r#"
+[stand-in]
+stand_in = true
+name = "greeter-probe"
+reason = "MIKSPEC-0075.R14"
+editions = ["desktop"]
+uses = ["sdl-probe"]
+enables_desktop = true
+
+[build]
+output = "greeter-probe"
+sources = ["greeter.c"]
+optimization = "-O2"
+warnings = ["-Wall", "-Wextra", "-Werror"]
+includes = ["vulkan-headers", "generated-protocols"]
+link = [
+  { port = "wayland", file = "libwayland.dlib", linking = "dynamic" },
+  { port = "sdl3", file = "libSDL3.slib", linking = "static" },
+]
+protocols = [
+  { name = "xdg-shell", from = "staged" },
+  { name = "mikros-buffer-v1", from = "component:compositor" },
+  { name = "tablet-v2", from = "sysroot", path = "share/wayland-protocols/stable/tablet/tablet-v2.xml" },
+]
+
+[[system_apps]]
+id = "system.mikros.greeter_probe"
+kind = "app"
+version = "1.0.0"
+name = "Greeter probe"
+description = "The greeter of the desktop run"
+executable = "greeter-probe"
+portable = false
+installable = false
+shell_parts = [
+  { roles = ["greeter"], executable = "greeter-probe", arguments = ["--login", "dee", "{password}"] },
+]
+files = [
+  { name = "greeter-probe", from = "self", executable = true },
+  { name = "sdl-probe", from = "sdl-probe", executable = true },
+]
+
+[[installs]]
+path = "config/desktop/shell.yaml"
+file = "shell.yaml"
+
+[account]
+name = "dee"
+full_name = "Dee"
+kind = "admin"
+login = "console"
+"#;
+
+    /// A folder with the files that `EXAMPLE` names.
+    fn folder(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("standin-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("greeter.c"), "int main(void){return 0;}\n").unwrap();
+        fs::write(dir.join("shell.yaml"), "shell: x\n").unwrap();
+        dir
+    }
+
+    fn error(text: &str, dir: &Path) -> String {
+        format!("{:#}", parse(text, dir).unwrap_err())
+    }
+
+    #[test]
+    fn reads_every_field_of_a_stand_in() {
+        let dir = folder("read");
+        let s = parse(EXAMPLE, &dir).unwrap();
+        assert_eq!(s.name, "greeter-probe");
+        assert_eq!(s.reason, "MIKSPEC-0075.R14");
+        assert_eq!(s.editions, [Edition::Desktop]);
+        assert_eq!(s.uses, ["sdl-probe"]);
+        assert!(s.enables_desktop && s.in_edition(Edition::Desktop));
+        assert!(!s.in_edition(Edition::Server));
+        let build = s.build.unwrap();
+        assert_eq!(build.output, "greeter-probe");
+        assert_eq!(build.includes, ["vulkan-headers", "generated-protocols"]);
+        assert_eq!(build.link[1].linking, Linking::Static);
+        assert_eq!(build.protocols[0].origin, Origin::Staged);
+        assert_eq!(
+            build.protocols[1].origin,
+            Origin::Component("compositor".into())
+        );
+        assert_eq!(
+            build.protocols[2].origin,
+            Origin::Sysroot("share/wayland-protocols/stable/tablet/tablet-v2.xml".into())
+        );
+        let app = &s.apps[0];
+        assert_eq!(app.parts[0].arguments, ["--login", "dee", "{password}"]);
+        assert_eq!(app.files[1].from, "sdl-probe");
+        assert_eq!(s.installs[0].path, "config/desktop/shell.yaml");
+        assert_eq!(s.account.unwrap().login, "console");
+    }
+
+    #[test]
+    fn refuses_what_a_stand_in_cannot_be() {
+        let dir = folder("refuse");
+        for (from, to, reason) in [
+            ("stand_in = true", "stand_in = false", "not a stand-in"),
+            ("MIKSPEC-0075.R14", "the greeter", "not a requirement ID"),
+            ("MIKSPEC-0075.R14", "MIKSPEC-0075", "not a requirement ID"),
+            ("[\"desktop\"]", "[]", "no editions"),
+            (
+                "[\"desktop\"]",
+                "[\"tablet\"]",
+                "no edition is named tablet",
+            ),
+            (
+                "system.mikros.greeter_probe",
+                "org.example.greeter",
+                "not an ID of a system app",
+            ),
+            ("kind = \"app\"", "kind = \"library\"", "kind is not `app`"),
+            ("-Wall", "Wall", "not a warning option"),
+            ("-O2", "O2", "not an optimization option"),
+            ("\"vulkan-headers\"", "\"mesa\"", "not a header folder"),
+            ("port = \"wayland\"", "port = \"zlib\"", "not a port"),
+            (
+                "linking = \"static\"",
+                "linking = \"dynamic\"",
+                "cannot be linked",
+            ),
+            ("from = \"staged\"", "from = \"nowhere\"", "not staged"),
+            (
+                "kind = \"admin\"",
+                "kind = \"root\"",
+                "not admin or standard",
+            ),
+            ("greeter.c", "missing.c", "is not in"),
+            (
+                "file = \"shell.yaml\"",
+                "file = \"other.yaml\"",
+                "is not in the folder",
+            ),
+            (
+                "path = \"config/",
+                "path = \"/config/",
+                "not a path under /system",
+            ),
+            (
+                "from = \"sdl-probe\"",
+                "from = \"mesa\"",
+                "neither this stand-in's program",
+            ),
+        ] {
+            let text = EXAMPLE.replacen(from, to, 1);
+            assert!(error(&text, &dir).contains(reason), "{from} -> {to}");
+        }
+    }
+
+    #[test]
+    fn refuses_unknown_keys_tables_and_duplicates() {
+        let dir = folder("unknown");
+        let text = EXAMPLE.replacen("uses =", "uses2 =", 1);
+        assert!(error(&text, &dir).contains("unknown key"));
+        assert!(error(&format!("{EXAMPLE}[extra]\nx = 1\n"), &dir).contains("unknown key"));
+        let twice = EXAMPLE.replacen(
+            "{ name = \"xdg-shell\", from = \"staged\" },",
+            "{ name = \"xdg-shell\", from = \"staged\" }, { name = \"xdg-shell\", from = \"staged\" },",
+            1,
+        );
+        assert!(error(&twice, &dir).contains("twice"));
+        let no_folder = EXAMPLE.replacen("\"generated-protocols\"", "\"sdl3\"", 1);
+        assert!(error(&no_folder, &dir).contains("does not include its folder"));
+    }
+
+    #[test]
+    fn a_system_app_holds_its_executable_and_the_programs_of_its_parts() {
+        let dir = folder("app");
+        let text = EXAMPLE.replacen(
+            "executable = \"greeter-probe\"\nportable",
+            "executable = \"other\"\nportable",
+            1,
+        );
+        assert!(error(&text, &dir).contains("does not hold its executable"));
+        let part = EXAMPLE.replacen(
+            "executable = \"greeter-probe\", arguments",
+            "executable = \"missing\", arguments",
+            1,
+        );
+        assert!(error(&part, &dir).contains("does not hold missing"));
+    }
+
+    #[test]
+    fn finds_the_files_below_the_folder_and_skips_build_output() {
+        let root = std::env::temp_dir().join(format!("standin-find-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let simple = |name: &str, uses: &str| {
+            format!(
+                "[stand-in]\nstand_in = true\nname = \"{name}\"\nreason = \"MIKSPEC-0075.R14\"\n\
+                 editions = [\"desktop\"]\nuses = [{uses}]\nenables_desktop = false\n"
+            )
+        };
+        for (path, text) in [
+            ("tests/b/deep/stand-in.toml", simple("b", "\"a\"")),
+            ("tests/a/stand-in.toml", simple("a", "")),
+            ("target/x/stand-in.toml", simple("ignored", "")),
+            ("bin/target/stand-in.toml", simple("ignored2", "")),
+        ] {
+            let at = root.join(path);
+            fs::create_dir_all(at.parent().unwrap()).unwrap();
+            fs::write(at, text).unwrap();
+        }
+        let found = find(&root).unwrap();
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(order(&found).unwrap(), ["a", "b"]);
+        // The same name twice, a missing stand-in and a circle are refused.
+        fs::create_dir_all(root.join("tests/c")).unwrap();
+        fs::write(root.join("tests/c/stand-in.toml"), simple("a", "")).unwrap();
+        assert!(format!("{:#}", find(&root).unwrap_err()).contains("both the stand-in a"));
+        fs::write(root.join("tests/c/stand-in.toml"), simple("c", "\"zzz\"")).unwrap();
+        assert!(format!("{:#}", find(&root).unwrap_err()).contains("no stand-in"));
+        fs::write(root.join("tests/c/stand-in.toml"), simple("c", "\"b\"")).unwrap();
+        fs::write(root.join("tests/a/stand-in.toml"), simple("a", "\"c\"")).unwrap();
+        assert!(format!("{:#}", find(&root).unwrap_err()).contains("in a circle"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_stand_ins_of_the_repository_are_valid() {
+        let found = find(&crate::workspace_root().join("user")).unwrap();
+        let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"greeter-probe") && names.contains(&"sdl-probe"));
+        let greeter = found.iter().find(|s| s.name == "greeter-probe").unwrap();
+        assert_eq!(greeter.uses, ["sdl-probe"]);
+        assert_eq!(greeter.build.as_ref().unwrap().protocols.len(), 12);
+        assert_eq!(greeter.apps.len(), 2);
+        assert!(greeter.account.is_some() && greeter.enables_desktop);
+    }
 
     #[test]
     fn requirement_ids_have_a_document_and_a_number() {

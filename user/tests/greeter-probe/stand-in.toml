@@ -1,0 +1,99 @@
+# The greeter and the shell of the desktop run: one C program that is the
+# greeter, and the desktop, taskbar and start-menu parts of the shell,
+# with the SDL probe as the shell's switcher part. The greeter logs in the
+# account below, whose password cargo xtask makes for each image and
+# substitutes for {password}.
+
+[stand-in]
+stand_in = true
+name = "greeter-probe"
+reason = "MIKSPEC-0075.R14"
+editions = ["desktop"]
+uses = ["sdl-probe"]
+enables_desktop = true
+
+[build]
+output = "greeter-probe"
+sources = [
+  "greeter.c",
+  "wallpaper.c",
+  "panel.c",
+  "window.c",
+  "protocols.c",
+  "protocols_input.c",
+]
+optimization = "-O2"
+warnings = ["-Wall", "-Wextra", "-Werror"]
+includes = ["vulkan-headers", "generated-protocols"]
+link = [
+  { port = "wayland", file = "libwayland.dlib", linking = "dynamic" },
+  { port = "vulkan-loader", file = "libvulkan.dlib", linking = "dynamic" },
+]
+# The client code of the protocols that the compositor and the programs of
+# the desktop speak; tablet-v2 only for the tablet tool's interface, which
+# cursor-shape names.
+protocols = [
+  { name = "xdg-shell", from = "staged" },
+  { name = "mikros-buffer-v1", from = "component:compositor" },
+  { name = "xdg-activation-v1", from = "staged" },
+  { name = "mikros-shell-v1", from = "component:compositor" },
+  { name = "mikros-material-v1", from = "component:compositor" },
+  { name = "cursor-shape-v1", from = "staged" },
+  { name = "viewporter", from = "staged" },
+  { name = "fractional-scale-v1", from = "staged" },
+  { name = "presentation-time", from = "staged" },
+  { name = "keyboard-shortcuts-inhibit-unstable-v1", from = "staged" },
+  { name = "wlr-layer-shell-unstable-v1", from = "staged" },
+  { name = "tablet-v2", from = "sysroot", path = "share/wayland-protocols/stable/tablet/tablet-v2.xml" },
+]
+
+[[system_apps]]
+id = "system.mikros.greeter_probe"
+kind = "app"
+version = "1.0.0"
+name = "Greeter probe"
+description = "The greeter of the desktop run"
+executable = "greeter-probe"
+portable = false
+installable = false
+shell_parts = [
+  { roles = ["greeter"], executable = "greeter-probe", arguments = ["--login", "dee", "{password}"] },
+]
+files = [
+  { name = "greeter-probe", from = "self", executable = true },
+]
+
+# The shell: its desktop part hands the compositor a wallpaper of a test
+# colour, its taskbar part shows a panel of haze, its start-menu part
+# connects to the service manager's Control and so asks a question, and its
+# switcher part is a window that only has to show.
+[[system_apps]]
+id = "system.mikros.shell_probe"
+kind = "app"
+version = "1.0.0"
+name = "Shell probe"
+description = "The shell of the desktop run"
+executable = "greeter-probe"
+portable = false
+installable = false
+shell_parts = [
+  { roles = ["desktop"], executable = "greeter-probe", arguments = ["--wallpaper"] },
+  { roles = ["taskbar"], executable = "greeter-probe", arguments = ["--panel"] },
+  { roles = ["start-menu"], executable = "greeter-probe", arguments = ["--control"] },
+  { roles = ["switcher"], executable = "sdl-probe", arguments = [] },
+]
+files = [
+  { name = "greeter-probe", from = "self", executable = true },
+  { name = "sdl-probe", from = "sdl-probe", executable = true },
+]
+
+# The shell settings, which name the greeter and the shell.
+[[installs]]
+path = "config/desktop/shell.yaml"
+file = "shell.yaml"
+
+[account]
+name = "dee"
+full_name = "Dee"
+kind = "admin"
+login = "console"

@@ -1,0 +1,26 @@
+# The SDL part of the desktop run's shell: a window of SDL's Wayland driver
+# that Vulkan clears and presents, which the shell probe of the
+# greeter-probe stand-in runs as its switcher part. SDL3 is linked
+# statically, and Wayland, xkbcommon and the Vulkan loader dynamically.
+
+[stand-in]
+stand_in = true
+name = "sdl-probe"
+reason = "MIKSPEC-0075.R19"
+editions = ["desktop"]
+uses = []
+enables_desktop = false
+
+[build]
+output = "sdl-probe"
+sources = ["sdl.c"]
+optimization = "-O2"
+warnings = ["-Wall", "-Wextra", "-Werror"]
+includes = ["vulkan-headers", "sdl3"]
+link = [
+  { port = "sdl3", file = "libSDL3.slib", linking = "static" },
+  { port = "wayland", file = "libwayland.dlib", linking = "dynamic" },
+  { port = "xkbcommon", file = "libxkbcommon.dlib", linking = "dynamic" },
+  { port = "vulkan-loader", file = "libvulkan.dlib", linking = "dynamic" },
+]
+protocols = []
