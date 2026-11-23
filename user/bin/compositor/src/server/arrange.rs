@@ -129,6 +129,8 @@ impl Server {
         if let Some(xdg) = self.surfaces.get_mut(&surface).and_then(|s| s.xdg.as_mut()) {
             xdg.minimized = true;
         }
+        // The keyboard moves on at once, not with the next pointer event.
+        self.keep_keyboard_focus();
     }
 
     /// Whether an Alt key is held.

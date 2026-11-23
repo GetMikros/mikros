@@ -419,4 +419,25 @@ mod tests {
                 .attention
         );
     }
+
+    #[test]
+    fn minimizing_the_focused_window_moves_the_keyboard_to_the_next_at_once() {
+        const DOWN: u32 = 108;
+        let (mut server, _client) = setup();
+        server.focus_new_windows();
+        server.focus_keyboard(Some(1));
+        let order: Vec<SurfaceId> = server.windows().iter().map(|w| w.surface).collect();
+        let top = *order.last().unwrap();
+        server.focus_keyboard(Some(top));
+        // Super and Down minimize the focused window, and the keyboard goes
+        // to the highest window that is left, before any pointer event.
+        press(&mut server, &[SUPER, DOWN]);
+        release(&mut server, &[SUPER, DOWN]);
+        let next = server.keyboard_focus();
+        assert!(next.is_some() && next != Some(top));
+        press(&mut server, &[SUPER, DOWN]);
+        release(&mut server, &[SUPER, DOWN]);
+        let last = server.keyboard_focus();
+        assert!(last.is_some() && last != next && last != Some(top));
+    }
 }
