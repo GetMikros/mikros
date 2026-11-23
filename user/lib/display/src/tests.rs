@@ -116,3 +116,25 @@ fn a_cell_cut_by_the_width_is_background() {
     // A row past the cell's height is background too.
     assert!(row("##", CELL_HEIGHT, 16, fg, bg).all(|p| p == bg));
 }
+
+#[test]
+fn a_commit_copies_the_whole_buffer_when_the_scanout_changes() {
+    let whole = Rect::new(0, 0, 100, 50);
+    let src = Rect::new(0, 0, 80, 50);
+    let damage = [Rect::new(10, 10, 5, 5)];
+    // A new buffer, rectangle or mode: all of the buffer, flushed whole.
+    let p = presented(&whole, &src, &damage, true);
+    assert_eq!((p.copies, p.flush), (vec![whole], whole));
+    // The same one with no damage: all of the buffer too.
+    let p = presented(&whole, &src, &[], false);
+    assert_eq!((p.copies, p.flush), (vec![whole], whole));
+    // The same one with damage: the damage within the source, flushed as
+    // the box around it.
+    let two = [Rect::new(10, 10, 5, 5), Rect::new(40, 20, 10, 10)];
+    let p = presented(&whole, &src, &two, false);
+    assert_eq!(p.copies, two.to_vec());
+    assert_eq!(p.flush, Rect::new(10, 10, 40, 20));
+    // Damage outside the source copies nothing, and flushes the source.
+    let p = presented(&whole, &src, &[Rect::new(90, 0, 5, 5)], false);
+    assert_eq!((p.copies, p.flush), (vec![], src));
+}

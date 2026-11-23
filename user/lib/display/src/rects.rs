@@ -56,3 +56,36 @@ pub fn copied(src: &Rect, damage: &[Rect]) -> Vec<Rect> {
     }
     damage.iter().filter_map(|d| src.intersect(d)).collect()
 }
+
+/// What a commit of an enabled primary plane copies to the host and
+/// flushes (MIKSPEC-0031.R18).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Presented {
+    /// The parts of the buffer to copy, in buffer coordinates.
+    pub copies: Vec<Rect>,
+    /// A rectangle that holds everything copied: what to flush.
+    pub flush: Rect,
+}
+
+/// What a commit copies and flushes for the buffer `whole` that shows
+/// `src`, with the damage `damage`: all of the buffer when `changed`, that
+/// is, when the buffer, the rectangle or the mode is not what the scanout
+/// was last set to, or when the commit has no damage; otherwise the damage
+/// within `src`. The flush is the box around the copies, or `src` when
+/// there are none.
+pub fn presented(whole: &Rect, src: &Rect, damage: &[Rect], changed: bool) -> Presented {
+    let copies = match changed || damage.is_empty() {
+        true => alloc::vec![*whole],
+        false => copied(src, damage),
+    };
+    let flush = copies
+        .iter()
+        .copied()
+        .reduce(|a, b| {
+            let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+            let (right, bottom) = (a.right().max(b.right()), a.bottom().max(b.bottom()));
+            Rect::new(x, y, (right - x) as u64, (bottom - y) as u64)
+        })
+        .unwrap_or(*src);
+    Presented { copies, flush }
+}

@@ -9,7 +9,8 @@ use crate::protocol;
 use alloc::rc::{Rc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use mikros_display::rects::{Rect, copied};
+use core::cell::Cell;
+use mikros_display::rects::{Rect, presented};
 use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -17,6 +18,9 @@ use mikros_rt::interfaces::mikros::gpu::{
     self as gpu, Colorspace, Commit, CommitFlags, DisplayAsyncServer,
 };
 use mikros_rt::objects::now;
+
+/// How long, in nanoseconds, a commit may take before it is logged.
+const WATCH: i64 = 2_000_000_000;
 
 fn rect(r: &gpu::Rect) -> Rect {
     Rect::new(
@@ -168,7 +172,11 @@ impl Display {
         Ok(id)
     }
 
-    /// Presents commit `id` once its sync objects reached their values.
+    /// Presents commit `id` once its sync objects reached their values
+    /// (MIKSPEC-0031.R18): for each CRTC the copy of the primary plane's
+    /// buffer to the host, then its scanout, then its flush, the last
+    /// command of the commit fenced, and the cursors; and then the
+    /// completion.
     async fn present(
         self: Rc<Self>,
         id: u64,
@@ -177,21 +185,70 @@ impl Display {
         owner: Weak<DisplayAsyncServer>,
     ) {
         for (timeline, value) in waits {
-            let _ = self.reactor.timeline(timeline.raw(), value).await;
+            if self.reactor.timeline(timeline.raw(), value).await.is_err() {
+                mikros_rt::log!(
+                    Error,
+                    "virtiogpu: commit {id}: waiting for a sync object failed"
+                );
+            }
         }
         let epoch = self.epoch.get();
-        let last = changes.len().saturating_sub(1);
-        for (i, change) in changes.iter().enumerate() {
+        let mut commands = Vec::new();
+        for change in &changes {
+            match self.scanout_commands(change) {
+                Ok(more) => commands.extend(more),
+                Err(status) => {
+                    mikros_rt::log!(Error, "virtiogpu: presenting commit {id}: {status:?}");
+                }
+            }
+        }
+        if let Some(last) = commands.pop() {
+            commands.push(protocol::fenced(last, self.gpu.fence()));
+        }
+        // Says so when the device does not answer a command in time, which
+        // leaves the commit, and whoever waits for it, waiting for good.
+        let stage = Rc::new(Cell::new(0usize));
+        let kinds: Vec<u32> = commands
+            .iter()
+            .map(|c| protocol::response_type(c).unwrap_or(0))
+            .collect();
+        let (display, watched) = (self.clone(), stage.clone());
+        self.spawner.spawn(async move {
+            let _ = display.reactor.sleep_until(now() + WATCH).await;
+            if display.showing.borrow().contains_key(&id) {
+                let at = watched.get();
+                mikros_rt::log!(
+                    Error,
+                    "virtiogpu: commit {id} was not presented after 2 s; at command {at} of {}, kind {:#x}",
+                    kinds.len(),
+                    kinds.get(at).copied().unwrap_or(0)
+                );
+            }
+        });
+        for (at, command) in commands.iter().enumerate() {
+            stage.set(at);
             // The owner closed its connection, and the scanouts are off.
             if self.epoch.get() != epoch {
                 break;
             }
-            let fence = (i == last).then(|| self.gpu.fence());
-            if let Err(status) = self.apply(change, fence).await {
+            if let Err(status) = self.gpu.ok(command).await {
                 mikros_rt::log!(Error, "virtiogpu: presenting commit {id}: {status:?}");
             }
+        }
+        for change in &changes {
             if self.epoch.get() != epoch {
                 break;
+            }
+            let before = self.crtcs.borrow()[change.index];
+            let scanout = change.index as u32;
+            if let Err(status) = self
+                .apply_cursor(scanout, before.cursor, change.cursor)
+                .await
+            {
+                mikros_rt::log!(
+                    Error,
+                    "virtiogpu: showing the cursor of commit {id}: {status:?}"
+                );
             }
             let mut crtcs = self.crtcs.borrow_mut();
             let crtc = &mut crtcs[change.index];
@@ -208,56 +265,31 @@ impl Display {
         }
     }
 
-    /// Shows `change` on its scanout: the primary plane's buffer, copied
-    /// to the host where damaged and flushed, the last command fenced
-    /// with `fence`, and the cursor.
-    async fn apply(&self, change: &Change, fence: Option<u64>) -> Result<(), Status> {
+    /// The commands that show `change` on its scanout, in the order that
+    /// never shows content the host does not have (MIKSPEC-0031.R18):
+    /// none for a commit of the cursor alone; for a disabled primary plane
+    /// the scanout of resource 0; and for an enabled one the copy, the
+    /// scanout when the buffer or rectangle is not what it was last set
+    /// to, and the flush.
+    fn scanout_commands(&self, change: &Change) -> Result<Vec<Vec<u8>>, Status> {
+        if !change.scanout {
+            return Ok(Vec::new());
+        }
         let scanout = change.index as u32;
         let before = self.crtcs.borrow()[change.index];
-        // A commit of the cursor alone leaves what the scanout shows
-        // alone, with no copy and no flush.
-        if !change.scanout {
-            return self
-                .apply_cursor(scanout, before.cursor, change.cursor)
-                .await;
-        }
-        match change.shown {
-            None if before.shown.is_some() || before.active != change.active => {
-                let off = protocol::set_scanout(scanout, 0, protocol::Rect::default());
-                self.gpu.ok(&off).await?;
-            }
-            None => {}
-            Some(shown) => {
-                let Some(resource) = self.prepare(&shown, &change.damage, &before) else {
-                    return Err(Status::BadState);
-                };
-                if before.shown != Some(shown) || before.mode != change.mode {
-                    let set = protocol::set_scanout(scanout, resource.id, device_rect(&shown.src));
-                    self.gpu.ok(&set).await?;
-                }
-                let damage = match before.shown == Some(shown) {
-                    true => copied(&shown.src, &change.damage),
-                    false => vec![shown.src],
-                };
-                for r in &damage {
-                    let offset = r.y as u64 * u64::from(resource.stride) + r.x as u64 * 4;
-                    let transfer =
-                        protocol::transfer_to_host_2d(resource.id, device_rect(r), offset);
-                    self.gpu.ok(&transfer).await?;
-                }
-                let flush = protocol::resource_flush(resource.id, device_rect(&shown.src), fence);
-                self.gpu.ok(&flush).await?;
-            }
-        }
-        self.apply_cursor(scanout, before.cursor, change.cursor)
-            .await
-    }
-
-    /// The resource of `shown`, with the parts of an imported buffer that
-    /// the commit copies brought over from the client's memory.
-    fn prepare(&self, shown: &Shown, damage: &[Rect], before: &Crtc) -> Option<Rc<Resource>> {
+        let Some(shown) = change.shown else {
+            return Ok(vec![protocol::set_scanout(
+                scanout,
+                0,
+                protocol::Rect::default(),
+            )]);
+        };
         let buffers = self.buffers.borrow();
-        let buffer = buffers.get(&shown.buffer)?;
+        let buffer = buffers.get(&shown.buffer).ok_or(Status::BadState)?;
+        let resource = &buffer.resource;
+        let whole = Rect::new(0, 0, u64::from(resource.width), u64::from(resource.height));
+        let changed = before.shown != Some(shown) || before.mode != change.mode;
+        let plan = presented(&whole, &shown.src, &change.damage, changed);
         if let Source::Imported {
             mapping,
             start,
@@ -265,13 +297,30 @@ impl Display {
             ..
         } = &buffer.source
         {
-            let parts = match before.shown == Some(*shown) {
-                true => copied(&shown.src, damage),
-                false => vec![shown.src],
-            };
-            copy_in(mapping, *start, *pitch, &buffer.resource, &parts);
+            copy_in(mapping, *start, *pitch, resource, &plan.copies);
         }
-        Some(buffer.resource.clone())
+        let mut commands = Vec::new();
+        for r in &plan.copies {
+            let offset = r.y as u64 * u64::from(resource.stride) + r.x as u64 * 4;
+            commands.push(protocol::transfer_to_host_2d(
+                resource.id,
+                device_rect(r),
+                offset,
+            ));
+        }
+        if changed {
+            commands.push(protocol::set_scanout(
+                scanout,
+                resource.id,
+                device_rect(&shown.src),
+            ));
+        }
+        commands.push(protocol::resource_flush(
+            resource.id,
+            device_rect(&plan.flush),
+            None,
+        ));
+        Ok(commands)
     }
 
     /// Shows the cursor `now` in place of `before` on `scanout`: a new
