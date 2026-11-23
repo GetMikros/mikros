@@ -1,4 +1,4 @@
-// MIKSPEC-0034.R47, MIKSPEC-0034.R48
+// MIKSPEC-0034.R47, MIKSPEC-0034.R48, MIKSPEC-0094.R9
 
 library mikros.process;
 using mikros.base;
@@ -65,4 +65,6 @@ protocol Launcher {
     @11 KillLoginSession(login_session u32, signo u32) -> () error base.Status;
     @12 OpenElevations(server server_end<Elevations>) -> () error base.Status;
     @13 KillChecked(pid u32, koid u64, signo u32) -> () error base.Status;
+    @14 GetReason(pid u32, koid u64, permission string<64>)
+        -> (reason string<256>) error base.Status;
 };

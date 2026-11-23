@@ -793,6 +793,40 @@ impl Namespaces {
             .ok()
     }
 
+    /// The app entry (`app.yaml`) of the installed app `app_id` for `user`,
+    /// from the package that its namespace is made of: the selected copy of
+    /// a system app, else the one installed for every user, else the
+    /// user's. None for an app that is not installed, such as a portable
+    /// one or a build.
+    pub async fn app_entry(&self, shared: &Shared, app_id: &str, user: u32) -> Option<Vec<u8>> {
+        if !mikros_mika::id::is_valid(app_id) {
+            return None;
+        }
+        let ready = self.ready.borrow().clone()?;
+        let mut places = Vec::new();
+        if let Some(at) = self.system_app(shared, &ready, app_id).await {
+            places.push(at);
+        }
+        places.push(format!("{APPS}/{app_id}"));
+        if user != 0
+            && let Ok(name) = user_name(shared, user).await
+        {
+            places.push(greeter_path(
+                user,
+                format!("/users/{name}/apps/{app_id}/package"),
+            ));
+        }
+        for at in places {
+            let path = format!("{}/app.yaml", at.trim_start_matches('/'));
+            if let Ok(bytes) =
+                files::read(ready.roots.root(), &shared.reactor, &path, SYSTEM_FILE_MAX).await
+            {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+
     /// The names of the files that end in `suffix` in the folder at
     /// `path` below `/system`: the root file system's once namespaces
     /// come from it, or else the boot file system's. None when there is

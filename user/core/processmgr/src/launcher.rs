@@ -20,11 +20,11 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::Rights;
 use mikros_rt::interfaces::mikros::process::{
     ExitStatus, Launcher, LauncherAsyncServer, LauncherCreateSessionResponse, LauncherExecResponse,
-    LauncherGetInfoResponse, LauncherKillCheckedResponse, LauncherKillGroupResponse,
-    LauncherKillLoginSessionResponse, LauncherKillResponse, LauncherListResponse,
-    LauncherOpenElevationsResponse, LauncherRequest, LauncherSetProcessGroupResponse,
-    LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo, SpawnRequest, StatusKind,
-    WaitOptions,
+    LauncherGetInfoResponse, LauncherGetReasonRequest, LauncherGetReasonResponse,
+    LauncherKillCheckedResponse, LauncherKillGroupResponse, LauncherKillLoginSessionResponse,
+    LauncherKillResponse, LauncherListResponse, LauncherOpenElevationsResponse, LauncherRequest,
+    LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo,
+    SpawnRequest, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::sys;
@@ -38,6 +38,9 @@ const MANAGE: u32 = 1 << 8;
 const INSPECT: u32 = 1 << 9;
 /// The device manager's app ID.
 const DEVICE_MANAGER: &str = "system.devicemgr";
+/// The permission broker's app ID, the one that may ask for the reasons of
+/// questions (MIKSPEC-0094.R9).
+const PERMISSION_BROKER: &str = "system.permbroker";
 /// The session manager's app ID, the one that may open `Elevations`.
 const SESSION_MANAGER: &str = "system.sessionmgr";
 const SERVICE_MANAGER: &str = "system.servicemgr";
@@ -102,6 +105,14 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                         server.server(),
                         result.map(|()| LauncherKillCheckedResponse {}),
                     );
+                });
+                Ok(())
+            }
+            R::GetReason(request, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    let result = get_reason(&shared, pid, request).await;
+                    let _ = r.reply(server.server(), result);
                 });
                 Ok(())
             }
@@ -692,6 +703,34 @@ fn signal(record: &Record, signo: u32) -> Result<(), Status> {
 /// `NOT_FOUND`, signalling nothing, unless the process with the ID
 /// `target` has that kernel object ID (MIKSPEC-0034.R48), looked at
 /// again right before the signal.
+/// The reason that the app entry of the package of process `target`, which
+/// has the kernel object ID `koid`, gives for `permission`, for the
+/// permission broker `caller` alone (MIKSPEC-0094.R9): empty when the entry
+/// gives none, or one that is invalid.
+async fn get_reason(
+    shared: &Shared,
+    caller: u32,
+    request: LauncherGetReasonRequest,
+) -> Result<LauncherGetReasonResponse, Status> {
+    let (app_id, user) = {
+        let records = shared.records.borrow();
+        let from = records.get(caller).ok_or(Status::BadState)?;
+        if from.app_id != PERMISSION_BROKER {
+            return Err(Status::AccessDenied);
+        }
+        let record = records
+            .get(request.pid)
+            .filter(|r| r.koid == request.koid)
+            .ok_or(Status::NotFound)?;
+        (record.app_id.clone(), record.user)
+    };
+    let entry = shared.namespaces.app_entry(shared, &app_id, user).await;
+    let reason = entry
+        .and_then(|bytes| mikros_mika::entry::reason(&bytes, &request.permission))
+        .unwrap_or_default();
+    Ok(LauncherGetReasonResponse { reason })
+}
+
 async fn kill(
     shared: &Shared,
     caller: u32,

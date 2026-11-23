@@ -17,3 +17,4 @@ Launcher.Fork: public
 Launcher.KillLoginSession: data-dependent:processmgr::launcher::kill_login_session
 Launcher.OpenElevations: data-dependent:processmgr::launcher::serve
 Launcher.KillChecked: data-dependent:processmgr::launcher::kill
+Launcher.GetReason: data-dependent:processmgr::launcher::get_reason
