@@ -12,3 +12,6 @@ provides:
   # The numbers of app IDs, for every process; Number needs
   # system.permissions.read, which the broker checks.
   - protocol: mikros.permissions.AppNumbers
+  # Questions about the caller's own permissions, for every process
+  # (MIKSPEC-0094.R5).
+  - protocol: mikros.permissions.Permissions

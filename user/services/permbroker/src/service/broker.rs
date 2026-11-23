@@ -5,16 +5,18 @@
 //! answer, it is not allowed.
 
 use crate::permissions::{
-    self as store, Call, Decision, Failure, Grant, Identity, MANAGE_GRANTS, Requested, Revoked,
-    Store, names_after,
+    self as store, AskGrant, Asks, Begin, Call, Decision, Failure, Grant, Identity, MANAGE_GRANTS,
+    Requested, Revoked, Store, names_after,
 };
 use crate::service::files::{self, Files};
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::future::poll_fn;
+use core::task::{Poll, Waker};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -69,6 +71,35 @@ fn now() -> i64 {
     mikros_rt::objects::now()
 }
 
+/// A question to the prompter that requests for the same grant wait for.
+#[derive(Default)]
+struct OpenQuestion {
+    answer: Cell<Option<Decision>>,
+    waiting: RefCell<Vec<Waker>>,
+}
+
+impl OpenQuestion {
+    /// Waits until the question is answered, and gives the decision.
+    async fn wait(&self) -> Decision {
+        poll_fn(|cx| match self.answer.get() {
+            Some(decision) => Poll::Ready(decision),
+            None => {
+                self.waiting.borrow_mut().push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// Answers the question, and wakes the requests that wait.
+    fn finish(&self, decision: Decision) {
+        self.answer.set(Some(decision));
+        for waker in self.waiting.take() {
+            waker.wake();
+        }
+    }
+}
+
 /// The broker's state, shared by every connection.
 pub struct Broker(Rc<Inner>);
 
@@ -81,6 +112,10 @@ struct Inner {
     /// manager and the file system of its files.
     directory: Rc<DirectoryAsyncClient>,
     prompter: RefCell<Option<Rc<PrompterAsyncClient>>>,
+    /// The questions that are open, and the requests that wait for each
+    /// (MIKSPEC-0037.R55), and when `Ask` was called.
+    asks: RefCell<Asks>,
+    open: RefCell<BTreeMap<AskGrant, Rc<OpenQuestion>>>,
     /// The connections that watch each permission.
     watchers: RefCell<Vec<(String, Weak<BrokerAsyncServer>)>>,
     /// Those that watch with confirmation, and the last sequence number
@@ -118,6 +153,8 @@ impl Broker {
             files,
             directory,
             prompter: RefCell::new(None),
+            asks: RefCell::default(),
+            open: RefCell::default(),
             watchers: RefCell::new(Vec::new()),
             confirming: RefCell::new(Vec::new()),
             sequence: Cell::new(0),
@@ -162,6 +199,31 @@ impl Broker {
                         r.reply(s, result)
                     }
                 };
+            }
+        });
+    }
+
+    /// Serves `Permissions` on the connection `end` of `caller` until it
+    /// closes: `Ask` for the caller's own identity, which needs no
+    /// permission (MIKSPEC-0094.R5).
+    pub fn serve_permissions(&self, end: ServerEnd<midl::Permissions>, caller: ClientIdentity) {
+        let inner = self.0.clone();
+        let spawner = inner.spawner.clone();
+        spawner.spawn(async move {
+            use midl::PermissionsRequest as R;
+            let server = Rc::new(midl::PermissionsAsyncServer::new(
+                end,
+                inner.reactor.clone(),
+            ));
+            let caller = Rc::new(caller);
+            while let Ok(request) = server.next().await {
+                let R::Ask(q, r) = request;
+                // The question may wait long, so each call runs on its own.
+                let (inner, server, caller) = (inner.clone(), server.clone(), caller.clone());
+                inner.spawner.clone().spawn(async move {
+                    let result = ask(&inner, &caller, q.permission).await;
+                    let _ = r.reply(server.server(), result);
+                });
             }
         });
     }
@@ -489,6 +551,37 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
     }
 }
 
+/// `Ask` for `caller`: what `Request` comes to for the caller itself, with
+/// the reason of its app entry, as `ALLOWED` or `DENIED` only
+/// (MIKSPEC-0094.R5).
+async fn ask(
+    inner: &Inner,
+    caller: &ClientIdentity,
+    permission: String,
+) -> Result<midl::PermissionsAskResponse, Status> {
+    match crate::permissions::scope(&permission) {
+        None => return Err(Status::NotFound),
+        Some(crate::permissions::Scope::User) => {}
+        Some(_) => return Err(Status::InvalidArgs),
+    }
+    if !inner
+        .asks
+        .borrow_mut()
+        .may_ask(caller.user, &caller.app_id, now())
+    {
+        return Err(Status::NoResources);
+    }
+    let decision = inner
+        .request(caller, String::new(), &permission, String::new())
+        .await?;
+    Ok(midl::PermissionsAskResponse {
+        decision: match decision {
+            Decision::Allowed => midl::Decision::Allowed,
+            _ => midl::Decision::Denied,
+        },
+    })
+}
+
 /// Sets the grant of `q` for `caller`, once an administrator allowed
 /// `MANAGE_GRANTS` when it is for another user or `ALLOWED`. A grant the
 /// store would refuse fails before anyone is asked.
@@ -571,55 +664,128 @@ async fn decide_request(
         true => String::new(),
         false => caller.app_id.clone(),
     };
-    let client = identity(&q.client);
-    let requested = inner.store.borrow().request(client, &q.permission);
-    let (requested, elevated) = requested.map_err(status)?;
-    if elevated {
-        log_elevated(&q.client, &q.permission);
-    }
-    let decision = match requested {
-        Requested::Decided(decision) => decision,
-        Requested::Authorize => {
-            match inner
-                .ask_administrator(&q.client, via, &q.permission, q.reason)
-                .await
-            {
-                true => Decision::Allowed,
-                false => Decision::Denied,
-            }
-        }
-        Requested::Ask => {
-            let prompter = inner.prompter.borrow().clone();
-            match prompter {
-                None => Decision::Denied,
-                Some(prompter) => {
-                    let asked = prompter.ask(q.client.clone(), via, q.permission.clone(), q.reason);
-                    match asked.await {
-                        // Nobody answered: denied, and nothing recorded
-                        // (MIKSPEC-0037.R41).
-                        Ok(answer) if answer.decision == midl::Decision::Undetermined => {
-                            Decision::Denied
-                        }
-                        Ok(answer) => {
-                            let allowed = answer.decision == midl::Decision::Allowed;
-                            let mut store = inner.store.borrow_mut();
-                            let decision = store.record(client, &q.permission, allowed);
-                            inner.files.changed();
-                            decision
-                        }
-                        Err(_) => {
-                            let mut current = inner.prompter.borrow_mut();
-                            if current.as_ref().is_some_and(|p| Rc::ptr_eq(p, &prompter)) {
-                                *current = None;
-                            }
-                            Decision::Denied
-                        }
-                    }
-                }
-            }
-        }
-    };
+    let decision = inner
+        .request(&q.client, via, &q.permission, q.reason)
+        .await?;
     Ok(BrokerRequestResponse {
         decision: to_midl(decision),
     })
+}
+
+impl Inner {
+    /// What a request of `client` for `permission` comes to, with `via` the
+    /// service that makes it for the client, if one does.
+    async fn request(
+        &self,
+        client: &ClientIdentity,
+        via: String,
+        permission: &str,
+        reason: String,
+    ) -> Result<Decision, Status> {
+        let who = identity(client);
+        let requested = self.store.borrow().request(who, permission);
+        let (requested, elevated) = requested.map_err(status)?;
+        if elevated {
+            log_elevated(client, permission);
+        }
+        Ok(match requested {
+            Requested::Decided(decision) => decision,
+            Requested::Authorize => {
+                match self
+                    .ask_administrator(client, via, permission, reason)
+                    .await
+                {
+                    true => Decision::Allowed,
+                    false => Decision::Denied,
+                }
+            }
+            Requested::Ask => self.ask_user(client, via, permission, reason).await,
+        })
+    }
+
+    /// The decision on a `user` permission that the user has not decided:
+    /// the prompter's answer, which is recorded; that of the question that
+    /// is open for the same grant, which this request waits for; or `DENIED`
+    /// when its process waited for a question that nobody answered a short
+    /// time ago (MIKSPEC-0037.R55).
+    async fn ask_user(
+        &self,
+        client: &ClientIdentity,
+        via: String,
+        permission: &str,
+        reason: String,
+    ) -> Decision {
+        let who = identity(client);
+        let grant = AskGrant::of(who, permission);
+        let begun = self.asks.borrow_mut().begin(&grant, client.koid, now());
+        let question = match begun {
+            Begin::Refused => return Decision::Denied,
+            Begin::Join => {
+                let open = self.open.borrow().get(&grant).cloned();
+                return match open {
+                    Some(open) => open.wait().await,
+                    None => Decision::Denied,
+                };
+            }
+            Begin::Ask => {
+                let question = Rc::new(OpenQuestion::default());
+                self.open
+                    .borrow_mut()
+                    .insert(grant.clone(), question.clone());
+                question
+            }
+        };
+        let decision = self.ask_prompter(client, via, permission, reason).await;
+        // The processes that waited for a question that nobody answered
+        // are not asked again for a minute.
+        let unanswered = decision.is_none();
+        let decision = decision.unwrap_or(Decision::Denied);
+        self.asks.borrow_mut().end(&grant, unanswered, now());
+        self.open.borrow_mut().remove(&grant);
+        question.finish(decision);
+        decision
+    }
+
+    /// The answer of the prompter, recorded, to a question for `client`:
+    /// `None` when nobody answered or there is no prompter. The reason is
+    /// the request's, or the app entry's when it has none (MIKSPEC-0094.R9).
+    async fn ask_prompter(
+        &self,
+        client: &ClientIdentity,
+        via: String,
+        permission: &str,
+        mut reason: String,
+    ) -> Option<Decision> {
+        let prompter = self.prompter.borrow().clone()?;
+        if reason.is_empty() {
+            let looked = self
+                .launcher
+                .get_reason(client.pid, client.koid, permission.into())
+                .await;
+            reason = match looked {
+                Ok(Ok(found)) => found.reason,
+                _ => String::new(),
+            };
+        }
+        let asked = prompter.ask(client.clone(), via, permission.into(), reason);
+        match asked.await {
+            // Nobody answered: denied, and nothing recorded
+            // (MIKSPEC-0037.R41).
+            Ok(answer) if answer.decision == midl::Decision::Undetermined => None,
+            Ok(answer) => {
+                let allowed = answer.decision == midl::Decision::Allowed;
+                let mut store = self.store.borrow_mut();
+                let decision = store.record(identity(client), permission, allowed);
+                self.files.changed();
+                Some(decision)
+            }
+            Err(_) => {
+                let mut current = self.prompter.borrow_mut();
+                if current.as_ref().is_some_and(|p| Rc::ptr_eq(p, &prompter)) {
+                    *current = None;
+                }
+                None
+            }
+        }
+    }
 }

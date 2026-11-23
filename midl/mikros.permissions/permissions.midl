@@ -1,0 +1,8 @@
+// MIKSPEC-0094.R5
+
+library mikros.permissions;
+using mikros.base;
+
+protocol Permissions {
+    @1 Ask(permission string<64>) -> (decision Decision) error base.Status;
+};

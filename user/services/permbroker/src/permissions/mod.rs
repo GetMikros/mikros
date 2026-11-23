@@ -11,10 +11,14 @@
 //! and reads them back after a restart; the `system` and `admin`
 //! permissions are not written.
 
+mod asks;
 mod table;
 #[cfg(test)]
 mod tests;
 
+// Only the service, which runs on Mikros alone, asks.
+#[cfg_attr(not(target_os = "mikros"), allow(unused_imports))]
+pub use asks::{Asks, Begin, Grant as AskGrant};
 #[cfg(test)]
 pub use table::PERMISSIONS;
 pub use table::{Scope, scope};
