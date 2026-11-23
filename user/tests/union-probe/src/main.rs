@@ -12,11 +12,15 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::future::{Future, poll_fn};
+use core::pin::pin;
+use core::task::Poll;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemClient, Layer, MemoryFlags, Node, NodeClient, NodeType, OpenFlags,
-    Rights, Union, UnionClient,
+    Attributes, Error, Filesystem, FilesystemClient, Layer, MemoryFlags, Node, NodeAsyncClient,
+    NodeAsyncServer, NodeClient, NodeCloneResponse, NodeGetAttributesResponse, NodeRequest,
+    NodeType, OpenFlags, Rights, Union, UnionClient,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -46,7 +50,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let directory = DirectoryClient::new(managed.header.directory);
-    match check(&directory) {
+    match check(&directory, &mut executor) {
         Ok(()) => 0,
         Err(failed) => failed,
     }
@@ -107,7 +111,7 @@ fn read(dir: &NodeClient, path: &str) -> Option<Vec<u8>> {
     ok(node.read(0, 1000, FOREVER)).map(|r| r.data)
 }
 
-fn check(directory: &DirectoryClient) -> Result<(), i64> {
+fn check(directory: &DirectoryClient, executor: &mut Executor) -> Result<(), i64> {
     let fs = FilesystemClient::new(ClientEnd::<Filesystem>::new(
         connect(directory, "mikros.fs.Filesystem").ok_or(1)?,
     ));
@@ -239,7 +243,105 @@ fn check(directory: &DirectoryClient) -> Result<(), i64> {
         13,
     )?;
     writes(&root, &union, &lower)?;
-    revocable(&root, &union)
+    revocable(&root, &union)?;
+    quick_calls(&union, executor)
+}
+
+/// How long the open has to reach the backing node, and how long the view
+/// has to answer a call that never waits.
+const SETTLE: i64 = 200_000_000;
+const QUICK: i64 = 3_000_000_000;
+
+/// What a directory shows.
+fn directory_attributes() -> Attributes {
+    Attributes {
+        r#type: NodeType::Directory,
+        mode: 0o555,
+        owner: 0,
+        size: 0,
+        allocated: 0,
+        links: 2,
+        inode: 1,
+        created: 0,
+        modified: 0,
+        accessed: 0,
+        changed: 0,
+    }
+}
+
+/// Whether a connection of a revocable view serves `GetAttributes` and
+/// `Clone` while an `Open` of it waits for its backing node, which never
+/// answers `Open` (MIKSPEC-0051.R18).
+fn quick_calls(union: &UnionClient, executor: &mut Executor) -> Result<(), i64> {
+    let (reactor, spawner) = (executor.reactor().clone(), executor.spawner().clone());
+    let (backing, server) = endpoints::<Node>().map_err(|_| 40)?;
+    let served = reactor.clone();
+    spawner.spawn(async move {
+        let server = NodeAsyncServer::new(server, served);
+        // The calls of `Open` that are never answered.
+        let mut held = Vec::new();
+        let mut kept = Vec::new();
+        while let Ok(request) = server.next().await {
+            match request {
+                NodeRequest::GetAttributes(_, r) => {
+                    let attributes = directory_attributes();
+                    let reply = NodeGetAttributesResponse { attributes };
+                    let _ = r.reply(server.server(), Ok(reply));
+                }
+                NodeRequest::Open(q, r) => held.push((q, r)),
+                NodeRequest::Clone(q, r) => {
+                    kept.push(q.node);
+                    let _ = r.reply(server.server(), Ok(NodeCloneResponse {}));
+                }
+                // The view makes no other call while the test runs.
+                _ => {}
+            }
+        }
+    });
+    let (view, view_server) = endpoints::<Node>().map_err(|_| 40)?;
+    ok(union.create_revocable(backing, RW, 11, view_server, FOREVER)).ok_or(40)?;
+    let view = NodeAsyncClient::new(view, reactor.clone());
+    let (_node, node_server) = endpoints::<Node>().map_err(|_| 40)?;
+    let (_cloned, clone_server) = endpoints::<Node>().map_err(|_| 40)?;
+    executor.block_on(async {
+        let mut opening = pin!(view.open("f".into(), OpenFlags(0), 0o644, RW, node_server));
+        // Let the open reach the backing node and wait there.
+        let mut now = 0;
+        // SAFETY: the pointer is valid for the call.
+        unsafe { sys::clock_get_monotonic(&mut now) };
+        let mut settle = pin!(reactor.sleep_until(now + SETTLE));
+        let waited = poll_fn(|cx| {
+            if opening.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(false);
+            }
+            settle.as_mut().poll(cx).map(|_| true)
+        })
+        .await;
+        if !waited {
+            return Err(41);
+        }
+        let mut timeout = pin!(reactor.sleep_until(now + QUICK));
+        let mut attributes = pin!(view.get_attributes());
+        let mut cloning = pin!(view.clone(clone_server, Rights::READ));
+        let (mut got, mut cloned) = (false, false);
+        poll_fn(|cx| {
+            if opening.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Err(41));
+            }
+            if !got && attributes.as_mut().poll(cx).is_ready() {
+                got = true;
+            }
+            if !cloned && cloning.as_mut().poll(cx).is_ready() {
+                cloned = true;
+            }
+            match (got && cloned, timeout.as_mut().poll(cx).is_ready()) {
+                (true, _) => Poll::Ready(Ok(())),
+                (false, true) => Poll::Ready(Err(42)),
+                _ => Poll::Pending,
+            }
+        })
+        .await
+    })
 }
 
 /// Whether a view with a writable layer over `lower` changes only that
