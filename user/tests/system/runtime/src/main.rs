@@ -69,10 +69,12 @@ fn heap_allocates_and_frees(_: &Own) -> Result {
         aligned.0.iter().all(|&b| b == 7),
     )?;
     drop(blocks);
-    let first = Box::new([0u8; 64]);
+    // The optimizer may not drop the first block, or hand its memory to
+    // the second without the allocator.
+    let first = core::hint::black_box(Box::new([0u8; 64]));
     let at = &*first as *const [u8; 64] as usize;
     drop(first);
-    let again = Box::new([1u8; 64]);
+    let again = core::hint::black_box(Box::new([1u8; 64]));
     ensure(
         "reusing a freed block",
         &*again as *const [u8; 64] as usize == at,
