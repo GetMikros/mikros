@@ -124,6 +124,10 @@ impl Connection {
         self.require_write()?;
         self.allowed(&self.open, Rights::WRITE)?;
         self.file()?;
+        self.not_run()?;
+        // An object to run from is not given while this write is under
+        // way, as it would change the file under the runner.
+        let _writing = self.fs.shares.writing(self.open.key);
         let node = self.open.node.clone();
         let written = blocking(&self.fs.reactor, move || {
             let mut done = 0;
@@ -160,10 +164,20 @@ impl Connection {
         Ok(NodeWriteNextResponse { written })
     }
 
+    /// Fails with `BUSY` while the file is run from an object that is in
+    /// use.
+    pub(crate) fn not_run(&self) -> Result<(), Error> {
+        match self.fs.busy_for_change(&self.open) {
+            true => Err(Error::Busy),
+            false => Ok(()),
+        }
+    }
+
     pub(crate) fn truncate(&self, size: u64) -> Result<(), Error> {
         self.require_write()?;
         self.allowed(&self.open, Rights::WRITE)?;
         self.file()?;
+        self.not_run()?;
         // A memory object of the file loses the pages cut off first.
         self.fs.resized(&self.open, Some(size));
         self.open.node.truncate(size).map_err(error)?;
@@ -180,6 +194,7 @@ impl Connection {
         self.require_write()?;
         self.allowed(&self.open, Rights::WRITE)?;
         self.file()?;
+        self.not_run()?;
         let (_, server_end) = koids(q.source.handle()).ok_or(Error::Invalid)?;
         let connection = self.fs.connections.borrow().get(&server_end).cloned();
         let (source, rights) = connection.ok_or(Error::CrossDevice)?;
@@ -225,11 +240,27 @@ impl Connection {
             }
         }
         let file = self.fs.shared(&self.open)?;
+        // An object to write, or to run from, waits while the other is in
+        // use; the check and the making of the object are one step, as
+        // the calls of this server run one at a time.
+        if !private && write && file.busy_for_change() {
+            return Err(Error::Busy);
+        }
+        if !private
+            && execute
+            && (file.busy_for_execute() || self.fs.shares.is_writing(self.open.key))
+        {
+            return Err(Error::Busy);
+        }
         let rights = crate::driver::share::rights(read, write, execute);
         let memory = match private {
             true if write || !self.open.node.unchangeable() => file.clone_private(rights)?,
             true => file.handle_pinned(rights)?,
-            false => file.handle(rights)?,
+            false => {
+                let memory = file.handle(rights)?;
+                file.gave(execute, write);
+                memory
+            }
         };
         Ok(NodeGetMemoryObjectResponse { memory })
     }

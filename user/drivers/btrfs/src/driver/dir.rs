@@ -241,6 +241,9 @@ impl Connection {
         if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
             self.require_write()?;
             self.allowed(&open, Rights::WRITE)?;
+            if self.fs.busy_for_change(&open) {
+                return Err(Error::Busy);
+            }
             self.fs.resized(&open, Some(0));
             open.node.truncate(0).map_err(error)?;
             self.fs.changed(&open, WatchKind::Modified);

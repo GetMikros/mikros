@@ -9,4 +9,5 @@ publish = false
 mikros-acl = { path = "../acl", features = ["midl"] }
 mikros-fat = { path = "../fat" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+mikros-runtrack = { path = "../runtrack" }
 mikros-tz = { path = "../tz" }

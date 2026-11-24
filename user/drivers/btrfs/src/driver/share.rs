@@ -16,10 +16,11 @@ use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 use core::ffi::{c_int, c_long, c_void};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::Error;
 use mikros_rt::sys;
+use mikros_runtrack::{Packet, Tracker};
 
 const PAGE: u64 = 4096;
 /// The pages lent for a request: the one asked for and those after it,
@@ -31,6 +32,7 @@ const WINDOW: u64 = 16;
 const OPTIONS: u32 = 1 | 2 | 4;
 /// The `PAGER` packet type and its `READ` command, and the pager ops that
 /// fail and discard pages.
+const PACKET_SIGNAL: u32 = 1;
 const PACKET_PAGER: u32 = 3;
 const PAGER_READ: u32 = 1;
 const OP_FAIL: u32 = 1;
@@ -66,6 +68,33 @@ static PORT: AtomicU32 = AtomicU32::new(0);
 /// requests and the shim's calls, with the shared files they belong to.
 static OBJECTS: Spin<BTreeMap<u64, (sys::Handle, Shared)>> = Spin::new(BTreeMap::new());
 
+/// The signal of a paged object that nothing but the server refers to.
+const UNREFERENCED: u32 = 1 << 8;
+/// What the server knows of how each object is in use, by cookie, and the
+/// cookie of each wait that it registered, by the key of the wait. The
+/// keys of waits have a bit that no cookie has, so that a packet is
+/// told from a page request by its type and its key by the bit.
+static TRACKERS: Spin<BTreeMap<u64, Tracker>> = Spin::new(BTreeMap::new());
+static WAITS: Spin<BTreeMap<u64, u64>> = Spin::new(BTreeMap::new());
+static NEXT_WAIT: AtomicU64 = AtomicU64::new(1 << 62);
+
+/// Registers a wait for the object `mem` of `cookie` to be unreferenced,
+/// with a key of its own, which the tracker of the cookie then knows of.
+fn wait_unreferenced(cookie: u64, mem: sys::Handle, tracker: &mut Tracker, key: Option<u64>) {
+    let key = key.unwrap_or_else(|| NEXT_WAIT.fetch_add(1, Ordering::Relaxed));
+    let port = PORT.load(Ordering::Relaxed);
+    // The wait is known before it is registered, as its packet can come
+    // at once, on the thread that answers.
+    WAITS.lock().insert(key, cookie);
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::object_wait_async(mem, port, key, UNREFERENCED, 0) };
+    if status == mikros_rt::OK {
+        tracker.register(key);
+    } else {
+        WAITS.lock().remove(&key);
+    }
+}
+
 fn owned(status: sys::Status, raw: sys::Handle) -> Result<OwnedHandle, Error> {
     if status != mikros_rt::OK {
         return Err(Error::Io);
@@ -86,6 +115,8 @@ pub struct File {
     /// Whether a client got the object itself for a copy, as the file
     /// could never change, which it then must not.
     pinned: Cell<bool>,
+    /// The key the object's page requests carry.
+    cookie: u64,
 }
 
 impl File {
@@ -104,6 +135,59 @@ impl File {
             unsafe { sys::handle_duplicate(self.mem.raw(), rights, &mut out) },
             out,
         )
+    }
+
+    /// Records that a handle of the object was given, with `EXECUTE` or
+    /// `WRITE` when it has them, and waits for the object to be
+    /// unreferenced.
+    pub fn gave(&self, execute: bool, write: bool) {
+        let mut trackers = TRACKERS.lock();
+        let tracker = trackers.entry(self.cookie).or_default();
+        if tracker.gave(execute, write) {
+            wait_unreferenced(self.cookie, self.mem.raw(), tracker, None);
+        }
+    }
+
+    /// Whether the file is run from an object that is in use, so that
+    /// it must not change.
+    pub fn busy_for_change(&self) -> bool {
+        TRACKERS
+            .lock()
+            .get(&self.cookie)
+            .is_some_and(Tracker::busy_for_change)
+    }
+
+    /// Whether the file has an object that was given with `WRITE` and is
+    /// still in use or has dirty pages, so that none to run from can be
+    /// given.
+    pub fn busy_for_execute(&self) -> bool {
+        let clean = self.clean();
+        let mut trackers = TRACKERS.lock();
+        let Some(tracker) = trackers.get_mut(&self.cookie) else {
+            return false;
+        };
+        tracker.settle(clean);
+        tracker.busy_for_execute(clean)
+    }
+
+    /// Whether none of the object's pages is dirty.
+    fn clean(&self) -> bool {
+        let pager = PAGER.load(Ordering::Relaxed);
+        let mut ranges = [0u64; 2];
+        let mut count = 0;
+        // SAFETY: the pointers describe `ranges` and `count`.
+        let status = unsafe {
+            sys::pager_query_dirty(
+                pager,
+                self.mem.raw(),
+                0,
+                self.len.get(),
+                ranges.as_mut_ptr().cast(),
+                1,
+                &mut count,
+            )
+        };
+        status == mikros_rt::OK && count == 0
     }
 
     /// A copy-on-write clone of the object with `rights`, which copies its
@@ -153,9 +237,41 @@ impl File {
 pub struct Shares {
     files: RefCell<BTreeMap<Key, Rc<File>>>,
     next: Cell<u64>,
+    /// How many writes of each file are under way, which run on threads of
+    /// their own while the server goes on with other calls.
+    writing: RefCell<BTreeMap<Key, u32>>,
+}
+
+/// A write under way to a file, counted until it is dropped.
+pub struct Writing<'a> {
+    shares: &'a Shares,
+    key: Key,
+}
+
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        let mut writing = self.shares.writing.borrow_mut();
+        if let Some(count) = writing.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                writing.remove(&self.key);
+            }
+        }
+    }
 }
 
 impl Shares {
+    /// Counts a write to the file of `key` until the result is dropped.
+    pub fn writing(&self, key: Key) -> Writing<'_> {
+        *self.writing.borrow_mut().entry(key).or_insert(0) += 1;
+        Writing { shares: self, key }
+    }
+
+    /// Whether a write to the file of `key` is under way.
+    pub fn is_writing(&self, key: Key) -> bool {
+        self.writing.borrow().contains_key(&key)
+    }
+
     /// The shared file of `key`, if any.
     pub fn get(&self, key: Key) -> Option<Rc<File>> {
         self.files.borrow().get(&key).cloned()
@@ -204,6 +320,14 @@ impl Fs {
         file.resize(size);
     }
 
+    /// Whether the file `open` is run from an object that is in use, so
+    /// that it must not change.
+    pub fn busy_for_change(&self, open: &Open) -> bool {
+        self.shares
+            .get(open.key)
+            .is_some_and(|file| file.busy_for_change())
+    }
+
     /// The paged object of the file `open`, made the first time.
     pub fn shared(&self, open: &Rc<Open>) -> Result<Rc<File>, Error> {
         if let Some(file) = self.shares.get(open.key) {
@@ -229,6 +353,7 @@ impl Fs {
             len: Cell::new(len),
             open: open.clone(),
             pinned: Cell::new(false),
+            cookie,
         });
         self.shares
             .files
@@ -275,6 +400,10 @@ extern "C" fn answer(_: *mut c_void) {
         if unsafe { sys::port_wait(port, i64::MAX, packet.as_mut_ptr()) } != mikros_rt::OK {
             continue;
         }
+        if half(&packet, 8) == PACKET_SIGNAL {
+            unreferenced(word(&packet, 0));
+            continue;
+        }
         if half(&packet, 8) != PACKET_PAGER || half(&packet, 16) != PAGER_READ {
             continue;
         }
@@ -299,6 +428,25 @@ extern "C" fn answer(_: *mut c_void) {
             }
             at += PAGE;
         }
+    }
+}
+
+/// Takes in the packet of the wait with `key`: the object it is for is
+/// unreferenced, or the wait is registered again.
+fn unreferenced(key: u64) {
+    let Some(cookie) = WAITS.lock().remove(&key) else {
+        return;
+    };
+    let Some((mem, _)) = OBJECTS.lock().get(&cookie).copied() else {
+        return;
+    };
+    let mut trackers = TRACKERS.lock();
+    let Some(tracker) = trackers.get_mut(&cookie) else {
+        return;
+    };
+    let next = NEXT_WAIT.fetch_add(1, Ordering::Relaxed);
+    if let Packet::Again(key) = tracker.packet(key, next) {
+        wait_unreferenced(cookie, mem, tracker, Some(key));
     }
 }
 

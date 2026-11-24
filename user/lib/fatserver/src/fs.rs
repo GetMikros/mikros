@@ -67,7 +67,9 @@ pub struct Fs<F: Format> {
     /// The pager of the paged objects of files, and those objects with
     /// their sizes, by node.
     pub pager: OwnedHandle,
-    pub paged: RefCell<BTreeMap<u64, (OwnedHandle, u64)>>,
+    pub paged: RefCell<BTreeMap<u64, (OwnedHandle, u64, u64)>>,
+    /// How the paged objects are in use, by node.
+    pub trackers: RefCell<BTreeMap<u64, mikros_runtrack::Tracker>>,
     pub clock: Clock,
     /// Whether the partition's `cache` property is `quick-disconnect`
     /// (MIKSPEC-0025.R73), which has every change durable when its call
@@ -112,6 +114,7 @@ impl<F: Format> Fs<F> {
             tokens: RefCell::new(BTreeMap::new()),
             pager,
             paged: RefCell::new(BTreeMap::new()),
+            trackers: RefCell::new(BTreeMap::new()),
             clock,
             quick_disconnect,
             reactor,

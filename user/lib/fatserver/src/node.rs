@@ -304,11 +304,21 @@ impl<F: Format> Connection<F> {
         Ok(NodeReadNextResponse { data })
     }
 
+    /// Fails with `BUSY` while the file of node `id` is run from an
+    /// object that is in use.
+    fn not_run(&self, id: u64) -> Result<(), Error> {
+        match self.fs.busy_for_change(id) {
+            true => Err(Error::Busy),
+            false => Ok(()),
+        }
+    }
+
     /// Writes `data` at `offset`, or at the end without one, and returns
     /// where it went.
     fn write(&self, offset: Option<u64>, data: &[u8]) -> Result<u64, Error> {
         self.require_write()?;
         let id = self.file()?;
+        self.not_run(id)?;
         let now = self.fs.now();
         let written = self
             .fs
@@ -336,6 +346,7 @@ impl<F: Format> Connection<F> {
             return Err(Error::TooBig);
         }
         let id = self.file()?;
+        self.not_run(id)?;
         let now = self.fs.now();
         let truncated = self
             .fs
@@ -479,6 +490,7 @@ impl<F: Format> Connection<F> {
             let Target::Node(id) = target else {
                 return Err(Error::Io);
             };
+            self.not_run(id)?;
             let now = self.fs.now();
             let truncated = self
                 .fs

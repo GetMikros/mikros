@@ -13,7 +13,10 @@ use mikros_rt::sys;
 
 /// The `PAGER` packet type and its `READ` command, and the pager ops that
 /// fail and evict pages.
+const PACKET_SIGNAL: u32 = 1;
 const PACKET_PAGER: u32 = 3;
+/// The signal of a paged object that nothing but the server refers to.
+const UNREFERENCED: u32 = 1 << 8;
 const PAGER_READ: u32 = 1;
 const OP_FAIL: u32 = 1;
 const OP_EVICT: u32 = 2;
@@ -99,13 +102,14 @@ impl<F: Format> Fs<F> {
     /// `id`, created on first use with the file's size then. The object
     /// keeps the node for as long as the server runs.
     pub fn paged_memory(self: &Rc<Self>, id: u64, rights: u32) -> Result<OwnedHandle, Error> {
-        let existing = self.paged.borrow().get(&id).map(|(mem, _)| mem.raw());
+        let existing = self.paged.borrow().get(&id).map(|(mem, _, _)| mem.raw());
         let raw = match existing {
             Some(raw) => raw,
             None => {
                 let size = self.with_node(id, |_, node| Ok(F::size(node)))?;
                 let len = size.next_multiple_of(PAGE).max(PAGE);
                 let packets = self.reactor.packets();
+                let key = packets.key();
                 let mut raw = 0;
                 // SAFETY: the out pointer is valid for the call.
                 let created = unsafe {
@@ -121,24 +125,77 @@ impl<F: Format> Fs<F> {
                 let mem = owned(F::NAME, created, raw)?;
                 self.hold(id);
                 let raw = mem.raw();
-                self.paged.borrow_mut().insert(id, (mem, len));
+                self.paged.borrow_mut().insert(id, (mem, len, key));
                 self.spawner.spawn(supply(self.clone(), packets, id));
                 raw
             }
         };
         let mut out = 0;
         // SAFETY: the out pointer is valid for the call.
-        owned(
+        let handle = owned(
             F::NAME,
             unsafe { sys::handle_duplicate(raw, rights, &mut out) },
             out,
-        )
+        )?;
+        self.gave(id, rights & EXECUTE != 0);
+        Ok(handle)
+    }
+
+    /// Records that a handle of the paged object of node `id` was given,
+    /// and waits for the object to be unreferenced.
+    fn gave(&self, id: u64, execute: bool) {
+        let mut trackers = self.trackers.borrow_mut();
+        let tracker = trackers.entry(id).or_default();
+        if tracker.gave(execute, false) {
+            self.wait_unreferenced(id, tracker, None);
+        }
+    }
+
+    /// Registers a wait for the paged object of node `id` to be
+    /// unreferenced, with the key of the object's packets, as only one
+    /// wait is registered at a time.
+    fn wait_unreferenced(&self, id: u64, tracker: &mut mikros_runtrack::Tracker, key: Option<u64>) {
+        let paged = self.paged.borrow();
+        let Some((mem, _, packets)) = paged.get(&id) else {
+            return;
+        };
+        let key = key.unwrap_or(*packets);
+        // SAFETY: the call takes no pointers.
+        let status =
+            unsafe { sys::object_wait_async(mem.raw(), self.reactor.port(), key, UNREFERENCED, 0) };
+        if status == mikros_rt::OK {
+            tracker.register(key);
+        }
+    }
+
+    /// Takes in the packet of the wait for node `id`'s object to be
+    /// unreferenced.
+    fn unreferenced(&self, id: u64) {
+        let mut trackers = self.trackers.borrow_mut();
+        let Some(tracker) = trackers.get_mut(&id) else {
+            return;
+        };
+        let Some(key) = self.paged.borrow().get(&id).map(|(_, _, key)| *key) else {
+            return;
+        };
+        if let mikros_runtrack::Packet::Again(key) = tracker.packet(key, key) {
+            self.wait_unreferenced(id, tracker, Some(key));
+        }
+    }
+
+    /// Whether the file of node `id` is run from an object that is in
+    /// use, so that it must not change.
+    pub fn busy_for_change(&self, id: u64) -> bool {
+        self.trackers
+            .borrow()
+            .get(&id)
+            .is_some_and(mikros_runtrack::Tracker::busy_for_change)
     }
 
     /// Drops the pages of the paged object of node `id`, when it has one,
     /// after its file changed, so that they are asked for again.
     pub fn changed(&self, id: u64) {
-        if let Some((mem, len)) = self.paged.borrow().get(&id) {
+        if let Some((mem, len, _)) = self.paged.borrow().get(&id) {
             // SAFETY: the call takes no pointers.
             unsafe { sys::pager_op(self.pager.raw(), mem.raw(), OP_EVICT, 0, *len) };
         }
@@ -153,11 +210,15 @@ async fn supply<F: Format>(fs: Rc<Fs<F>>, packets: Packets, id: u64) {
         let word =
             |at: usize| u64::from_le_bytes(packet.payload[at..at + 8].try_into().expect("8 bytes"));
         let command = u32::from_le_bytes(packet.payload[..4].try_into().expect("4 bytes"));
+        if packet.kind == PACKET_SIGNAL {
+            fs.unreferenced(id);
+            continue;
+        }
         if packet.kind != PACKET_PAGER || command != PAGER_READ {
             continue;
         }
         let (at, len) = (word(8), word(16));
-        let Some(mem) = fs.paged.borrow().get(&id).map(|(mem, _)| mem.raw()) else {
+        let Some(mem) = fs.paged.borrow().get(&id).map(|(mem, _, _)| mem.raw()) else {
             return;
         };
         let status = match fs.contents(id, at, len) {
