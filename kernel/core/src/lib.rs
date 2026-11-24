@@ -37,7 +37,6 @@ pub mod gaps;
 pub mod heap;
 pub mod init;
 pub mod ktimer;
-pub mod lend;
 pub mod lock_order;
 pub mod log;
 pub mod memory_object;

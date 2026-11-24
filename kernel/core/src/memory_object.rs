@@ -5,6 +5,7 @@ use crate::aspace::{self, Access, AddressSpace, Fault};
 use crate::frames::FRAMES;
 use crate::port::Port;
 use crate::publish::{ITEM_STEP, Work};
+use crate::share::Released;
 
 use crate::nodes::{self, Map};
 use crate::object::budget::{Budget, Scratch};
@@ -106,8 +107,36 @@ enum Charge {
     /// a frame of an object without a budget, which stays uncharged.
     Supplied(Option<Arc<Budget>>),
     /// Lent to it as many times, by an object that keeps the frame and
-    /// its charge (`crate::lend`).
+    /// its charge (`crate::share`).
     Lent(u64),
+}
+
+/// What `free` gives back for a frame that leaves an object's pages.
+enum Give {
+    /// Nothing: the frame stays with the pages that still use it.
+    Nothing,
+    /// The frame, with its page and the slot's entry, which the object
+    /// charged to its own budget.
+    Own,
+    /// The slot's entry only, charged to the budget given (`None` for
+    /// none), as the frame stays with pages that use it.
+    Entry(Option<Arc<Budget>>),
+    /// The frame, with its page and entry, which the budget it was
+    /// supplied with was charged; `None` for none.
+    Supplied(Option<Arc<Budget>>),
+    /// The frame, as the last use of it ended, with its page charged to
+    /// `page`, and the slot's entry, if it had one, charged to `entry`.
+    Last {
+        page: Option<Arc<Budget>>,
+        entry: Option<Option<Arc<Budget>>>,
+    },
+}
+
+impl Give {
+    /// Whether the frame goes back to the allocator.
+    fn frees(&self) -> bool {
+        matches!(self, Give::Own | Give::Supplied(_) | Give::Last { .. })
+    }
 }
 
 /// The ops of `pager_op`.
@@ -816,12 +845,22 @@ impl MemoryObject {
                         },
                         _ => None,
                     };
+                    // A frame that stays itself keeps its mark.
+                    let moved = if phys == taken.phys() {
+                        taken
+                    } else {
+                        Frame::private(phys)
+                    };
                     if let Some((charge, page)) = supplied {
                         charges.insert(phys, Charge::Supplied(source.budget.clone()));
                         drop(charge);
-                        pages.insert(index, phys, page);
+                        if moved.is_shared() {
+                            pages.insert_shared(index, phys, page);
+                        } else {
+                            pages.insert(index, phys, page);
+                        }
                     } else {
-                        leftover.push(Frame::private(phys));
+                        leftover.push(moved);
                     }
                 }
             }
@@ -835,7 +874,7 @@ impl MemoryObject {
     /// present use the frames of the `len` bytes from `source_offset` of
     /// `source`, which keeps them and their charges, as `pager_lend`
     /// does: the source's pages get frames first, and the frames stay
-    /// allocated while a page uses them (`crate::lend`). Lent pages are
+    /// allocated while a page uses them (`crate::share`). Lent pages are
     /// clean, and their requests answered. Fails with `AccessDenied` when
     /// the source has the `WRITE` seal or this object is revoked, as for
     /// `supply`, whose seal and revocation checks this shares.
@@ -877,7 +916,7 @@ impl MemoryObject {
             // locked, so that the source frees none of them before.
             loop {
                 source.commit((source_first + from) * PAGE_SIZE, (to - from) * PAGE_SIZE)?;
-                let pages = source.pages.lock();
+                let mut pages = source.pages.lock();
                 let found: Option<Vec<u64>> = (source_first + from..source_first + to)
                     .map(|index| pages.frame(index))
                     .collect();
@@ -885,12 +924,14 @@ impl MemoryObject {
                 let Some(found) = found else {
                     continue;
                 };
-                for phys in found {
-                    if let Err(e) = crate::lend::lend(phys) {
+                for (index, phys) in (source_first + from..).zip(found) {
+                    if let Err(e) = crate::share::lend(phys, source.budget.as_ref()) {
                         drop(pages);
-                        frames.into_iter().for_each(crate::lend::end);
+                        frames.into_iter().for_each(crate::share::end_lend);
                         return Err(e);
                     }
+                    // The source's slot now has an entry in the table.
+                    pages.mark_shared(index);
                     frames.push(phys);
                 }
                 break;
@@ -930,10 +971,10 @@ impl MemoryObject {
                         }
                     }
                     drop(charge);
-                    pages.insert(index, phys, page);
+                    pages.insert_shared(index, phys, page);
                 }
             }
-            unused.into_iter().for_each(crate::lend::end);
+            unused.into_iter().for_each(crate::share::end_lend);
             crate::pager::wake(self.header.koid(), from, to);
             refused
         })
@@ -945,7 +986,7 @@ impl MemoryObject {
     /// charged to this object's budget moves instead. `None` without a
     /// frame or a charge for the copy.
     fn movable(&self, phys: u64) -> Option<u64> {
-        if !crate::lend::is_lent(phys) {
+        if !crate::share::is_lent(phys) {
             return Some(phys);
         }
         if let Some(budget) = &self.budget {
@@ -969,11 +1010,9 @@ impl MemoryObject {
                 PAGE_SIZE as usize,
             );
         }
-        if !crate::lend::orphan(phys, self.budget.as_ref()) {
-            // The last lend ended meanwhile, so the frame is this
-            // object's to free.
-            self.free([Frame::private(phys)]);
-        }
+        // This object's use of the original ends: the frame stays while
+        // pages use it, and otherwise it is freed with its charges.
+        self.free([Frame::private(phys)]);
         Some(copy)
     }
 
@@ -1203,7 +1242,7 @@ impl MemoryObject {
         // Writes through the pages that use a lent frame change the
         // object (MIKSPEC-0006.R53). Frames are lent with the pages
         // locked, as they are here.
-        if write && held.any_frame(crate::lend::is_lent) {
+        if write && held.any_frame(crate::share::is_lent) {
             return Err(Error::BadState);
         }
         self.seals.fetch_or(seals, Ordering::AcqRel);
@@ -1818,13 +1857,12 @@ impl MemoryObject {
                 break;
             }
             since_check += len;
-            // The frames that stay: lent to this object, they go back to
-            // the object that lent them; and those of this object that
-            // pages of others still use as lent frames stay until those
-            // let go of them, with their charges.
-            let mut stays = [false; BATCH];
-            let mut supplied: [Option<Option<Arc<Budget>>>; BATCH] = [const { None }; BATCH];
+            // What each frame leaves: those lent to this object give their
+            // use back, and those that pages of others still use stay, with
+            // their page charge, until those let go.
+            let mut give: [Give; BATCH] = [const { Give::Nothing }; BATCH];
             for (i, &phys) in batch[..len].iter().enumerate() {
+                let mut supplied = None;
                 if let Some(paged) = &self.paged {
                     let mut charges = paged.charges.lock();
                     if let Some(Charge::Lent(n)) = charges.get_mut(&phys) {
@@ -1834,36 +1872,61 @@ impl MemoryObject {
                             charges.remove(&phys);
                         }
                         drop(charges);
-                        crate::lend::end(phys);
-                        stays[i] = true;
+                        give[i] = match crate::share::release(phys, true) {
+                            Released::Last(page) => Give::Last { page, entry: None },
+                            _ => Give::Nothing,
+                        };
                         continue;
                     }
                     if let Some(Charge::Supplied(budget)) = charges.remove(&phys) {
-                        supplied[i] = Some(budget);
+                        supplied = Some(budget);
                     }
                 }
-                let budget = supplied[i].as_ref().unwrap_or(&self.budget);
-                stays[i] = crate::lend::orphan(phys, budget.as_ref());
+                // The slot's entry was charged to the budget the frame was
+                // supplied with, or else to this object's.
+                let entry = supplied.clone().unwrap_or_else(|| self.budget.clone());
+                give[i] = match (crate::share::release(phys, false), supplied) {
+                    (Released::Alone, Some(budget)) => Give::Supplied(budget),
+                    (Released::Alone, None) => Give::Own,
+                    // The slot's entry goes with it, and its page stays.
+                    (Released::Used, _) => Give::Entry(entry),
+                    (Released::Last(page), _) => Give::Last {
+                        page,
+                        entry: Some(entry),
+                    },
+                };
             }
             if let Some(allocator) = FRAMES.lock().as_mut() {
-                for (&phys, &stays) in batch[..len].iter().zip(&stays) {
-                    if !stays {
+                for (&phys, give) in batch[..len].iter().zip(&give) {
+                    if give.frees() {
                         allocator.free(phys, 1);
                     }
                 }
             }
-            for (supplied, &stays) in supplied.iter_mut().zip(&stays).take(len) {
-                if stays {
-                    continue;
-                }
-                // A supplied frame's charge goes back to its own budget.
-                match supplied.take() {
-                    Some(Some(budget)) => {
+            for give in give.iter_mut().take(len) {
+                match core::mem::replace(give, Give::Nothing) {
+                    Give::Nothing => {}
+                    Give::Own => count += 1,
+                    Give::Entry(budget) => {
+                        if let Some(budget) = budget {
+                            budget.release_kernel(PAGE_ENTRY_COST);
+                        }
+                    }
+                    // A supplied frame's charge goes back to its own
+                    // budget.
+                    Give::Supplied(Some(budget)) => {
                         budget.release_pages(1);
                         budget.release_kernel(PAGE_ENTRY_COST);
                     }
-                    Some(None) => {}
-                    None => count += 1,
+                    Give::Supplied(None) => {}
+                    Give::Last { page, entry } => {
+                        if let Some(budget) = page {
+                            budget.release_pages(1);
+                        }
+                        if let Some(Some(budget)) = entry {
+                            budget.release_kernel(PAGE_ENTRY_COST);
+                        }
+                    }
                 }
             }
         }
@@ -2419,6 +2482,7 @@ impl Drop for MemoryObject {
 mod tests {
     use super::*;
     use crate::arch::mock;
+    use crate::port::Port;
 
     fn no_preempt() {}
 
@@ -2484,6 +2548,126 @@ mod tests {
         assert_eq!(bytes(&clone, PAGE_SIZE, 10), [0u8; 10]);
         drop((clone, source));
         assert_eq!(arena.free(), start);
+    }
+
+    #[test]
+    fn keeps_the_page_of_a_lent_frame_until_its_last_use_ends() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let start = arena.free();
+        let object = MemoryObject::new(Some(&budget), 2 * PAGE_SIZE, 0).unwrap();
+        let after_new = budget.usage();
+        fill(&object, 0, 2 * PAGE_SIZE, 0x5a);
+        let phys = object.pages.lock().frame(0).unwrap();
+        // One page was lent to a paged object, which holds a use.
+        crate::share::lend(phys, Some(&budget)).unwrap();
+        assert_eq!(arena.free(), start - 2);
+        let (kernel, pages) = budget.usage();
+        assert_eq!(pages, 2);
+        assert_eq!(kernel, after_new.0 + 2 * PAGE_ENTRY_COST);
+        // The object goes: the unshared page is freed with its entry, the
+        // lent one keeps its page and gives its entry back.
+        drop(object);
+        assert_eq!(arena.free(), start - 1);
+        assert_eq!(budget.usage(), (0, 1));
+        // The lend ends: the frame is freed and the page given back.
+        crate::share::end_lend(phys);
+        assert_eq!(arena.free(), start);
+        assert_eq!(budget.usage(), (0, 0));
+    }
+
+    #[test]
+    fn gives_everything_back_when_the_lend_ends_first() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let start = arena.free();
+        let object = MemoryObject::new(Some(&budget), PAGE_SIZE, 0).unwrap();
+        fill(&object, 0, PAGE_SIZE, 1);
+        let phys = object.pages.lock().frame(0).unwrap();
+        crate::share::lend(phys, Some(&budget)).unwrap();
+        crate::share::end_lend(phys);
+        assert_eq!(arena.free(), start - 1);
+        drop(object);
+        assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
+    }
+
+    /// A paged object of `pages` pages charged to `budget`, whose requests
+    /// go to a port of its own.
+    fn paged(budget: &Arc<Budget>, pages: u64) -> (Arc<MemoryObject>, Arc<Port>) {
+        let port = Port::new(budget).unwrap();
+        let object = MemoryObject::new_paged(budget, 1, &port, 0, pages * PAGE_SIZE, 0).unwrap();
+        (object, port)
+    }
+
+    #[test]
+    fn lends_a_page_and_ends_the_lend_before_the_owner_goes() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (owner, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (lender, port) = paged(&user, 2);
+        let base = (owner.usage(), user.usage());
+        let object = MemoryObject::new(Some(&owner), 2 * PAGE_SIZE, 0).unwrap();
+        fill(&object, 0, 2 * PAGE_SIZE, 7);
+        lender.lend(0, 2 * PAGE_SIZE, &object, 0).unwrap();
+        // The lent frames stay charged to the owner and are used twice.
+        assert_eq!(arena.free(), start - 2);
+        drop(lender);
+        // The paged object went: the frames and the owner's charges stay.
+        assert_eq!(arena.free(), start - 2);
+        assert_eq!(owner.usage().1, 2);
+        drop(object);
+        assert_eq!(arena.free(), start);
+        assert_eq!((owner.usage(), user.usage().1), ((0, 0), base.1.1));
+        drop(port);
+    }
+
+    #[test]
+    fn lends_a_page_and_lets_the_owner_go_first() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (owner, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (lender, port) = paged(&user, 1);
+        let object = MemoryObject::new(Some(&owner), PAGE_SIZE, 0).unwrap();
+        fill(&object, 0, PAGE_SIZE, 7);
+        lender.lend(0, PAGE_SIZE, &object, 0).unwrap();
+        drop(object);
+        // The page stays with the lender, charged to the owner's budget,
+        // and the owner's entry went with its slot.
+        assert_eq!(arena.free(), start - 1);
+        assert_eq!(owner.usage().1, 1);
+        drop(lender);
+        assert_eq!(arena.free(), start);
+        assert_eq!(owner.usage(), (0, 0));
+        drop(port);
+    }
+
+    #[test]
+    fn supplies_a_frame_whose_lend_ended_and_frees_it_with_its_charges() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (owner, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (lender, port) = paged(&user, 1);
+        let (receiver, port2) = paged(&user, 1);
+        let object = MemoryObject::new(Some(&owner), PAGE_SIZE, 0).unwrap();
+        fill(&object, 0, PAGE_SIZE, 7);
+        lender.lend(0, PAGE_SIZE, &object, 0).unwrap();
+        drop(lender);
+        // The lend is over, and the table still has an entry for the
+        // frame, which the owner holds.
+        receiver.supply(0, PAGE_SIZE, &object, 0).unwrap();
+        drop(object);
+        assert_eq!(arena.free(), start - 1);
+        // The frame goes back with the page and the entry charged to the
+        // owner's budget, which supplied it.
+        drop(receiver);
+        assert_eq!(arena.free(), start);
+        assert_eq!(owner.usage(), (0, 0));
+        drop((port, port2));
     }
 
     #[test]

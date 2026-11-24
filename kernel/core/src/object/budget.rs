@@ -228,7 +228,7 @@ impl Budget {
     /// The budget information record.
     /// In the diagnostic build, the kernel memory and the pages charged
     /// to the budget and those below it.
-    #[cfg(feature = "diag")]
+    #[cfg(any(feature = "diag", test))]
     pub fn usage(&self) -> (u64, u64) {
         (self.kernel.used(), self.pages.used())
     }
