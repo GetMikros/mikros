@@ -79,6 +79,77 @@ fn heap_allocates_and_frees(_: &Own) -> Result {
         "reusing a freed block",
         &*again as *const [u8; 64] as usize == at,
     )?;
+    // A freed block of a few pages stays mapped for the next of its size,
+    // which is still zero when it is asked for as zeros.
+    let mut big = core::hint::black_box(Vec::<u8>::with_capacity(5000));
+    big.resize(5000, 0xff);
+    let at = big.as_ptr() as usize;
+    drop(big);
+    let zeros = core::hint::black_box(alloc::vec![0u8; 6000]);
+    ensure("reusing a freed large block", zeros.as_ptr() as usize == at)?;
+    ensure("clearing a reused block", zeros.iter().all(|&b| b == 0))?;
+    // Blocks around the limits of the size classes keep their contents
+    // and can be freed and asked for again, as can one that is aligned to
+    // a page and one that no mapping can be aligned for.
+    {
+        use alloc::alloc::{alloc, dealloc};
+        use core::alloc::Layout;
+        for (size, align) in [
+            (2048, 8),
+            (2049, 8),
+            (4096, 8),
+            (4097, 8),
+            (65536, 8),
+            (65537, 8),
+            (16, 4096),
+            (5000, 4096),
+        ] {
+            let layout =
+                Layout::from_size_align(size, align).map_err(|_| mikros_test::Failure {
+                    what: "making a layout",
+                    status: 0,
+                })?;
+            for _ in 0..2 {
+                // SAFETY: the layout has a size above zero.
+                let block = unsafe { alloc(layout) };
+                ensure("allocating around a size class", !block.is_null())?;
+                ensure(
+                    "aligning around a size class",
+                    (block as usize).is_multiple_of(align),
+                )?;
+                // SAFETY: the block has `size` bytes.
+                unsafe { block.write_bytes(0xa5, size) };
+                // SAFETY: the block came from `alloc` with this layout.
+                unsafe { dealloc(block, layout) };
+            }
+        }
+        let layout = Layout::from_size_align(64, 8192).map_err(|_| mikros_test::Failure {
+            what: "making a layout",
+            status: 0,
+        })?;
+        // SAFETY: the layout has a size above zero.
+        ensure(
+            "refusing an alignment above a page",
+            unsafe { alloc(layout) }.is_null(),
+        )?;
+        // More freed blocks of one class than are kept: the rest is
+        // unmapped, and every block is still served.
+        let layout = Layout::from_size_align(16 * 1024, 8).map_err(|_| mikros_test::Failure {
+            what: "making a layout",
+            status: 0,
+        })?;
+        let mut held = Vec::new();
+        for _ in 0..32 {
+            // SAFETY: the layout has a size above zero.
+            let block = unsafe { alloc(layout) };
+            ensure("allocating many blocks of a class", !block.is_null())?;
+            held.push(block);
+        }
+        for block in held {
+            // SAFETY: the block came from `alloc` with this layout.
+            unsafe { dealloc(block, layout) };
+        }
+    }
     // Far more than the static arena, in blocks that are each freed.
     for round in 0..64 {
         let big: Vec<u64> = (0..64 * 1024).map(|n| n ^ round).collect();
