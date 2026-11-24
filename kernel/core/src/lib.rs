@@ -55,6 +55,7 @@ pub mod random;
 pub mod ranges;
 pub mod regions;
 pub mod sched;
+pub mod share;
 pub mod signal;
 pub mod smp;
 pub mod startup;
