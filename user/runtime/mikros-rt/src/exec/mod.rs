@@ -151,8 +151,9 @@ impl Executor {
         loop {
             self.adopt();
             // Each round polls the tasks that were ready when it began,
-            // then delivers the packets already queued, so that tasks
-            // that wake themselves do not keep packets from the others.
+            // then, when tasks are ready to run, delivers the packets
+            // already queued, so that tasks that wake themselves do not
+            // keep packets from the others.
             let mut round = core::mem::take(&mut *self.ready.ids.lock());
             while let Some(id) = round.pop_front() {
                 if id == MAIN {
@@ -169,8 +170,11 @@ impl Executor {
                     self.poll_task(id);
                 }
             }
-            self.deliver_queued();
-            if self.ready.ids.lock().is_empty() && self.spawner.new.borrow().is_empty() {
+            // With nothing ready to run, the wait below takes the next
+            // packet, if one is queued, without a call before it.
+            if !self.ready.ids.lock().is_empty() || !self.spawner.new.borrow().is_empty() {
+                self.deliver_queued();
+            } else {
                 self.wait();
             }
         }
