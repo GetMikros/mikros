@@ -20,7 +20,7 @@ pub enum Kind {
     Diag,
     /// Production's build, with the stand-ins of the edition in its
     /// images, for development and testing (MIKSPEC-0023.R55,
-    /// MIKSPEC-0023.R57).
+    /// MIKSPEC-0023.R60).
     Staging,
 }
 
