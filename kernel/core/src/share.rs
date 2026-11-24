@@ -58,7 +58,7 @@ pub enum Released {
 
 /// The kernel memory charged for the entry of a shared frame: the entry
 /// in the table and its share of the tree's nodes.
-const SHARE_COST: u64 = 2 * size_of::<(u64, Share)>() as u64;
+pub(crate) const SHARE_COST: u64 = 2 * size_of::<(u64, Share)>() as u64;
 
 /// The shared frames, by physical address.
 static SHARES: SpinLock<Map<u64, Share>> =
@@ -172,12 +172,21 @@ pub fn release(phys: u64, kind: Kind) -> Released {
             Kind::Lent => share.lent -= 1,
             Kind::Copy => share.copies -= 1,
         }
-        if share.uses > 0 {
+        if share.uses > 1 || share.copies > 0 || share.lent > 0 {
             return Released::Used;
         }
-        SHARED.fetch_sub(1, Ordering::Release);
-        let share = shares.remove(&phys).expect("the entry was just found");
-        (Released::Last(share.charge), share.bookkeeping)
+        if share.uses == 1 {
+            // Only the owner's slot is left: the frame is not shared any
+            // more, and the owner's slot holds its page and its charge as
+            // any slot does. The entry goes, and its charge with it.
+            SHARED.fetch_sub(1, Ordering::Release);
+            let share = shares.remove(&phys).expect("the entry was just found");
+            (Released::Used, share.bookkeeping)
+        } else {
+            SHARED.fetch_sub(1, Ordering::Release);
+            let share = shares.remove(&phys).expect("the entry was just found");
+            (Released::Last(share.charge), share.bookkeeping)
+        }
     };
     // The entry's charge goes back with no lock held.
     if let Some(budget) = refund {
@@ -228,9 +237,10 @@ mod tests {
         let _lock = crate::arch::mock::lock();
         lend(A, None).unwrap();
         assert!(matches!(release(A, Kind::Lent), Released::Used));
-        // The owner still holds the frame, which is shared no longer.
+        // The owner still holds the frame, which is shared no longer, so
+        // it has no entry.
         assert!(!is_lent(A));
-        assert!(matches!(release(A, Kind::Owner), Released::Last(None)));
+        assert!(matches!(release(A, Kind::Owner), Released::Alone));
     }
 
     #[test]
@@ -262,8 +272,9 @@ mod tests {
         assert!(has_copies(A) && !is_lent(A));
         assert!(matches!(release(A, Kind::Copy), Released::Used));
         assert!(!has_copies(A));
-        assert!(matches!(release(A, Kind::Owner), Released::Last(None)));
-        // A first copy of an unshared frame records the owner's use too.
+        assert!(matches!(release(A, Kind::Owner), Released::Alone));
+        // A first copy of an unshared frame records the owner's use too,
+        // and the copy outlives the owner.
         copy(B, None, None).unwrap();
         assert!(matches!(release(B, Kind::Owner), Released::Used));
         assert!(matches!(release(B, Kind::Copy), Released::Last(None)));
@@ -275,10 +286,10 @@ mod tests {
         lend(A, None).unwrap();
         lend(B, None).unwrap();
         assert!(matches!(release(A, Kind::Lent), Released::Used));
-        assert!(matches!(release(A, Kind::Owner), Released::Last(None)));
+        assert!(matches!(release(A, Kind::Owner), Released::Alone));
         assert!(!is_lent(A) && is_lent(B));
         assert!(matches!(release(B, Kind::Lent), Released::Used));
-        assert!(matches!(release(B, Kind::Owner), Released::Last(None)));
+        assert!(matches!(release(B, Kind::Owner), Released::Alone));
     }
 
     #[test]

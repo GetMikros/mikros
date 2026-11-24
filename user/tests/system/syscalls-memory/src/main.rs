@@ -22,6 +22,14 @@ fn main(m: &Managed) -> i64 {
             ("seals", seals),
             ("clones", clones),
             ("clones_that_may_be_written", clones_that_may_be_written),
+            (
+                "clones_share_what_neither_writes",
+                clones_share_what_neither_writes,
+            ),
+            (
+                "clones_keep_their_own_mappings",
+                clones_keep_their_own_mappings,
+            ),
             ("mem_read_into_its_source", mem_read_into_its_source),
             ("mappings_outlive_handles", mappings_outlive_handles),
             ("write_process_memory", write_process_memory),
@@ -246,6 +254,123 @@ fn clones_that_may_be_written(_: &Own) -> Result {
     // SAFETY: the pointer is valid for the call.
     check("cloning with both options", unsafe {
         sys::mem_clone(read_only, WRITE_OPTION | 1, 0, PAGE_SIZE, &mut resizable)
+    })
+}
+
+/// A chain of clones keeps what each had when it was made, whichever
+/// of them is closed first, and a clone of an object that has pages
+/// without frames reads zero there whatever the source does later.
+fn clones_share_what_neither_writes(_: &Own) -> Result {
+    let pages = 6u64;
+    let source = create_memory(pages * PAGE_SIZE)?;
+    // Pages 0, 2 and 4 hold their number; 1, 3 and 5 stay without frames.
+    for page in [0u64, 2, 4] {
+        mem_write_at(source, page * PAGE_SIZE + 5, &[page as u8 + 1; 11])?;
+    }
+    let mut first = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("cloning", unsafe {
+        sys::mem_clone(source, 0, 0, pages * PAGE_SIZE, &mut first)
+    })?;
+    let mut second = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("cloning a clone", unsafe {
+        sys::mem_clone(first, 0, 0, pages * PAGE_SIZE, &mut second)
+    })?;
+    // The source and the first clone change; the second does not.
+    mem_write_at(source, 5, b"source")?;
+    mem_write_at(source, PAGE_SIZE + 5, b"later")?;
+    mem_write_at(first, 2 * PAGE_SIZE + 5, b"first")?;
+    // SAFETY: closing takes no pointers.
+    check("closing the first clone", unsafe {
+        sys::handle_close(first)
+    })?;
+    // SAFETY: closing takes no pointers.
+    check("closing the source", unsafe { sys::handle_close(source) })?;
+    for page in [0u64, 2, 4] {
+        ensure(
+            "keeping the bytes of the oldest object",
+            mem_read_at::<11>(second, page * PAGE_SIZE + 5)? == [page as u8 + 1; 11],
+        )?;
+    }
+    for page in [1u64, 3, 5] {
+        ensure(
+            "reading zero where there was no frame",
+            mem_read_at::<8>(second, page * PAGE_SIZE + 5)? == [0; 8],
+        )?;
+    }
+    // The last clone writes to what it shared, and reads it back.
+    mem_write_at(second, 4 * PAGE_SIZE, b"mine")?;
+    ensure(
+        "writing the last clone",
+        mem_read_at::<4>(second, 4 * PAGE_SIZE)? == *b"mine",
+    )?;
+    // SAFETY: closing takes no pointers.
+    check("closing the last clone", unsafe {
+        sys::handle_close(second)
+    })
+}
+
+/// Pages mapped before the clone was made, and written through, do not
+/// reach the clone afterwards, and a clone's own mapping does not reach
+/// the source; `mem_read` into a buffer that a clone maps changes the
+/// clone only.
+fn clones_keep_their_own_mappings(s: &Own) -> Result {
+    let len = 2 * PAGE_SIZE;
+    let source = create_memory(len)?;
+    let at = map(s.process, source, len)?;
+    // SAFETY: the mapping is two pages long, readable and writable.
+    unsafe { (at as *mut u64).write_volatile(0x1111) };
+    unsafe { ((at + PAGE_SIZE) as *mut u64).write_volatile(0x2222) };
+    let mut clone = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("cloning", unsafe {
+        sys::mem_clone(source, 0, 0, len, &mut clone)
+    })?;
+    // A store through the mapping that was writable before the clone.
+    // SAFETY: as above.
+    unsafe { (at as *mut u64).write_volatile(0x3333) };
+    ensure(
+        "keeping the clone from the source's mapping",
+        u64::from_le_bytes(mem_read_at::<8>(clone, 0)?) == 0x1111,
+    )?;
+    let there = map(s.process, clone, len)?;
+    // SAFETY: the mapping is two pages long, readable and writable.
+    unsafe { ((there + PAGE_SIZE) as *mut u64).write_volatile(0x4444) };
+    ensure(
+        "keeping the source from the clone's mapping",
+        u64::from_le_bytes(mem_read_at::<8>(source, PAGE_SIZE)?) == 0x2222,
+    )?;
+    // SAFETY: the mapping is readable.
+    ensure("reading the clone", unsafe {
+        (there as *const u64).read_volatile() == 0x1111
+    })?;
+    // The kernel writes into the clone's buffer, which shares a frame
+    // with nothing now (the source's store gave it its own), and then
+    // into a page that the clone still shares with no one but itself.
+    let other = create_memory(PAGE_SIZE)?;
+    mem_write_at(other, 0, &0x5555u64.to_le_bytes())?;
+    // SAFETY: the pointer and length are the mapping's own.
+    check("reading into the clone's mapping", unsafe {
+        sys::mem_read(other, 0, there as *mut u8, 8)
+    })?;
+    ensure(
+        "writing the clone's page by output",
+        // SAFETY: the mapping is readable.
+        unsafe { (there as *const u64).read_volatile() } == 0x5555,
+    )?;
+    ensure(
+        "keeping the source's page from the output",
+        // SAFETY: the mapping is readable.
+        unsafe { (at as *const u64).read_volatile() } == 0x3333,
+    )?;
+    // SAFETY: unmapping takes no pointers.
+    check("unmapping the clone", unsafe {
+        sys::vm_unmap(s.process, there, len)
+    })?;
+    // SAFETY: unmapping takes no pointers.
+    check("unmapping the source", unsafe {
+        sys::vm_unmap(s.process, at, len)
     })
 }
 

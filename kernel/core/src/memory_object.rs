@@ -237,6 +237,12 @@ impl MemoryObject {
     /// object are not seen in the other. Fails with `NotSupported` for a
     /// physical or fixed object and with `OutOfRange` unless the range
     /// lies inside the object.
+    ///
+    /// An anonymous object's pages are not copied: the clone uses the
+    /// frames of the pages that have one, which the frames' owner and the
+    /// clone give a copy to when written, and the pages that have no frame
+    /// read as zero in the clone. The pages that a paged object uses as
+    /// lent frames, and those of a paged object, are copied at once.
     pub fn clone_range<F: FnMut()>(
         self: &Arc<Self>,
         offset: u64,
@@ -250,25 +256,158 @@ impl MemoryObject {
         }
         self.check_range(offset, len)?;
         let clone = MemoryObject::new(Some(budget), len, options)?;
-        // The clone is taken once no output into the source is still to
-        // be written.
+        if !self.is_anonymous() {
+            self.copy_pages(&clone, offset, len, 0, budget, work)?;
+            return Ok(clone);
+        }
+        in_pieces(0, len / PAGE_SIZE, |from, to| {
+            self.share_pages(&clone, offset, (from, to), budget, work)
+        })?;
+        Ok(clone)
+    }
+
+    /// Makes the pages `from` to `to`, exclusive, of `clone` use the
+    /// frames of the pages from `offset` of this anonymous object, which
+    /// the table of shared frames counts, and copies the lent ones. Each
+    /// slot's entry is charged to `budget`. No writable translation of the
+    /// shared frames is left in this object's mappings when it returns,
+    /// and a failure leaves no use taken that `clone` does not hold.
+    fn share_pages<F: FnMut()>(
+        self: &Arc<Self>,
+        clone: &MemoryObject,
+        offset: u64,
+        (from, to): (u64, u64),
+        budget: &Arc<Budget>,
+        work: &mut Work<F>,
+    ) -> Result<(), Error> {
+        let first = offset / PAGE_SIZE;
+        let count = (to - from) as usize;
+        let mut shared: Vec<(u64, u64)> = Vec::new();
+        let mut lent: Vec<u64> = Vec::new();
+        shared
+            .try_reserve_exact(count)
+            .map_err(|_| Error::NoMemory)?;
+        lent.try_reserve_exact(count).map_err(|_| Error::NoMemory)?;
+        // The uses are taken with the pages locked and once no output into
+        // the source is still to be written, and none of its pages is
+        // being changed.
+        loop {
+            self.wait_unpinned();
+            let mut pages = self.pages.lock();
+            if pages.pinned() {
+                continue;
+            }
+            if let Some(index) = (first + from..first + to).find(|&i| self.is_changing(i)) {
+                drop(pages);
+                self.wait_settled(index)?;
+                continue;
+            }
+            pages.check_range((first + from) * PAGE_SIZE, (to - from) * PAGE_SIZE)?;
+            shared.clear();
+            lent.clear();
+            let mut failed = None;
+            for i in from..to {
+                let index = first + i;
+                let Some(phys) = pages.frame(index) else {
+                    continue;
+                };
+                if crate::share::is_lent(phys) {
+                    lent.push(i);
+                    continue;
+                }
+                if let Err(e) = crate::share::copy(phys, self.budget.as_ref(), Some(budget)) {
+                    failed = Some(e);
+                    break;
+                }
+                pages.mark_shared(index);
+                shared.push((i, phys));
+            }
+            drop(pages);
+            match failed {
+                None => break,
+                Some(e) => {
+                    Self::end_copies(&shared);
+                    return Err(e);
+                }
+            }
+        }
+        // Room for the clone's slots and their entries, which the caller
+        // pays for.
+        let mut claims = Vec::new();
+        let charged = shared.len() as u64 * PAGE_ENTRY_COST;
+        let reserved = claims
+            .try_reserve_exact(shared.len())
+            .map_err(|_| Error::NoMemory)
+            .and_then(|()| {
+                shared.iter().try_for_each(|_| {
+                    claims.push(nodes::claim_insert()?);
+                    Ok(())
+                })
+            })
+            .and_then(|()| budget.charge_kernel(charged));
+        if let Err(e) = reserved {
+            Self::end_copies(&shared);
+            return Err(e);
+        }
+        // The source's translations of the pages go before the call
+        // returns, so that no store reaches the shared frames from now on.
+        self.unmap_in_steps(first + from, first + to);
+        {
+            let mut cpages = clone.pages.lock();
+            for (&(i, phys), claim) in shared.iter().zip(claims) {
+                cpages.insert_copy(i, phys, claim);
+            }
+        }
+        // What cannot be shared is copied.
+        for i in lent {
+            self.copy_pages(
+                clone,
+                (first + i) * PAGE_SIZE,
+                PAGE_SIZE,
+                i * PAGE_SIZE,
+                budget,
+                work,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Ends the uses of the frames of `shared`, taken for a clone that was
+    /// not made.
+    fn end_copies(shared: &[(u64, u64)]) {
+        for &(_, phys) in shared {
+            crate::share::end(phys, crate::share::Kind::Copy);
+        }
+    }
+
+    /// Copies the `len` bytes from `offset` of this object into `clone` from
+    /// `at`, all at once, in pieces that stay within one page of each
+    /// object; pieces that read as zero are left without a frame. The
+    /// copy waits until no output into this object is still to be
+    /// written.
+    fn copy_pages<F: FnMut()>(
+        self: &Arc<Self>,
+        clone: &MemoryObject,
+        offset: u64,
+        len: u64,
+        at: u64,
+        budget: &Arc<Budget>,
+        work: &mut Work<F>,
+    ) -> Result<(), Error> {
         let held = self.hold_for_read(offset, len, true, Some(budget), work)?;
-        // The bytes are copied at once, in pieces that stay within one
-        // page of each object; pieces that read as zero are left without
-        // a frame.
         let mut piece = [0u8; PAGE_SIZE as usize];
         let mut done = 0;
         let mut copied = Ok(());
         while done < len && copied.is_ok() {
-            let at = offset + done;
-            let n = (PAGE_SIZE - at % PAGE_SIZE)
-                .min(PAGE_SIZE - done % PAGE_SIZE)
+            let from = offset + done;
+            let n = (PAGE_SIZE - from % PAGE_SIZE)
+                .min(PAGE_SIZE - (at + done) % PAGE_SIZE)
                 .min(len - done) as usize;
             let bytes = &mut piece[..n];
-            held.read(at, bytes);
+            held.read(from, bytes);
             if bytes.iter().any(|&b| b != 0) {
                 let mut rest: &[u8] = bytes;
-                copied = clone.write(done, n as u64, work, |to| {
+                copied = clone.write(at + done, n as u64, work, |to| {
                     let (now, later) = rest.split_at(to.len());
                     to.copy_from_slice(now);
                     rest = later;
@@ -279,8 +418,7 @@ impl MemoryObject {
             work.item();
         }
         held.release(work);
-        copied?;
-        Ok(clone)
+        copied
     }
 
     /// A paged object of `size` bytes created with `options`, charged to
@@ -2710,8 +2848,8 @@ mod tests {
         let clone = source
             .clone_range(PAGE_SIZE, 3 * PAGE_SIZE, 0, &budget, &mut work)
             .unwrap();
-        // Only the pages with a non-zero byte got a frame.
-        assert_eq!(free - arena.free(), 2);
+        // No page was copied: the clone uses the frames of the source's.
+        assert_eq!(arena.free(), free);
         let was = bytes(&source, PAGE_SIZE, 3 * PAGE_SIZE);
         assert_eq!(bytes(&clone, 0, 3 * PAGE_SIZE), was);
         assert!(
@@ -2727,6 +2865,210 @@ mod tests {
         assert_eq!(bytes(&clone, PAGE_SIZE, 10), [0u8; 10]);
         drop((clone, source));
         assert_eq!(arena.free(), start);
+    }
+
+    #[test]
+    fn clones_share_frames_until_one_side_writes() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(64);
+        let (owner_budget, caller) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let source = MemoryObject::new(Some(&owner_budget), 3 * PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, PAGE_SIZE, 0x11);
+        fill(&source, 2 * PAGE_SIZE, PAGE_SIZE, 0x22);
+        let (first, third) = {
+            let pages = source.pages.lock();
+            (pages.frame(0).unwrap(), pages.frame(2).unwrap())
+        };
+        let base = caller.usage();
+        let mut work = Work::new(no_preempt);
+        let clone = source
+            .clone_range(0, 3 * PAGE_SIZE, 0, &caller, &mut work)
+            .unwrap();
+        // No frame was allocated and none was charged to the caller: it
+        // pays for the clone's slots and the table's entries only.
+        assert_eq!(arena.free(), start - 2);
+        assert_eq!(caller.usage().1, base.1);
+        assert!(caller.usage().0 > base.0 + 2 * PAGE_ENTRY_COST);
+        {
+            let pages = clone.pages.lock();
+            assert_eq!((pages.frame(0), pages.frame(2)), (Some(first), Some(third)));
+            // The page without a frame in the source has none in the clone.
+            assert_eq!(pages.frame(1), None);
+            assert!(pages.is_copy(0) && pages.is_copy(2));
+        }
+        // Each side's write gives it a frame of its own, once.
+        fill(&source, 0, 4, 0xaa);
+        assert_ne!(source.pages.lock().frame(0), Some(first));
+        assert_eq!(bytes(&clone, 0, 4), alloc::vec![0x11; 4]);
+        fill(&clone, 2 * PAGE_SIZE, 4, 0xbb);
+        assert_ne!(clone.pages.lock().frame(2), Some(third));
+        assert_eq!(bytes(&source, 2 * PAGE_SIZE, 4), alloc::vec![0x22; 4]);
+        assert_eq!(arena.free(), start - 4);
+        // The source's old frame is the clone's alone now, and written in
+        // place; the frame of the clone's page is the source's.
+        fill(&clone, 0, 4, 0xcc);
+        assert_eq!(clone.pages.lock().frame(0), Some(first));
+        fill(&source, 2 * PAGE_SIZE, 4, 0xdd);
+        assert_eq!(source.pages.lock().frame(2), Some(third));
+        assert_eq!(arena.free(), start - 4);
+        drop((clone, source));
+        assert_eq!(arena.free(), start);
+        assert_eq!((owner_budget.usage(), caller.usage()), ((0, 0), base));
+    }
+
+    #[test]
+    fn gives_back_the_tables_entries_when_the_clone_goes_first() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(64);
+        let (owner_budget, caller) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let source = MemoryObject::new(Some(&owner_budget), 3 * PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, 3 * PAGE_SIZE, 0x5a);
+        let mut work = Work::new(no_preempt);
+        let clone = source
+            .clone_range(0, 3 * PAGE_SIZE, 0, &caller, &mut work)
+            .unwrap();
+        drop(clone);
+        // The owner is the only use of its frames again, and the caller
+        // has nothing left charged for them.
+        assert_eq!(caller.usage(), (0, 0));
+        fill(&source, 0, 4, 1);
+        drop(source);
+        assert_eq!((arena.free(), owner_budget.usage()), (start, (0, 0)));
+    }
+
+    #[test]
+    fn leaves_nothing_charged_when_the_slots_of_a_clone_do_not_fit() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(64);
+        let (owner_budget, caller) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let source = MemoryObject::new(Some(&owner_budget), 2 * PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, 2 * PAGE_SIZE, 0x5a);
+        let mut work = Work::new(no_preempt);
+        // Room for the clone object and the table's entries, but not for the
+        // slots' entries.
+        let room = size_of::<MemoryObject>() as u64 + 2 * crate::share::SHARE_COST + 1;
+        caller.set_limits(room, u64::MAX);
+        let refused = source.clone_range(0, 2 * PAGE_SIZE, 0, &caller, &mut work);
+        assert_eq!(refused.err(), Some(Error::NoResources));
+        assert_eq!(caller.usage(), (0, 0));
+        fill(&source, 0, 4, 1);
+        drop(source);
+        assert_eq!((arena.free(), owner_budget.usage()), (start, (0, 0)));
+    }
+
+    #[test]
+    fn shrinks_a_source_whose_last_page_a_clone_shares() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(64);
+        let budget = Budget::root();
+        let start = arena.free();
+        let source = MemoryObject::new(Some(&budget), PAGE_SIZE, RESIZABLE).unwrap();
+        fill(&source, 0, PAGE_SIZE, 0x5a);
+        let mut work = Work::new(no_preempt);
+        let clone = source
+            .clone_range(0, PAGE_SIZE, 0, &budget, &mut work)
+            .unwrap();
+        source.set_size(100).unwrap();
+        // The source's tail went to zero in a frame of its own, and the
+        // clone still sees every byte.
+        assert_eq!(bytes(&source, 0, 100), alloc::vec![0x5a; 100]);
+        assert!(
+            frame_head(source.pages.lock().frame(0).unwrap(), PAGE_SIZE as usize)[100..]
+                .iter()
+                .all(|&b| b == 0)
+        );
+        assert_eq!(
+            bytes(&clone, 0, PAGE_SIZE),
+            alloc::vec![0x5a; PAGE_SIZE as usize]
+        );
+        drop((clone, source));
+        assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
+    }
+
+    #[test]
+    fn keeps_a_chain_of_clones_whichever_goes_first() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(64);
+        let budget = Budget::root();
+        let start = arena.free();
+        let mut work = Work::new(no_preempt);
+        let source = MemoryObject::new(Some(&budget), 2 * PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, 2 * PAGE_SIZE, 0x5a);
+        let middle = source
+            .clone_range(0, 2 * PAGE_SIZE, 0, &budget, &mut work)
+            .unwrap();
+        let last = middle
+            .clone_range(0, 2 * PAGE_SIZE, 0, &budget, &mut work)
+            .unwrap();
+        fill(&middle, 0, 8, 1);
+        drop(middle);
+        drop(source);
+        // The last one still reads what the source had.
+        assert_eq!(
+            bytes(&last, 0, PAGE_SIZE),
+            alloc::vec![0x5a; PAGE_SIZE as usize]
+        );
+        fill(&last, PAGE_SIZE, 8, 2);
+        assert_eq!(bytes(&last, PAGE_SIZE, 8)[..], [2u8; 8]);
+        drop(last);
+        assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
+    }
+
+    #[test]
+    fn copies_the_lent_pages_of_a_source_at_once() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(64);
+        let (owner_budget, caller) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (object, lent) = shared_page(&owner_budget);
+        let mut work = Work::new(no_preempt);
+        let clone = object
+            .clone_range(0, PAGE_SIZE, 0, &caller, &mut work)
+            .unwrap();
+        // A lent page is one object with its lenders, so the clone got a
+        // copy of its own, charged to the caller.
+        let own = clone.pages.lock().frame(0).unwrap();
+        assert_ne!(own, lent);
+        assert!(!clone.pages.lock().is_copy(0));
+        assert_eq!(bytes(&clone, 0, 8), alloc::vec![0x3c; 8]);
+        assert_eq!(caller.usage().1, 1);
+        assert!(!crate::share::has_copies(lent));
+        drop(clone);
+        crate::share::end(lent, crate::share::Kind::Lent);
+        drop(object);
+        assert_eq!(
+            (arena.free(), owner_budget.usage(), caller.usage()),
+            (start, (0, 0), (0, 0))
+        );
+    }
+
+    #[test]
+    fn takes_no_use_when_the_caller_has_no_room_for_the_entries() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(64);
+        let (owner_budget, caller) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let source = MemoryObject::new(Some(&owner_budget), 2 * PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, 2 * PAGE_SIZE, 0x5a);
+        let frames: Vec<u64> = (0..2)
+            .map(|i| source.pages.lock().frame(i).unwrap())
+            .collect();
+        let mut work = Work::new(no_preempt);
+        // Room for the clone object itself but not for what it shares.
+        let room = size_of::<MemoryObject>() as u64 + 8;
+        caller.set_limits(room, u64::MAX);
+        let refused = source.clone_range(0, 2 * PAGE_SIZE, 0, &caller, &mut work);
+        assert_eq!(refused.err(), Some(Error::NoResources));
+        assert!(frames.iter().all(|&phys| !crate::share::has_copies(phys)));
+        assert_eq!(caller.usage(), (0, 0));
+        // Nothing is left of the clone: the source writes in place.
+        fill(&source, 0, 4, 1);
+        assert_eq!(source.pages.lock().frame(0), Some(frames[0]));
+        drop(source);
+        assert_eq!((arena.free(), owner_budget.usage()), (start, (0, 0)));
     }
 
     #[test]
@@ -3123,10 +3465,9 @@ mod tests {
         drop(clone);
         // Once the clone is gone the owner writes in place again.
         assert!(!crate::share::has_copies(shared));
-        // The slot's entry went back, and the table's stays while the
-        // owner uses the frame.
-        let kept = clone_budget.usage();
-        assert!(kept.0 > base.0 && kept.1 == base.1);
+        // The slot's entry went back, and so did the table's, as the owner
+        // is the frame's only use.
+        assert_eq!(clone_budget.usage(), base);
         fill(&owner, 0, 4, 1);
         assert_eq!(owner.pages.lock().frame(0), Some(shared));
         drop(owner);
