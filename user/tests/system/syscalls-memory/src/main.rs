@@ -21,6 +21,7 @@ fn main(m: &Managed) -> i64 {
             ("shared_mappings", shared_mappings),
             ("seals", seals),
             ("clones", clones),
+            ("clones_that_may_be_written", clones_that_may_be_written),
             ("mem_read_into_its_source", mem_read_into_its_source),
             ("mappings_outlive_handles", mappings_outlive_handles),
             ("write_process_memory", write_process_memory),
@@ -202,8 +203,50 @@ fn clones(_: &Own) -> Result {
         mem_read_at::<{ PAGE_SIZE as usize }>(whole, 0)? == page,
     )?;
     // SAFETY: the pointer is valid for the call.
-    let bad = unsafe { sys::mem_clone(source, 2, 0, 1, &mut clone) };
+    let bad = unsafe { sys::mem_clone(source, 1 << 2, 0, PAGE_SIZE, &mut clone) };
     ensure("refusing other options", bad == -10)
+}
+
+/// A clone has the source's rights, and also `WRITE` when it is made with
+/// that option, even from a handle that cannot write.
+fn clones_that_may_be_written(_: &Own) -> Result {
+    const WRITE_OPTION: u32 = 1 << 1;
+    let source = create_memory(2 * PAGE_SIZE)?;
+    mem_write_at(source, 0, b"original")?;
+    let mut read_only = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("duplicating without WRITE", unsafe {
+        sys::handle_duplicate(source, (1 << 2) | (1 << 5), &mut read_only)
+    })?;
+    let mut plain = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("cloning without the option", unsafe {
+        sys::mem_clone(read_only, 0, 0, PAGE_SIZE, &mut plain)
+    })?;
+    ensure(
+        "refusing to write a clone without the option",
+        mem_write_at(plain, 0, b"x").is_err(),
+    )?;
+    let mut writable = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("cloning with the option", unsafe {
+        sys::mem_clone(read_only, WRITE_OPTION, 0, PAGE_SIZE, &mut writable)
+    })?;
+    mem_write_at(writable, 0, b"changed!")?;
+    ensure(
+        "reading the change",
+        mem_read_at::<8>(writable, 0)? == *b"changed!",
+    )?;
+    ensure(
+        "keeping the source",
+        mem_read_at::<8>(source, 0)? == *b"original",
+    )?;
+    // The option applies together with the size option.
+    let mut resizable = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("cloning with both options", unsafe {
+        sys::mem_clone(read_only, WRITE_OPTION | 1, 0, PAGE_SIZE, &mut resizable)
+    })
 }
 
 /// `mem_read` into a buffer mapped from its own source range gives the

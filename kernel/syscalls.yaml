@@ -783,7 +783,7 @@ syscalls:
     number: 76
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0006.R16]
+    spec: [MIKSPEC-0006.R59]
     args:
       - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [READ]}
       - {name: options, type: u32, dir: in}

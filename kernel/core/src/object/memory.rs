@@ -38,6 +38,9 @@ pub const SEALS: u32 = SEAL_SEAL | SEAL_SHRINK | SEAL_GROW | SEAL_WRITE;
 /// The creation option that allows changing the size.
 pub const RESIZABLE: u32 = 1 << 0;
 
+/// The option of `mem_clone` that gives the clone the right to write.
+pub const CLONE_WRITE: u32 = 1 << 1;
+
 /// The kernel memory charged for each allocated page: its entry in the
 /// tree and that entry's share of the tree's nodes.
 pub const PAGE_ENTRY_COST: u64 = 2 * size_of::<(u64, u64)>() as u64;

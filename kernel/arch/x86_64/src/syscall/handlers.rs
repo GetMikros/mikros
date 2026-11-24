@@ -2262,11 +2262,17 @@ pub fn mem_clone(
     len: u64,
     out: UserOut<Handle>,
 ) -> Result<(), Error> {
-    if options & !kernel_core::object::memory::RESIZABLE != 0 || !out.fits(1) {
+    use kernel_core::object::memory::{CLONE_WRITE, RESIZABLE};
+    if options & !(RESIZABLE | CLONE_WRITE) != 0 || !out.fits(1) {
         return Err(Error::InvalidArgs);
     }
     page_aligned(&[offset, len])?;
-    let rights = mem.rights;
+    // The clone is a copy of its own, so it may be written even when the
+    // source handle may not.
+    let mut rights = mem.rights;
+    if options & CLONE_WRITE != 0 {
+        rights |= kernel_core::object::rights::WRITE;
+    }
     let source = object::<MemoryObject>(mem);
     if source.is_physical() || source.is_fixed() {
         return Err(Error::NotSupported);
@@ -2274,7 +2280,7 @@ pub fn mem_clone(
     source.check_range(offset, len)?;
     let process = current_process()?;
     let budget = process.budget();
-    let clone = MemoryObject::new(Some(budget), len, options)?;
+    let clone = MemoryObject::new(Some(budget), len, options & RESIZABLE)?;
     let mut work = Work::new(crate::sched::preempt_point);
     // The clone is taken once no output into the source is still to be
     // written.
