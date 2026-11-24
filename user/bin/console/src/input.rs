@@ -125,6 +125,12 @@ impl Router {
         self.deliver(bytes)
     }
 
+    /// Stops the repeat of the held key, as its release will not come: the
+    /// keyboard went to another reader.
+    pub fn stop_repeat(&mut self) {
+        self.repeat = None;
+    }
+
     /// Takes in the release of key `code`.
     pub fn release(&mut self, code: u16) {
         if self.repeat.is_some_and(|(c, _)| c == code) {
@@ -195,6 +201,22 @@ mod tests {
             Route::Terminal(TerminalInput(vec![B as u8]))
         );
         assert_eq!(r.press(A, 40, None, true, 40), Route::Dropped);
+    }
+
+    #[test]
+    fn stops_the_repeat_when_the_keyboard_goes_away() {
+        let mut r = Router::default();
+        press(&mut r, A, 10);
+        assert!(r.next_repeat().is_some());
+        // The key's release goes to another reader, which the console is
+        // not told of, so it stops the repeat itself.
+        r.stop_repeat();
+        assert_eq!(r.next_repeat(), None);
+        let bytes = |code: u16| Some(vec![code as u8]);
+        assert_eq!(r.repeat(i64::MAX, bytes), Route::Dropped);
+        // A key pressed later repeats as before.
+        press(&mut r, B, 20);
+        assert!(r.next_repeat().is_some());
     }
 
     #[test]

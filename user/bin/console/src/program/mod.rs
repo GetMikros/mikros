@@ -474,6 +474,11 @@ impl Console {
                 }
             }
         }
+        // The device is gone, as when the desktop takes the keyboard: the
+        // release of a key held meanwhile goes to its new reader, so the
+        // key must not go on repeating here.
+        self.router.borrow_mut().stop_repeat();
+        self.keys.notify();
     }
 
     async fn serve_seat(self: Rc<Self>, seat: OwnedHandle) {
