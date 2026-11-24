@@ -654,8 +654,9 @@ pub enum Fault {
     OutOfMemory,
     /// The page of a paged object is absent and must be obtained first.
     Absent(u64),
-    /// The page was given a frame in place of the zero page, whose
-    /// translations must go before the access is tried again.
+    /// The page was given a frame in place of the zero page, or of a
+    /// shared one, whose translations must go before the access is tried
+    /// again.
     Changed(u64),
     /// The page is changing; the access waits until it has changed.
     Busy(u64),

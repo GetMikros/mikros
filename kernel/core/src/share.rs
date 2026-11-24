@@ -23,6 +23,9 @@ struct Share {
     /// owner and the lent pages share one frame whatever is written, as
     /// one object.
     copies: u64,
+    /// The budget that paid for this entry, which gets it back when the
+    /// entry goes, `None` for an entry nothing was charged for.
+    bookkeeping: Option<Arc<Budget>>,
     /// The budget that the page of the frame is charged to and that gets
     /// it back when the last use ends, `None` for a frame charged to
     /// nothing. It stays alive as long as the frame is used.
@@ -53,6 +56,10 @@ pub enum Released {
     Last(Option<Arc<Budget>>),
 }
 
+/// The kernel memory charged for the entry of a shared frame: the entry
+/// in the table and its share of the tree's nodes.
+const SHARE_COST: u64 = 2 * size_of::<(u64, Share)>() as u64;
+
 /// The shared frames, by physical address.
 static SHARES: SpinLock<Map<u64, Share>> =
     SpinLock::new(crate::lock_order::FRAME_SHARES, nodes::map());
@@ -80,6 +87,7 @@ pub fn lend(phys: u64, owner: Option<&Arc<Budget>>) -> Result<(), Error> {
             uses: 2,
             lent: 1,
             copies: 0,
+            bookkeeping: None,
             charge: owner.cloned(),
         },
     );
@@ -89,9 +97,15 @@ pub fn lend(phys: u64, owner: Option<&Arc<Budget>>) -> Result<(), Error> {
 
 /// Records one more slot of an object made by `mem_clone` that uses the
 /// frame `phys`, which its owner's slot, charged to `owner`, holds. The
-/// first time, the owner's use is recorded too, with its charge. Fails
-/// with `NoMemory`, changing nothing, without room to record it.
-pub fn copy(phys: u64, owner: Option<&Arc<Budget>>) -> Result<(), Error> {
+/// first time, the owner's use is recorded too, with its charge, and the
+/// entry is charged to `caller`, the budget of the call, which gets it
+/// back when the entry goes. Fails with `NoMemory`, or `NoResources`
+/// without room in `caller`, changing nothing.
+pub fn copy(
+    phys: u64,
+    owner: Option<&Arc<Budget>>,
+    caller: Option<&Arc<Budget>>,
+) -> Result<(), Error> {
     let mut shares = SHARES.lock();
     if let Some(share) = shares.get_mut(&phys) {
         share.uses += 1;
@@ -99,17 +113,30 @@ pub fn copy(phys: u64, owner: Option<&Arc<Budget>>) -> Result<(), Error> {
         return Ok(());
     }
     let _claim = nodes::claim_insert()?;
+    if let Some(caller) = caller {
+        caller.charge_kernel(SHARE_COST)?;
+    }
     shares.insert(
         phys,
         Share {
             uses: 2,
             lent: 0,
             copies: 1,
+            bookkeeping: caller.cloned(),
             charge: owner.cloned(),
         },
     );
     SHARED.fetch_add(1, Ordering::Release);
     Ok(())
+}
+
+/// How many slots and orphans use the frame `phys`, 0 when it is not
+/// shared.
+pub fn uses(phys: u64) -> u64 {
+    if SHARED.load(Ordering::Acquire) == 0 {
+        return 0;
+    }
+    SHARES.lock().get(&phys).map_or(0, |share| share.uses)
 }
 
 /// Whether a slot of an object made by `mem_clone` uses the frame `phys`,
@@ -134,22 +161,29 @@ pub fn release(phys: u64, kind: Kind) -> Released {
     if SHARED.load(Ordering::Acquire) == 0 {
         return Released::Alone;
     }
-    let mut shares = SHARES.lock();
-    let Some(share) = shares.get_mut(&phys) else {
-        return Released::Alone;
+    let (released, refund) = {
+        let mut shares = SHARES.lock();
+        let Some(share) = shares.get_mut(&phys) else {
+            return Released::Alone;
+        };
+        share.uses -= 1;
+        match kind {
+            Kind::Owner => {}
+            Kind::Lent => share.lent -= 1,
+            Kind::Copy => share.copies -= 1,
+        }
+        if share.uses > 0 {
+            return Released::Used;
+        }
+        SHARED.fetch_sub(1, Ordering::Release);
+        let share = shares.remove(&phys).expect("the entry was just found");
+        (Released::Last(share.charge), share.bookkeeping)
     };
-    share.uses -= 1;
-    match kind {
-        Kind::Owner => {}
-        Kind::Lent => share.lent -= 1,
-        Kind::Copy => share.copies -= 1,
+    // The entry's charge goes back with no lock held.
+    if let Some(budget) = refund {
+        budget.release_kernel(SHARE_COST);
     }
-    if share.uses > 0 {
-        return Released::Used;
-    }
-    SHARED.fetch_sub(1, Ordering::Release);
-    let share = shares.remove(&phys).expect("the entry was just found");
-    Released::Last(share.charge)
+    released
 }
 
 /// Ends one use of the frame `phys`, of the kind `kind`. When it was the
@@ -222,7 +256,7 @@ mod tests {
         lend(A, None).unwrap();
         // Lends alone are no copies: the owner and they are one object.
         assert!(is_lent(A) && !has_copies(A));
-        copy(A, None).unwrap();
+        copy(A, None, None).unwrap();
         assert!(has_copies(A) && is_lent(A));
         assert!(matches!(release(A, Kind::Lent), Released::Used));
         assert!(has_copies(A) && !is_lent(A));
@@ -230,7 +264,7 @@ mod tests {
         assert!(!has_copies(A));
         assert!(matches!(release(A, Kind::Owner), Released::Last(None)));
         // A first copy of an unshared frame records the owner's use too.
-        copy(B, None).unwrap();
+        copy(B, None, None).unwrap();
         assert!(matches!(release(B, Kind::Owner), Released::Used));
         assert!(matches!(release(B, Kind::Copy), Released::Last(None)));
     }

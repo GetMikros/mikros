@@ -45,9 +45,12 @@ pub const CLONE_WRITE: u32 = 1 << 1;
 /// tree and that entry's share of the tree's nodes.
 pub const PAGE_ENTRY_COST: u64 = 2 * size_of::<(u64, u64)>() as u64;
 
-/// The bit of a recorded frame that says more than one use refers to it.
-/// Frames are page aligned, so the lowest bit is free.
+/// The bit of a recorded frame that says more than one use refers to it,
+/// and the bit that says the slot is one of an object made by `mem_clone`
+/// and not the frame's owner. Frames are page aligned, so the lowest bits
+/// are free.
 const SHARED: u64 = 1;
+const COPY: u64 = 2;
 
 /// A frame that left the pages of an object, with whether it was shared
 /// when it left.
@@ -57,13 +60,19 @@ pub struct Frame(u64);
 impl Frame {
     /// A frame that no other use refers to.
     pub fn private(phys: u64) -> Frame {
-        debug_assert!(phys & SHARED == 0, "frames are page aligned");
+        debug_assert!(phys & (SHARED | COPY) == 0, "frames are page aligned");
         Frame(phys)
     }
 
     /// The address of the frame.
     pub fn phys(self) -> u64 {
-        self.0 & !SHARED
+        self.0 & !(SHARED | COPY)
+    }
+
+    /// Whether the slot it came from was one of an object made by
+    /// `mem_clone`.
+    pub fn is_copy(self) -> bool {
+        self.0 & COPY != 0
     }
 
     /// Whether the slot it came from was marked shared.
@@ -171,6 +180,21 @@ impl Pages {
             .is_some_and(|frame| frame.is_shared())
     }
 
+    /// Whether page `index` has a frame that its object got from a
+    /// `mem_clone`, not as the owner of it.
+    pub fn is_copy(&self, index: u64) -> bool {
+        self.frames.get(&index).is_some_and(|frame| frame.is_copy())
+    }
+
+    /// Records `phys`, a frame that is already shared, as the frame of
+    /// page `index` of an object made by `mem_clone`, as `insert` does.
+    pub fn insert_copy(&mut self, index: u64, phys: u64, claim: Claim) {
+        self.insert_shared(index, phys, claim);
+        if let Some(slot) = self.frames.get_mut(&index) {
+            slot.0 |= COPY;
+        }
+    }
+
     /// Marks the frame of page `index`, which has one, as shared.
     pub fn mark_shared(&mut self, index: u64) {
         let slot = self.frames.get_mut(&index);
@@ -184,7 +208,6 @@ impl Pages {
     /// object and has none, using the room of `claim`.
     pub fn insert(&mut self, index: u64, phys: u64, claim: Claim) {
         debug_assert!(index < self.count());
-        debug_assert!(phys & SHARED == 0, "frames are page aligned");
         let old = self.frames.insert(index, Frame::private(phys));
         debug_assert!(old.is_none(), "page {index} already has a frame");
         drop(claim);
@@ -200,7 +223,7 @@ impl Pages {
     /// Makes `phys` the frame of page `index`, which has one, marked
     /// shared or not, and returns the frame it had. It needs no room.
     pub fn replace(&mut self, index: u64, phys: u64, shared: bool) -> Frame {
-        debug_assert!(phys & SHARED == 0, "frames are page aligned");
+        debug_assert!(phys & (SHARED | COPY) == 0, "frames are page aligned");
         let slot = self
             .frames
             .get_mut(&index)
