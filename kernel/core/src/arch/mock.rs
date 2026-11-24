@@ -33,6 +33,9 @@ fn with_cpu_data<R>(f: impl FnOnce(&AtomicPtr<()>) -> R) -> R {
     #[cfg(not(test))]
     f(&CPU_DATA)
 }
+/// Added to a physical address to get the host address of its frame, 0
+/// unless a test has an arena.
+static FRAME_BASE: AtomicU64 = AtomicU64::new(0);
 static NOW: AtomicI64 = AtomicI64::new(0);
 static TIMER: AtomicI64 = AtomicI64::new(DISARMED);
 static OUTPUT: SpinLock<Vec<u8>> = SpinLock::new(crate::lock_order::MOCK_OUTPUT, Vec::new());
@@ -156,7 +159,7 @@ impl Arch for Mock {
     fn console_write(_line: &[u8]) {}
 
     fn frame_address(phys: u64) -> u64 {
-        phys
+        phys + FRAME_BASE.load(Ordering::Relaxed)
     }
 
     fn physical_page_map(_phys: u64, _policy: super::CachePolicy) -> Option<u64> {
@@ -326,5 +329,65 @@ impl Arch for Mock {
 
     unsafe fn enter_user(_entry: u64, _stack: u64, _arg1: u64, _arg2: u64) -> ! {
         panic!("the mock architecture cannot enter user mode");
+    }
+}
+
+/// Frames of host memory that `FRAMES` hands out for the length of a test,
+/// at the physical addresses from one page up. The test must hold `lock`
+/// for as long as it has the arena, and drop everything that uses frames
+/// before the arena.
+#[cfg(test)]
+pub struct Arena {
+    memory: *mut u8,
+    bits: *mut [u64],
+    layout: std::alloc::Layout,
+}
+
+#[cfg(test)]
+impl Arena {
+    /// An arena of `pages` frames, of which the first, at physical address
+    /// 0, is never handed out.
+    pub fn new(pages: usize) -> Arena {
+        use crate::frames::{FRAMES, Frames};
+        const PAGE: usize = 4096;
+        let layout = std::alloc::Layout::from_size_align(pages * PAGE, PAGE).unwrap();
+        // SAFETY: the layout is not empty.
+        let memory = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!memory.is_null());
+        let bits: *mut [u64] =
+            std::boxed::Box::leak(std::vec![0u64; pages.div_ceil(64)].into_boxed_slice());
+        // SAFETY: the bitmap lives until the arena is dropped.
+        let mut frames = Frames::new(unsafe { &mut *bits });
+        frames.add(1, pages as u64 - 1);
+        frames.adopt(pages as u64 - 1);
+        let mut slot = FRAMES.lock();
+        assert!(slot.is_none(), "an arena is already in use");
+        *slot = Some(frames);
+        drop(slot);
+        FRAME_BASE.store(memory as u64, Ordering::Relaxed);
+        Arena {
+            memory,
+            bits,
+            layout,
+        }
+    }
+
+    /// The number of frames that are free.
+    pub fn free(&self) -> u64 {
+        crate::frames::FRAMES.lock().as_ref().unwrap().free_count()
+    }
+}
+
+#[cfg(test)]
+impl Drop for Arena {
+    fn drop(&mut self) {
+        *crate::frames::FRAMES.lock() = None;
+        FRAME_BASE.store(0, Ordering::Relaxed);
+        // SAFETY: the memory and the bitmap came from the calls that
+        // made them and nothing uses them any more.
+        unsafe {
+            std::alloc::dealloc(self.memory, self.layout);
+            drop(std::boxed::Box::from_raw(self.bits));
+        }
     }
 }

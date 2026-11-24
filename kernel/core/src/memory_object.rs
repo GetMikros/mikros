@@ -193,6 +193,58 @@ impl MemoryObject {
         })
     }
 
+    /// A new anonymous object of `len` bytes, created with `options` and
+    /// charged to `budget`, whose bytes are those of the `len` bytes from
+    /// `offset` of this one, which are page aligned. Writes to either
+    /// object are not seen in the other. Fails with `NotSupported` for a
+    /// physical or fixed object and with `OutOfRange` unless the range
+    /// lies inside the object.
+    pub fn clone_range<F: FnMut()>(
+        self: &Arc<Self>,
+        offset: u64,
+        len: u64,
+        options: u32,
+        budget: &Arc<Budget>,
+        work: &mut Work<F>,
+    ) -> Result<Arc<MemoryObject>, Error> {
+        if self.is_physical() || self.is_fixed() {
+            return Err(Error::NotSupported);
+        }
+        self.check_range(offset, len)?;
+        let clone = MemoryObject::new(Some(budget), len, options)?;
+        // The clone is taken once no output into the source is still to
+        // be written.
+        let held = self.hold_for_read(offset, len, true, Some(budget), work)?;
+        // The bytes are copied at once, in pieces that stay within one
+        // page of each object; pieces that read as zero are left without
+        // a frame.
+        let mut piece = [0u8; PAGE_SIZE as usize];
+        let mut done = 0;
+        let mut copied = Ok(());
+        while done < len && copied.is_ok() {
+            let at = offset + done;
+            let n = (PAGE_SIZE - at % PAGE_SIZE)
+                .min(PAGE_SIZE - done % PAGE_SIZE)
+                .min(len - done) as usize;
+            let bytes = &mut piece[..n];
+            held.read(at, bytes);
+            if bytes.iter().any(|&b| b != 0) {
+                let mut rest: &[u8] = bytes;
+                copied = clone.write(done, n as u64, work, |to| {
+                    let (now, later) = rest.split_at(to.len());
+                    to.copy_from_slice(now);
+                    rest = later;
+                    Ok(())
+                });
+            }
+            done += n as u64;
+            work.item();
+        }
+        held.release(work);
+        copied?;
+        Ok(clone)
+    }
+
     /// A paged object of `size` bytes created with `options`, charged to
     /// `budget`, that sends its page requests to `port` with `key` and is
     /// supplied by the pager with object ID `pager`.
@@ -2360,5 +2412,88 @@ impl Drop for MemoryObject {
         if let Some(budget) = &self.budget {
             budget.release_kernel(self.charged);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::mock;
+
+    fn no_preempt() {}
+
+    /// Fills `len` bytes from `offset` of `object` with `byte`.
+    fn fill(object: &MemoryObject, offset: u64, len: u64, byte: u8) {
+        let mut work = Work::new(no_preempt);
+        object
+            .write(offset, len, &mut work, |to| {
+                to.fill(byte);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// The `len` bytes from `offset` of `object`.
+    fn bytes(object: &Arc<MemoryObject>, offset: u64, len: u64) -> Vec<u8> {
+        let mut work = Work::new(no_preempt);
+        let held = object
+            .hold_for_read(offset, len, false, None, &mut work)
+            .unwrap();
+        let mut out = alloc::vec![0u8; len as usize];
+        // Reads stay within one page.
+        let mut done = 0;
+        while done < len {
+            let n = (PAGE_SIZE - (offset + done) % PAGE_SIZE).min(len - done);
+            held.read(offset + done, &mut out[done as usize..(done + n) as usize]);
+            done += n;
+        }
+        held.release(&mut work);
+        out
+    }
+
+    #[test]
+    fn clones_a_range_of_an_object() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(64);
+        let budget = Budget::root();
+        let start = arena.free();
+        let source = MemoryObject::new(None, 4 * PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, PAGE_SIZE, 0x11);
+        // The second page stays zero and the third is written in part.
+        fill(&source, 2 * PAGE_SIZE + 100, 50, 0x33);
+        fill(&source, 3 * PAGE_SIZE, PAGE_SIZE, 0x44);
+        let free = arena.free();
+        let mut work = Work::new(no_preempt);
+        let clone = source
+            .clone_range(PAGE_SIZE, 3 * PAGE_SIZE, 0, &budget, &mut work)
+            .unwrap();
+        // Only the pages with a non-zero byte got a frame.
+        assert_eq!(free - arena.free(), 2);
+        let was = bytes(&source, PAGE_SIZE, 3 * PAGE_SIZE);
+        assert_eq!(bytes(&clone, 0, 3 * PAGE_SIZE), was);
+        assert!(
+            was[PAGE_SIZE as usize + 99..][..51]
+                .iter()
+                .eq([0u8, 0x33].iter().chain([0x33u8; 49].iter()))
+        );
+        // Writes to either object stay in it.
+        fill(&clone, 0, 10, 0x99);
+        fill(&source, PAGE_SIZE + PAGE_SIZE, 10, 0x77);
+        assert_eq!(bytes(&source, PAGE_SIZE, 10), [0u8; 10]);
+        assert_eq!(bytes(&clone, 0, 10), [0x99u8; 10]);
+        assert_eq!(bytes(&clone, PAGE_SIZE, 10), [0u8; 10]);
+        drop((clone, source));
+        assert_eq!(arena.free(), start);
+    }
+
+    #[test]
+    fn refuses_a_clone_outside_the_object() {
+        let _lock = mock::lock();
+        let _arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let source = MemoryObject::new(None, 2 * PAGE_SIZE, 0).unwrap();
+        let mut work = Work::new(no_preempt);
+        let past = source.clone_range(PAGE_SIZE, 2 * PAGE_SIZE, 0, &budget, &mut work);
+        assert_eq!(past.err(), Some(Error::OutOfRange));
     }
 }

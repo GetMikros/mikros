@@ -2274,43 +2274,15 @@ pub fn mem_clone(
         rights |= kernel_core::object::rights::WRITE;
     }
     let source = object::<MemoryObject>(mem);
-    if source.is_physical() || source.is_fixed() {
-        return Err(Error::NotSupported);
-    }
-    source.check_range(offset, len)?;
     let process = current_process()?;
-    let budget = process.budget();
-    let clone = MemoryObject::new(Some(budget), len, options & RESIZABLE)?;
     let mut work = Work::new(crate::sched::preempt_point);
-    // The clone is taken once no output into the source is still to be
-    // written.
-    let held = source.hold_for_read(offset, len, true, Some(budget), &mut work)?;
-    // The bytes are copied at once, in pieces that stay within one page
-    // of each object; pieces that read as zero are left without a frame.
-    let mut piece = [0u8; PAGE_SIZE as usize];
-    let mut done = 0;
-    let mut copied = Ok(());
-    while done < len && copied.is_ok() {
-        let at = offset + done;
-        let n = (PAGE_SIZE - at % PAGE_SIZE)
-            .min(PAGE_SIZE - done % PAGE_SIZE)
-            .min(len - done) as usize;
-        let bytes = &mut piece[..n];
-        held.read(at, bytes);
-        if bytes.iter().any(|&b| b != 0) {
-            let mut rest: &[u8] = bytes;
-            copied = clone.write(done, n as u64, &mut work, |to| {
-                let (now, later) = rest.split_at(to.len());
-                to.copy_from_slice(now);
-                rest = later;
-                Ok(())
-            });
-        }
-        done += n as u64;
-        work.item();
-    }
-    held.release(&mut work);
-    copied?;
+    let clone = source.clone_range(
+        offset,
+        len,
+        options & RESIZABLE,
+        process.budget(),
+        &mut work,
+    )?;
     give_with(clone, rights, out)
 }
 
