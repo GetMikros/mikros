@@ -618,17 +618,19 @@ fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<FileMemory, i64> {
     };
     let execute_flag = if execute { MemoryFlags::EXECUTE.0 } else { 0 };
     let write_flag = if write { MemoryFlags::WRITE.0 } else { 0 };
-    // The private copy that mappings of files asked for before: whole.
-    let private_copy = MemoryFlags::PRIVATE.0 | execute_flag | write_flag;
     let (wanted, clone) = match (private, write, execute) {
         (false, ..) => (execute_flag | write_flag, false),
         (true, true, _) => (execute_flag, true),
-        (true, false, true) => (private_copy, false),
+        // A mapping that can run maps the object that the file's server
+        // knows is run from, so that it keeps the file from changing.
+        (true, false, true) => (execute_flag, false),
         (true, false, false) => (0, false),
     };
-    // Only the file's object for a private mapping that cannot be
-    // written is remembered; a private copy is the mapping's own.
-    let track = private && !write && wanted & MemoryFlags::PRIVATE.0 == 0;
+    // Only the file's object for a private mapping that can neither be
+    // written nor run is remembered, as it can still be made writable: a
+    // private copy is the mapping's own, and one that runs cannot be
+    // written.
+    let track = private && !write && !execute && wanted & MemoryFlags::PRIVATE.0 == 0;
     match ask(wanted) {
         Ok(memory) => Ok(FileMemory {
             memory,
@@ -638,10 +640,13 @@ fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<FileMemory, i64> {
         // A view that cannot give the file's object, which only a private
         // copy of the whole file then replaces.
         Err(FsError::NotSupported) if wanted & MemoryFlags::PRIVATE.0 == 0 && private => {
-            ask(private_copy)
+            // The copy is asked for without `WRITE`, which only a
+            // connection that may write has: a mapping that can be written
+            // clones the pages it maps of the copy.
+            ask(MemoryFlags::PRIVATE.0 | execute_flag)
                 .map(|memory| FileMemory {
                     memory,
-                    clone: false,
+                    clone: write,
                     track: false,
                 })
                 .map_err(errno::from_fs)
@@ -692,10 +697,20 @@ fn mprotect(addr: u64, len: u64, prot: i64) -> i64 {
         Ok(perms) => perms,
         Err(e) => return -e,
     };
-    if perms & PERM_WRITE != 0 {
-        if !addr.is_multiple_of(PAGE_SIZE) {
-            return -EINVAL;
+    if perms & (PERM_WRITE | PERM_EXECUTE) != 0 && !addr.is_multiple_of(PAGE_SIZE) {
+        return -EINVAL;
+    }
+    // A mapping of a file's object that was not asked for to run from
+    // cannot be made to run, as the file could change under it.
+    if perms & PERM_EXECUTE != 0 {
+        let Some(size) = len.checked_next_multiple_of(PAGE_SIZE) else {
+            return -errno::ENOMEM;
+        };
+        if !privmap::within(addr, size).is_empty() {
+            return -EACCES;
         }
+    }
+    if perms & PERM_WRITE != 0 {
         let Some(size) = len.checked_next_multiple_of(PAGE_SIZE) else {
             return -errno::ENOMEM;
         };

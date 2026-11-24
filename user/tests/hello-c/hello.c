@@ -301,6 +301,14 @@ static int files_map(void)
 			&& memcmp(late + 1, GREETING_TEXT + 1, n - 1) == 0
 			&& pread(fd, &first, 1, 0) == 1 && first == 'a';
 	}
+	/* A mapping that can run maps the object that is run from, and one
+	   that cannot is not made to run afterwards. */
+	char *run = mmap(0, n, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
+	ok = ok && run != MAP_FAILED && memcmp(run, GREETING_TEXT, n) == 0
+		&& mprotect(view, 4096, PROT_READ | PROT_EXEC) == -1
+		&& errno == EACCES;
+	if (run != MAP_FAILED)
+		munmap(run, n);
 	munmap(late, 3 * 4096);
 	munmap(view, n);
 	munmap(copy, n);
