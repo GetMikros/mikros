@@ -935,7 +935,9 @@ impl MemoryObject {
                 for (index, phys) in (source_first + from..).zip(found) {
                     if let Err(e) = crate::share::lend(phys, source.budget.as_ref()) {
                         drop(pages);
-                        frames.into_iter().for_each(crate::share::end_lend);
+                        frames
+                            .into_iter()
+                            .for_each(|phys| crate::share::end(phys, crate::share::Kind::Lent));
                         return Err(e);
                     }
                     // The source's slot now has an entry in the table.
@@ -982,7 +984,9 @@ impl MemoryObject {
                     pages.insert_shared(index, phys, page);
                 }
             }
-            unused.into_iter().for_each(crate::share::end_lend);
+            unused
+                .into_iter()
+                .for_each(|phys| crate::share::end(phys, crate::share::Kind::Lent));
             crate::pager::wake(self.header.koid(), from, to);
             refused
         })
@@ -994,7 +998,7 @@ impl MemoryObject {
     /// charged to this object's budget moves instead. `None` without a
     /// frame or a charge for the copy.
     fn movable(&self, phys: u64) -> Option<u64> {
-        if !crate::share::is_lent(phys) {
+        if !crate::share::is_lent(phys) && !crate::share::has_copies(phys) {
             return Some(phys);
         }
         let copy = self.copy_frame(phys).ok()?;
@@ -1349,7 +1353,8 @@ impl MemoryObject {
 
     /// Gives page `index` a frame in place of the shared zero page, and
     /// marks it changing until `settle` has removed the translations of
-    /// the zero page that stood in for it.
+    /// the zero page that stood in for it (a page whose frame is shared
+    /// is marked changing the same way by `break_slot`).
     fn alloc_changing(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
         self.mark(index, index + 1)?;
         self.alloc(pages, index).inspect_err(|_| {
@@ -1384,8 +1389,6 @@ impl MemoryObject {
         old
     }
 
-    // The write paths use this and `break_slot` from the next phase on.
-    #[allow(dead_code)]
     /// Records that the frame `old` is what the change of pages `first` to
     /// `end`, which are marked, left, for `settle` to end the use of.
     fn leave(&self, first: u64, end: u64, old: Frame) {
@@ -1408,8 +1411,15 @@ impl MemoryObject {
         }
     }
 
-    // See `leave`.
-    #[allow(dead_code)]
+    /// Whether a write to page `index`, which has the frame `phys`, needs
+    /// a frame of its own, because slots of objects made by `mem_clone`
+    /// still see the bytes of this one. A slot that was never marked
+    /// shared is not looked up in the table, and a paged object's pages
+    /// come from its pager. The pages are locked.
+    fn needs_copy(&self, pages: &Pages, index: u64, phys: u64) -> bool {
+        self.paged.is_none() && pages.is_shared(index) && crate::share::has_copies(phys)
+    }
+
     /// Gives page `index`, whose frame is shared, a frame of its own with
     /// the same bytes, charged as any frame of the pages is, and marks the
     /// page changing until `settle` has removed the translations of the
@@ -1418,6 +1428,7 @@ impl MemoryObject {
     /// Fails, changing nothing, with `NoMemory` or `NoResources`. The
     /// pages are locked.
     fn break_slot(&self, pages: &mut Pages, index: u64) -> Result<(), Error> {
+        debug_assert!(self.paged.is_none(), "only anonymous pages are copied here");
         let old = pages
             .frame(index)
             .expect("the page of a shared frame has one");
@@ -1562,6 +1573,17 @@ impl MemoryObject {
         }
         let (phys, writable) = match (self.physical, pages.frame(index)) {
             (Some((base, _)), _) => (base + index * PAGE_SIZE, perms & PERM_WRITE != 0),
+            (None, Some(phys)) if self.needs_copy(&pages, index, phys) => {
+                // A store gets a frame of its own, and a load maps the
+                // shared one so that the next store faults.
+                if write {
+                    return match self.break_slot(&mut pages, index) {
+                        Ok(()) => Fault::Changed(index),
+                        Err(_) => Fault::OutOfMemory,
+                    };
+                }
+                (phys, false)
+            }
             (None, Some(phys)) => (phys, perms & PERM_WRITE != 0),
             // The page is entered once the zero page is gone everywhere.
             (None, None) if write => match self.alloc_changing(&mut pages, index) {
@@ -1715,6 +1737,12 @@ impl MemoryObject {
             self.settle(index, index + 1);
             return Ok(None);
         };
+        if write && self.needs_copy(&pages, index, phys) {
+            self.break_slot(&mut pages, index)?;
+            drop(pages);
+            self.settle(index, index + 1);
+            return Ok(None);
+        }
         pages.pin();
         Ok(Some(Held {
             mem: self.clone(),
@@ -1946,7 +1974,7 @@ impl MemoryObject {
                             charges.remove(&phys);
                         }
                         drop(charges);
-                        give[i] = match crate::share::release(phys, true) {
+                        give[i] = match crate::share::release(phys, crate::share::Kind::Lent) {
                             Released::Last(page) => Give::Last { page, entry: None },
                             _ => Give::Nothing,
                         };
@@ -1959,7 +1987,10 @@ impl MemoryObject {
                 // The slot's entry was charged to the budget the frame was
                 // supplied with, or else to this object's.
                 let entry = supplied.clone().unwrap_or_else(|| self.budget.clone());
-                give[i] = match (crate::share::release(phys, false), supplied) {
+                give[i] = match (
+                    crate::share::release(phys, crate::share::Kind::Owner),
+                    supplied,
+                ) {
                     (Released::Alone, Some(budget)) => Give::Supplied(budget),
                     (Released::Alone, None) => Give::Own,
                     // The slot's entry goes with it, and its page stays.
@@ -2056,6 +2087,12 @@ impl MemoryObject {
                         state.written(index)?;
                         phys
                     }
+                    (None, Some(phys)) if self.needs_copy(&pages, index, phys) => {
+                        self.break_slot(&mut pages, index)?;
+                        drop(pages);
+                        self.settle(index, index + 1);
+                        continue;
+                    }
                     (None, Some(phys)) => phys,
                     (None, None) => {
                         self.alloc_changing(&mut pages, index)?;
@@ -2138,12 +2175,38 @@ impl MemoryObject {
     pub fn set_size(&self, size: u64) -> Result<(), Error> {
         self.check_revoked()?;
         let mut pages = loop {
-            let pages = self.pages.lock();
-            if !pages.trimming() {
-                break pages;
+            let mut pages = self.pages.lock();
+            if pages.trimming() {
+                drop(pages);
+                crate::sched::yield_now();
+                continue;
             }
-            drop(pages);
-            crate::sched::yield_now();
+            // The bytes of the last page past a smaller size are zeroed
+            // in place, which a frame that slots of other objects see too
+            // must not be: it gets a frame of its own first, once the
+            // shrink is known to be allowed.
+            let shrinks = size != 0
+                && size < pages.size()
+                && pages.options() & RESIZABLE != 0
+                && self.seals() & SEAL_SHRINK == 0;
+            let tail = size / PAGE_SIZE;
+            match pages.frame(tail) {
+                Some(phys)
+                    if shrinks
+                        && !size.is_multiple_of(PAGE_SIZE)
+                        && self.needs_copy(&pages, tail, phys) =>
+                {
+                    if self.is_changing(tail) {
+                        drop(pages);
+                        self.wait_settled(tail)?;
+                    } else {
+                        self.break_slot(&mut pages, tail)?;
+                        drop(pages);
+                        self.settle(tail, tail + 1);
+                    }
+                }
+                _ => break pages,
+            }
         };
         let seals = self.seals();
         let refused = if size < pages.size() {
@@ -2646,7 +2709,7 @@ mod tests {
         assert_eq!(arena.free(), start - 1);
         assert_eq!(budget.usage(), (0, 1));
         // The lend ends: the frame is freed and the page given back.
-        crate::share::end_lend(phys);
+        crate::share::end(phys, crate::share::Kind::Lent);
         assert_eq!(arena.free(), start);
         assert_eq!(budget.usage(), (0, 0));
     }
@@ -2661,7 +2724,7 @@ mod tests {
         fill(&object, 0, PAGE_SIZE, 1);
         let phys = object.pages.lock().frame(0).unwrap();
         crate::share::lend(phys, Some(&budget)).unwrap();
-        crate::share::end_lend(phys);
+        crate::share::end(phys, crate::share::Kind::Lent);
         assert_eq!(arena.free(), start - 1);
         drop(object);
         assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
@@ -2783,7 +2846,8 @@ mod tests {
         // Writes to the page no longer reach the shared frame.
         fill(&object, 0, 8, 0xff);
         assert!(crate::share::is_lent(shared));
-        crate::share::end_lend(shared);
+        assert_eq!(frame_head(shared, 8), alloc::vec![0x3c; 8]);
+        crate::share::end(shared, crate::share::Kind::Lent);
         assert_eq!(arena.free(), start - 1);
         assert_eq!(budget.usage().1, 1);
         drop(object);
@@ -2806,7 +2870,7 @@ mod tests {
         assert!(!object.is_changing(0));
         assert_eq!((arena.free(), budget.usage()), (start, used));
         budget.set_limits(u64::MAX, u64::MAX);
-        crate::share::end_lend(shared);
+        crate::share::end(shared, crate::share::Kind::Lent);
     }
 
     #[test]
@@ -2824,7 +2888,7 @@ mod tests {
         drop(pages);
         assert!(!object.is_changing(0));
         assert_eq!(budget.usage(), used);
-        crate::share::end_lend(shared);
+        crate::share::end(shared, crate::share::Kind::Lent);
     }
 
     #[test]
@@ -2844,10 +2908,141 @@ mod tests {
         assert_eq!(arena.free(), start - 2);
         let mut work = Work::new(no_preempt);
         object.unpin(&mut work);
-        crate::share::end_lend(shared);
+        crate::share::end(shared, crate::share::Kind::Lent);
         assert_eq!(arena.free(), start - 1);
         drop(object);
         assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
+    }
+
+    /// An object of one filled page whose frame a clone's slot shares,
+    /// which `share::copy` records as the clone's creation will, and that
+    /// frame.
+    fn copied_page(budget: &Arc<Budget>) -> (Arc<MemoryObject>, u64) {
+        let object = MemoryObject::new(Some(budget), PAGE_SIZE, 0).unwrap();
+        fill(&object, 0, PAGE_SIZE, 0x3c);
+        let mut pages = object.pages.lock();
+        let phys = pages.frame(0).unwrap();
+        crate::share::copy(phys, Some(budget)).unwrap();
+        pages.mark_shared(0);
+        drop(pages);
+        (object, phys)
+    }
+
+    /// The first `n` bytes of the frame `phys`.
+    fn frame_head(phys: u64, n: usize) -> Vec<u8> {
+        // SAFETY: the frame is allocated in the arena.
+        let frame = unsafe { frame_bytes(phys) };
+        frame[..n].to_vec()
+    }
+
+    #[test]
+    fn writes_a_page_that_a_clone_shares_to_a_frame_of_its_own() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let start = arena.free();
+        let (object, shared) = copied_page(&budget);
+        fill(&object, 10, 20, 0x99);
+        let mine = object.pages.lock().frame(0).unwrap();
+        assert_ne!(mine, shared);
+        // The clone's frame keeps the bytes it had.
+        assert_eq!(frame_head(shared, 40), alloc::vec![0x3c; 40]);
+        let own = frame_head(mine, 40);
+        assert!(own[..10].iter().all(|&b| b == 0x3c));
+        assert!(own[10..30].iter().all(|&b| b == 0x99));
+        assert!(own[30..].iter().all(|&b| b == 0x3c));
+        // A second write stays in the frame the object has.
+        fill(&object, 0, 4, 1);
+        assert_eq!(object.pages.lock().frame(0), Some(mine));
+        crate::share::end(shared, crate::share::Kind::Copy);
+        drop(object);
+        assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
+    }
+
+    #[test]
+    fn writes_a_lent_page_in_place() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let (object, shared) = shared_page(&budget);
+        let start = arena.free();
+        fill(&object, 0, 8, 0x11);
+        // The lenders and the owner are one object, which sees the write.
+        assert_eq!(object.pages.lock().frame(0), Some(shared));
+        assert_eq!(frame_head(shared, 8), alloc::vec![0x11; 8]);
+        assert_eq!(arena.free(), start);
+        crate::share::end(shared, crate::share::Kind::Lent);
+    }
+
+    #[test]
+    fn zeroes_the_tail_of_a_page_a_clone_shares_in_a_frame_of_its_own() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let start = arena.free();
+        let object = MemoryObject::new(Some(&budget), PAGE_SIZE, RESIZABLE).unwrap();
+        fill(&object, 0, PAGE_SIZE, 0x3c);
+        let shared = {
+            let mut pages = object.pages.lock();
+            let phys = pages.frame(0).unwrap();
+            crate::share::copy(phys, Some(&budget)).unwrap();
+            pages.mark_shared(0);
+            phys
+        };
+        object.set_size(100).unwrap();
+        let mine = object.pages.lock().frame(0).unwrap();
+        assert_ne!(mine, shared);
+        // The clone still sees every byte, and the object only the head.
+        assert!(
+            frame_head(shared, PAGE_SIZE as usize)
+                .iter()
+                .all(|&b| b == 0x3c)
+        );
+        let own = frame_head(mine, PAGE_SIZE as usize);
+        assert!(own[..100].iter().all(|&b| b == 0x3c));
+        assert!(own[100..].iter().all(|&b| b == 0));
+        crate::share::end(shared, crate::share::Kind::Copy);
+        drop(object);
+        assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
+    }
+
+    #[test]
+    fn leaves_a_shared_page_alone_when_the_shrink_is_refused() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let object = MemoryObject::new(Some(&budget), PAGE_SIZE, RESIZABLE).unwrap();
+        fill(&object, 0, PAGE_SIZE, 0x3c);
+        let shared = {
+            let mut pages = object.pages.lock();
+            let phys = pages.frame(0).unwrap();
+            crate::share::copy(phys, Some(&budget)).unwrap();
+            pages.mark_shared(0);
+            phys
+        };
+        object.seal(SEAL_SHRINK).unwrap();
+        let (free, used) = (arena.free(), budget.usage());
+        assert_eq!(object.set_size(100), Err(Error::AccessDenied));
+        assert_eq!(object.pages.lock().frame(0), Some(shared));
+        assert_eq!((arena.free(), budget.usage()), (free, used));
+        crate::share::end(shared, crate::share::Kind::Copy);
+    }
+
+    #[test]
+    fn zeroes_the_tail_of_an_unshared_page_in_place() {
+        let _lock = mock::lock();
+        let _arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let object = MemoryObject::new(Some(&budget), PAGE_SIZE, RESIZABLE).unwrap();
+        fill(&object, 0, PAGE_SIZE, 0x3c);
+        let frame = object.pages.lock().frame(0).unwrap();
+        object.set_size(100).unwrap();
+        assert_eq!(object.pages.lock().frame(0), Some(frame));
+        assert!(
+            frame_head(frame, PAGE_SIZE as usize)[100..]
+                .iter()
+                .all(|&b| b == 0)
+        );
     }
 
     #[test]
