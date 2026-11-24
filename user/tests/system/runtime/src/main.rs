@@ -30,6 +30,10 @@ fn main(m: &Managed) -> i64 {
             ("heap_allocates_and_frees", heap_allocates_and_frees),
             ("midl_bindings_on_channels", midl_bindings_on_channels),
             (
+                "channel_read_takes_every_size",
+                channel_read_takes_every_size,
+            ),
+            (
                 "executor_waits_on_objects",
                 executor::executor_waits_on_objects,
             ),
@@ -242,4 +246,63 @@ fn midl_bindings_on_channels(s: &Own) -> Result {
     )?;
     // SAFETY: closing takes no pointers.
     check("closing the thread", unsafe { sys::handle_close(thread) })
+}
+
+/// `channel_read` returns messages of every size, up to the largest with
+/// all its handles, in order, and reports an empty queue and a closed
+/// peer, the same as before it read into kept buffers.
+fn channel_read_takes_every_size(_: &Own) -> Result {
+    use alloc::vec::Vec;
+    use mikros_rt::midl::SHOULD_WAIT;
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the pointers are valid for the call.
+    check("creating a channel", unsafe {
+        sys::channel_create(0, &mut a, &mut b)
+    })?;
+    let pattern = |len: usize| (0..len).map(|i| (i % 251) as u8).collect::<Vec<u8>>();
+    for (len, handles) in [(0usize, 0usize), (1, 0), (2049, 3), (65536, 64)] {
+        let bytes = pattern(len);
+        let mut sent = Vec::new();
+        for _ in 0..handles {
+            let mut event = 0;
+            // SAFETY: the pointer is valid for the call.
+            check("creating an event", unsafe {
+                sys::event_create(0, &mut event)
+            })?;
+            sent.push(event);
+        }
+        // SAFETY: the pointers and lengths describe the vectors.
+        check("writing", unsafe {
+            sys::channel_write(a, bytes.as_ptr(), len as u64, sent.as_ptr(), handles as u64)
+        })?;
+        let Ok((got, got_handles)) = mikros_rt::midl::channel_read(b) else {
+            return ensure("reading a message", false);
+        };
+        ensure("reading the bytes", got == bytes)?;
+        ensure("reading the handles", got_handles.len() == handles)?;
+        for handle in got_handles {
+            // SAFETY: closing takes no pointers.
+            unsafe { sys::handle_close(handle) };
+        }
+    }
+    ensure(
+        "reading an empty queue",
+        mikros_rt::midl::channel_read(b) == Err(SHOULD_WAIT),
+    )?;
+    // Many reads in a row, each of which must give its slot back.
+    for _ in 0..64 {
+        ensure(
+            "polling an empty queue",
+            mikros_rt::midl::channel_read(b) == Err(SHOULD_WAIT),
+        )?;
+    }
+    // SAFETY: closing takes no pointers.
+    unsafe { sys::handle_close(a) };
+    ensure(
+        "reading from a closed peer",
+        mikros_rt::midl::channel_read(b).is_err_and(|s| s != SHOULD_WAIT),
+    )?;
+    // SAFETY: closing takes no pointers.
+    unsafe { sys::handle_close(b) };
+    Ok(())
 }

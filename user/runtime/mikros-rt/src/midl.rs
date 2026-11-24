@@ -110,9 +110,69 @@ pub fn channel_write(channel: u32, bytes: &[u8], handles: &[u32]) -> Result<(), 
     status(s)
 }
 
-/// Reads the oldest message into buffers of its size, so that small
-/// messages can be read before the allocator can map memory.
+/// Reads the oldest message. It is read at once into the kept buffers of
+/// the largest message, which `channel_call` uses too, and copied out to
+/// buffers of its size; asking the kernel for the size first costs a
+/// system call more for each message. When every slot is in use, the
+/// size is asked for first.
 pub fn channel_read(channel: u32) -> Result<(Vec<u8>, Vec<u32>), i32> {
+    // Only a kept slot is worth it: buffers made for the read alone would
+    // be mapped and unmapped for each message.
+    let Some(lease) = lease_slot() else {
+        return channel_read_sized(channel);
+    };
+    let reply = lease.buffers;
+    // SAFETY: the lease owns the buffers, which are big enough.
+    let (reply_bytes, reply_handles) = unsafe {
+        (
+            core::ptr::addr_of_mut!((*reply).bytes).cast::<u8>(),
+            core::ptr::addr_of_mut!((*reply).handles).cast::<Handle>(),
+        )
+    };
+    let (mut len, mut count) = (0u64, 0u64);
+    // SAFETY: the pointers and capacities describe the buffers.
+    let s = unsafe {
+        sys::channel_read(
+            channel,
+            reply_bytes,
+            BYTES_MAX as u64,
+            reply_handles,
+            HANDLES_MAX as u64,
+            &mut len,
+            &mut count,
+        )
+    };
+    let message = if s == 0 {
+        // SAFETY: the call stored `len` bytes and `count` handles.
+        Some(unsafe {
+            (
+                core::slice::from_raw_parts(reply_bytes, len as usize).to_vec(),
+                core::slice::from_raw_parts(reply_handles, count as usize).to_vec(),
+            )
+        })
+    } else {
+        None
+    };
+    if s == 0 {
+        release(lease);
+    } else {
+        // Nothing was read, which a poll of an empty queue does often: the
+        // slot is only given back, without the bookkeeping of a use.
+        release_unused(lease);
+    }
+    match message {
+        Some(message) => Ok(message),
+        // A message beyond the largest size cannot be queued, but one that
+        // is gets buffers of its own size.
+        None if s == BUFFER_TOO_SMALL => channel_read_sized(channel),
+        None => Err(s as i32),
+    }
+}
+
+/// Reads the oldest message into buffers of its size, which the kernel
+/// reports when it does not fit the buffers given, so that messages can be
+/// read when the kept buffers cannot be had.
+fn channel_read_sized(channel: u32) -> Result<(Vec<u8>, Vec<u32>), i32> {
     let (mut len, mut count) = (0u64, 0u64);
     loop {
         let mut bytes = vec![0u8; len as usize];
@@ -219,8 +279,8 @@ struct Lease {
 }
 
 /// Takes the buffers of a free slot, made when the slot has none, or
-/// buffers of the call's own: none when the memory is not there.
-fn lease() -> Option<Lease> {
+/// `None` when every slot is in use or the memory is not there.
+fn lease_slot() -> Option<Lease> {
     for (at, slot) in SLOTS_KEPT.iter().enumerate() {
         if slot
             .busy
@@ -244,12 +304,30 @@ fn lease() -> Option<Lease> {
             buffers,
         });
     }
-    // SAFETY: the layout is not empty.
-    let buffers: *mut Reply = unsafe { alloc(reply_layout()) }.cast();
-    (!buffers.is_null()).then_some(Lease {
-        slot: None,
-        buffers,
+    None
+}
+
+/// Takes the buffers of a free slot, or buffers of the call's own when the
+/// slots are all in use: none when the memory is not there.
+fn lease() -> Option<Lease> {
+    lease_slot().or_else(|| {
+        // SAFETY: the layout is not empty.
+        let buffers: *mut Reply = unsafe { alloc(reply_layout()) }.cast();
+        (!buffers.is_null()).then_some(Lease {
+            slot: None,
+            buffers,
+        })
     })
+}
+
+/// Gives the buffers of a lease that nothing used back, without counting
+/// it as a use.
+fn release_unused(lease: Lease) {
+    match lease.slot {
+        Some(at) => SLOTS_KEPT[at].busy.store(false, Ordering::Release),
+        // SAFETY: the buffers came from `alloc` with this layout.
+        None => unsafe { dealloc(lease.buffers.cast(), reply_layout()) },
+    }
 }
 
 /// Gives the buffers back. A slot keeps its buffers for the next call,
