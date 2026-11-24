@@ -131,11 +131,11 @@ fn heap_allocates_and_frees(_: &Own) -> Result {
             what: "making a layout",
             status: 0,
         })?;
+        // The optimizer takes an allocation that is only compared with
+        // null for one that succeeds, unless the pointer is hidden.
         // SAFETY: the layout has a size above zero.
-        ensure(
-            "refusing an alignment above a page",
-            unsafe { alloc(layout) }.is_null(),
-        )?;
+        let refused = core::hint::black_box(unsafe { alloc(layout) });
+        ensure("refusing an alignment above a page", refused.is_null())?;
         // More freed blocks of one class than are kept: the rest is
         // unmapped, and every block is still served.
         let layout = Layout::from_size_align(16 * 1024, 8).map_err(|_| mikros_test::Failure {
