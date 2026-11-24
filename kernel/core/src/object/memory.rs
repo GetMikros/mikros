@@ -45,17 +45,46 @@ pub const CLONE_WRITE: u32 = 1 << 1;
 /// tree and that entry's share of the tree's nodes.
 pub const PAGE_ENTRY_COST: u64 = 2 * size_of::<(u64, u64)>() as u64;
 
+/// The bit of a recorded frame that says more than one use refers to it.
+/// Frames are page aligned, so the lowest bit is free.
+const SHARED: u64 = 1;
+
+/// A frame that left the pages of an object, with whether it was shared
+/// when it left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frame(u64);
+
+impl Frame {
+    /// A frame that no other use refers to.
+    pub fn private(phys: u64) -> Frame {
+        debug_assert!(phys & SHARED == 0, "frames are page aligned");
+        Frame(phys)
+    }
+
+    /// The address of the frame.
+    pub fn phys(self) -> u64 {
+        self.0 & !SHARED
+    }
+
+    /// Whether the slot it came from was marked shared.
+    pub fn is_shared(self) -> bool {
+        self.0 & SHARED != 0
+    }
+}
+
 /// The pages of an anonymous memory object.
 pub struct Pages {
     size: u64,
     options: u32,
-    /// The frame of each page that has one, by page index.
-    frames: Map<u64, u64>,
+    /// The frame of each page that has one, by page index, with the
+    /// `SHARED` bit when the frame has an entry in the table of shared
+    /// frames: an unmarked slot's frame is used by no other.
+    frames: Map<u64, Frame>,
     /// How many retained writers or readers may still use frames that
     /// were taken from the pages.
     pins: u64,
     /// Frames taken from the pages while pinned, freed once unpinned.
-    orphans: Vec<u64>,
+    orphans: Vec<Frame>,
     /// Whether the frames of a shrink are still being removed, during
     /// which the size does not change again.
     trimming: bool,
@@ -69,7 +98,7 @@ pub struct Resized {
     /// The frames of the pages past the new size, by page index, which
     /// left the pages. While the pages are pinned, the caller keeps them
     /// with `orphan`; otherwise it frees them.
-    pub removed: Map<u64, u64>,
+    pub removed: Map<u64, Frame>,
 }
 
 /// Fails with `OutOfRange` unless `size` is not zero and at most `max`.
@@ -125,27 +154,64 @@ impl Pages {
         }
     }
 
-    /// The frame of page `index`, if it has one.
     /// Whether `test` holds for the frame of some page.
     pub fn any_frame(&self, test: impl Fn(u64) -> bool) -> bool {
-        self.frames.values().any(|&phys| test(phys))
+        self.frames.values().any(|frame| test(frame.phys()))
     }
 
+    /// The frame of page `index`, if it has one.
     pub fn frame(&self, index: u64) -> Option<u64> {
-        self.frames.get(&index).copied()
+        self.frames.get(&index).map(|frame| frame.phys())
+    }
+
+    /// Whether page `index` has a frame that is marked shared.
+    pub fn is_shared(&self, index: u64) -> bool {
+        self.frames
+            .get(&index)
+            .is_some_and(|frame| frame.is_shared())
+    }
+
+    /// Marks the frame of page `index`, which has one, as shared.
+    pub fn mark_shared(&mut self, index: u64) {
+        let slot = self.frames.get_mut(&index);
+        debug_assert!(slot.is_some(), "page {index} has no frame");
+        if let Some(slot) = slot {
+            slot.0 |= SHARED;
+        }
     }
 
     /// Records `phys` as the frame of page `index`, which is inside the
     /// object and has none, using the room of `claim`.
     pub fn insert(&mut self, index: u64, phys: u64, claim: Claim) {
         debug_assert!(index < self.count());
-        let old = self.frames.insert(index, phys);
+        debug_assert!(phys & SHARED == 0, "frames are page aligned");
+        let old = self.frames.insert(index, Frame::private(phys));
         debug_assert!(old.is_none(), "page {index} already has a frame");
         drop(claim);
     }
 
+    /// Records `phys`, a frame that is already shared, as the frame of
+    /// page `index`, as `insert` does.
+    pub fn insert_shared(&mut self, index: u64, phys: u64, claim: Claim) {
+        self.insert(index, phys, claim);
+        self.mark_shared(index);
+    }
+
+    /// Makes `phys` the frame of page `index`, which has one, marked
+    /// shared or not, and returns the frame it had. It needs no room.
+    pub fn replace(&mut self, index: u64, phys: u64, shared: bool) -> Frame {
+        debug_assert!(phys & SHARED == 0, "frames are page aligned");
+        let slot = self
+            .frames
+            .get_mut(&index)
+            .expect("the page of a replaced frame has one");
+        let old = *slot;
+        *slot = Frame(phys | if shared { SHARED } else { 0 });
+        old
+    }
+
     /// Takes every frame, by page index. Nothing may be pinned.
-    pub fn take_all(&mut self) -> Map<u64, u64> {
+    pub fn take_all(&mut self) -> Map<u64, Frame> {
         debug_assert!(self.pins == 0 && self.orphans.is_empty());
         core::mem::replace(&mut self.frames, nodes::map())
     }
@@ -160,12 +226,12 @@ impl Pages {
         self.trimming = trimming;
     }
 
-    /// Keeps `phys`, a frame that left the pages, until the last `unpin`,
-    /// or fails with `NoMemory` without room for it.
-    pub fn orphan(&mut self, phys: u64) -> Result<(), Error> {
+    /// Keeps `frame`, which left the pages, until the last `unpin`, or
+    /// fails with `NoMemory` without room for it.
+    pub fn orphan(&mut self, frame: Frame) -> Result<(), Error> {
         debug_assert!(self.pins > 0);
         self.orphans.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        self.orphans.push(phys);
+        self.orphans.push(frame);
         Ok(())
     }
 
@@ -181,7 +247,7 @@ impl Pages {
     }
 
     /// Ends one `pin`, and returns the frames to free once none is left.
-    pub fn unpin(&mut self) -> Vec<u64> {
+    pub fn unpin(&mut self) -> Vec<Frame> {
         debug_assert!(self.pins > 0, "unpinned more than pinned");
         self.pins -= 1;
         if self.pins == 0 {
@@ -218,7 +284,7 @@ impl Pages {
     /// pinned they are kept until `unpin` instead. Fails with `NoMemory`,
     /// taking nothing, without room for the frames. The frames keep their
     /// charges until they are freed, so those cover the room.
-    pub fn decommit(&mut self, first: u64, end: u64) -> Result<Vec<u64>, Error> {
+    pub fn decommit(&mut self, first: u64, end: u64) -> Result<Vec<Frame>, Error> {
         let count = self.frames.range(first..end).count();
         let mut taken = Vec::new();
         let list = if self.pins > 0 {
@@ -230,7 +296,7 @@ impl Pages {
         list.extend(
             self.frames
                 .extract_if(first..end, |_, _| true)
-                .map(|(_, phys)| phys),
+                .map(|(_, frame)| frame),
         );
         Ok(taken)
     }
@@ -277,13 +343,17 @@ mod tests {
         pages.insert(index, phys, nodes::claim_insert().unwrap());
     }
 
+    fn physs(frames: impl IntoIterator<Item = Frame>) -> Vec<u64> {
+        frames.into_iter().map(Frame::phys).collect()
+    }
+
     #[test]
     fn decommits_ranges() {
         let mut pages = Pages::new(4 * PAGE_SIZE, 0, MAX).unwrap();
         for i in 0..4 {
             put(&mut pages, i, 0x1000 * (i + 1));
         }
-        assert_eq!(pages.decommit(1, 3).unwrap(), [0x2000, 0x3000]);
+        assert_eq!(physs(pages.decommit(1, 3).unwrap()), [0x2000, 0x3000]);
         assert_eq!(
             (pages.frame(0), pages.frame(1), pages.frame(3)),
             (Some(0x1000), None, Some(0x4000))
@@ -291,7 +361,7 @@ mod tests {
         pages.pin();
         assert!(pages.decommit(0, 4).unwrap().is_empty());
         assert_eq!(pages.allocated(), 0);
-        assert_eq!(pages.unpin(), [0x1000, 0x4000]);
+        assert_eq!(physs(pages.unpin()), [0x1000, 0x4000]);
     }
 
     #[test]
@@ -314,8 +384,8 @@ mod tests {
         assert_eq!(
             resized
                 .removed
-                .clone()
-                .into_iter()
+                .iter()
+                .map(|(&index, frame)| (index, frame.phys()))
                 .collect::<std::vec::Vec<_>>(),
             [(2, 0x3000), (3, 0x4000)]
         );
@@ -335,12 +405,12 @@ mod tests {
             let indices: Vec<u64> = removed.keys().copied().collect();
             // As the object does: frames leaving while pinned are kept.
             let freed: Vec<u64> = if pages.pinned() {
-                for &phys in removed.values() {
-                    pages.orphan(phys).unwrap();
+                for &frame in removed.values() {
+                    pages.orphan(frame).unwrap();
                 }
                 Vec::new()
             } else {
-                removed.into_values().collect()
+                physs(removed.into_values())
             };
             (indices, freed)
         };
@@ -351,11 +421,53 @@ mod tests {
         assert_eq!(shrink(&mut pages, PAGE_SIZE), (vec![1, 2, 3], vec![]));
         assert_eq!(pages.allocated(), 1);
         assert!(pages.unpin().is_empty());
-        assert_eq!(pages.unpin(), [0x4000, 0x2000, 0x3000, 0x9000]);
+        assert_eq!(physs(pages.unpin()), [0x4000, 0x2000, 0x3000, 0x9000]);
         pages.set_size(2 * PAGE_SIZE, MAX).unwrap();
         put(&mut pages, 1, 0xa000);
         assert_eq!(shrink(&mut pages, PAGE_SIZE), (vec![1], vec![0xa000]));
         assert_eq!((pages.pins, pages.orphans.len()), (0, 0));
+    }
+
+    #[test]
+    fn marks_frames_as_shared() {
+        let mut pages = Pages::new(4 * PAGE_SIZE, RESIZABLE, MAX).unwrap();
+        put(&mut pages, 0, 0x1000);
+        pages.insert_shared(1, 0x2000, nodes::claim_insert().unwrap());
+        put(&mut pages, 2, 0x3000);
+        // The mark does not change the address.
+        assert_eq!(
+            (pages.frame(0), pages.frame(1)),
+            (Some(0x1000), Some(0x2000))
+        );
+        assert!(!pages.is_shared(0) && pages.is_shared(1) && !pages.is_shared(3));
+        pages.mark_shared(0);
+        assert!(pages.is_shared(0) && pages.frame(0) == Some(0x1000));
+        assert!(pages.any_frame(|phys| phys == 0x2000));
+        // A replaced frame returns the old one with its mark.
+        let old = pages.replace(1, 0x7000, false);
+        assert_eq!((old.phys(), old.is_shared()), (0x2000, true));
+        assert_eq!((pages.frame(1), pages.is_shared(1)), (Some(0x7000), false));
+        let old = pages.replace(2, 0x8000, true);
+        assert_eq!((old.phys(), old.is_shared()), (0x3000, false));
+        assert!(pages.is_shared(2));
+        // Frames leave with the mark they had, taken out or shrunk away.
+        let taken = pages.decommit(0, 1).unwrap();
+        assert_eq!((taken[0].phys(), taken[0].is_shared()), (0x1000, true));
+        let resized = pages.set_size(2 * PAGE_SIZE, MAX).unwrap();
+        let left = resized.removed[&2];
+        assert_eq!((left.phys(), left.is_shared()), (0x8000, true));
+        pages.pin();
+        assert_eq!(pages.decommit(1, 2).unwrap().len(), 0);
+        pages.orphan(left).unwrap();
+        let kept = pages.unpin();
+        assert_eq!(kept.len(), 2);
+        assert!(!kept[0].is_shared() && kept[1].is_shared());
+        let all = {
+            put(&mut pages, 0, 0x4000);
+            pages.mark_shared(0);
+            pages.take_all()
+        };
+        assert!(all[&0].is_shared() && all[&0].phys() == 0x4000);
     }
 
     #[test]

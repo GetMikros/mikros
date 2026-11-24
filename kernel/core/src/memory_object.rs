@@ -9,9 +9,9 @@ use crate::publish::{ITEM_STEP, Work};
 use crate::nodes::{self, Map};
 use crate::object::budget::{Budget, Scratch};
 use crate::object::memory::{
-    INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_CONTIGUOUS, KIND_PAGED, KIND_PHYSICAL, KIND_PINNED,
-    PAGE_ENTRY_COST, PAGE_SIZE, Pages, RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE,
-    SEALS, STABLE, TRACK_DIRTY,
+    Frame, INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_CONTIGUOUS, KIND_PAGED, KIND_PHYSICAL,
+    KIND_PINNED, PAGE_ENTRY_COST, PAGE_SIZE, Pages, RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK,
+    SEAL_WRITE, SEALS, STABLE, TRACK_DIRTY,
 };
 use crate::object::{Header, Object, ObjectType};
 use crate::paging::{Absent, Paging};
@@ -744,7 +744,7 @@ impl MemoryObject {
                 for (index, taken) in (from..).zip(moved) {
                     // A frame that pages use as a lent frame stays with
                     // them, and a copy moves instead.
-                    let Some(phys) = source.movable(taken) else {
+                    let Some(phys) = source.movable(taken.phys()) else {
                         leftover.push(taken);
                         refused = Err(Error::NoMemory);
                         continue;
@@ -769,7 +769,7 @@ impl MemoryObject {
                         drop(charge);
                         pages.insert(index, phys, page);
                     } else {
-                        leftover.push(phys);
+                        leftover.push(Frame::private(phys));
                     }
                 }
             }
@@ -920,7 +920,7 @@ impl MemoryObject {
         if !crate::lend::orphan(phys, self.budget.as_ref()) {
             // The last lend ended meanwhile, so the frame is this
             // object's to free.
-            self.free([phys]);
+            self.free([Frame::private(phys)]);
         }
         Some(copy)
     }
@@ -929,7 +929,7 @@ impl MemoryObject {
     /// out of the object without freeing them or releasing their charges,
     /// and removes their translations. Fails with `BadState` while a
     /// reader or writer holds the object's frames.
-    fn take_frames(&self, offset: u64, len: u64) -> Result<Vec<u64>, Error> {
+    fn take_frames(&self, offset: u64, len: u64) -> Result<Vec<Frame>, Error> {
         let mut pages = self.pages.lock();
         if pages.pinned() {
             return Err(Error::BadState);
@@ -1013,7 +1013,9 @@ impl MemoryObject {
                     Ok(claim) => pages.insert(index as u64, phys, claim),
                     Err(e) => {
                         drop(pages);
-                        object.free((index as u64..count).map(|i| first + i * PAGE_SIZE));
+                        object.free(
+                            (index as u64..count).map(|i| Frame::private(first + i * PAGE_SIZE)),
+                        );
                         return Err(e);
                     }
                 }
@@ -1203,7 +1205,7 @@ impl MemoryObject {
                     // The object frees the frames it took, and the rest
                     // go back here.
                     drop(pages);
-                    object.free(frames[at..].iter().map(|&(_, phys)| phys));
+                    object.free(frames[at..].iter().map(|&(_, phys)| Frame::private(phys)));
                     return Err(e);
                 }
             }
@@ -1744,7 +1746,7 @@ impl MemoryObject {
     /// When no lock is held, as when an object is destroyed by closing
     /// its last handle, a reschedule check follows every `ITEM_STEP`
     /// frames.
-    fn free(&self, frames: impl IntoIterator<Item = u64>) {
+    fn free(&self, frames: impl IntoIterator<Item = Frame>) {
         const BATCH: usize = 64;
         let mut frames = frames.into_iter();
         let mut count = 0;
@@ -1756,8 +1758,8 @@ impl MemoryObject {
             }
             let mut batch = [0u64; BATCH];
             let mut len = 0;
-            for (slot, phys) in batch.iter_mut().zip(frames.by_ref()) {
-                *slot = phys;
+            for (slot, frame) in batch.iter_mut().zip(frames.by_ref()) {
+                *slot = frame.phys();
                 len += 1;
             }
             if len == 0 {
