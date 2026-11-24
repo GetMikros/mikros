@@ -28,8 +28,19 @@ const PAGE: u64 = 4096;
 
 type Reply<T> = Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>;
 
+#[track_caller]
 pub fn ok<T>(reply: Reply<T>) -> Option<T> {
-    reply.ok()?.ok()
+    let value = reply.ok().and_then(Result::ok);
+    if value.is_none() {
+        let at = core::panic::Location::caller();
+        mikros_rt::log!(
+            Error,
+            "test-driver: a call failed at {}:{}",
+            at.file(),
+            at.line()
+        );
+    }
+    value
 }
 
 pub fn failed<T>(reply: Reply<T>) -> Option<Error> {
@@ -321,7 +332,17 @@ async fn waiting_lock(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     Some(())
 }
 
+#[track_caller]
 pub fn expect(condition: bool) -> Option<()> {
+    if !condition {
+        let at = core::panic::Location::caller();
+        mikros_rt::log!(
+            Error,
+            "test-driver: a check failed at {}:{}",
+            at.file(),
+            at.line()
+        );
+    }
     condition.then_some(())
 }
 
