@@ -57,7 +57,7 @@ pub struct MemoryObject {
     /// in place of the shared zero page and whose translations of it are
     /// still being removed. Nothing may write to their frames or map them
     /// until then. Locked after the pages.
-    changing: SpinLock<Vec<(u64, u64)>>,
+    changing: SpinLock<Vec<Changing>>,
     /// The seals of `mem_seal`, never removed. Checks and changes are
     /// serialized because system calls run one at a time on the one
     /// processor.
@@ -99,6 +99,14 @@ pub struct Paged {
     /// The byte ranges of the outstanding writebacks, which their ends
     /// must name exactly. Locked after the pages.
     writebacks: SpinLock<Vec<(u64, u64)>>,
+}
+
+/// Pages marked as changing, with the frame that a copy-on-write left,
+/// whose use by the slot ends once the old translations are gone.
+struct Changing {
+    first: u64,
+    end: u64,
+    old: Option<Frame>,
 }
 
 /// A frame of a paged object from elsewhere.
@@ -989,27 +997,7 @@ impl MemoryObject {
         if !crate::share::is_lent(phys) {
             return Some(phys);
         }
-        if let Some(budget) = &self.budget {
-            budget.charge_pages(1).ok()?;
-            if budget.charge_kernel(PAGE_ENTRY_COST).is_err() {
-                budget.release_pages(1);
-                return None;
-            }
-        }
-        let Some(copy) = crate::frames::alloc_frame() else {
-            self.release(1);
-            return None;
-        };
-        // SAFETY: the copy was just allocated, and the lent frame stays
-        // allocated while lent. Writes through the pages that use it may
-        // change it meanwhile, which only changes the bytes copied.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                crate::arch::frame_address(phys) as *const u8,
-                crate::arch::frame_address(copy) as *mut u8,
-                PAGE_SIZE as usize,
-            );
-        }
+        let copy = self.copy_frame(phys).ok()?;
         // This object's use of the original ends: the frame stays while
         // pages use it, and otherwise it is freed with its charges.
         self.free([Frame::private(phys)]);
@@ -1364,8 +1352,9 @@ impl MemoryObject {
     /// the zero page that stood in for it.
     fn alloc_changing(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
         self.mark(index, index + 1)?;
-        self.alloc(pages, index)
-            .inspect_err(|_| self.unmark(index, index + 1))
+        self.alloc(pages, index).inspect_err(|_| {
+            self.unmark(index, index + 1);
+        })
     }
 
     /// Marks pages `first` to `end` as changing, or fails with `NoMemory`
@@ -1373,33 +1362,118 @@ impl MemoryObject {
     fn mark(&self, first: u64, end: u64) -> Result<(), Error> {
         let mut changing = self.changing.lock();
         changing.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        changing.push((first, end));
+        changing.push(Changing {
+            first,
+            end,
+            old: None,
+        });
         Ok(())
     }
 
     /// Ends the mark of `mark` on pages `first` to `end`, and wakes the
-    /// threads waiting for them.
-    fn unmark(&self, first: u64, end: u64) {
+    /// threads waiting for them. Returns the frame that the change left
+    /// and that the caller ends the slot's use of.
+    fn unmark(&self, first: u64, end: u64) -> Option<Frame> {
         let mut changing = self.changing.lock();
-        let at = changing.iter().position(|&m| m == (first, end));
-        changing.swap_remove(at.expect("the pages were marked"));
+        let at = changing
+            .iter()
+            .position(|m| (m.first, m.end) == (first, end));
+        let old = changing.swap_remove(at.expect("the pages were marked")).old;
         drop(changing);
         crate::pager::wake(self.header.koid(), first, end);
+        old
+    }
+
+    // The write paths use this and `break_slot` from the next phase on.
+    #[allow(dead_code)]
+    /// Records that the frame `old` is what the change of pages `first` to
+    /// `end`, which are marked, left, for `settle` to end the use of.
+    fn leave(&self, first: u64, end: u64, old: Frame) {
+        let mut changing = self.changing.lock();
+        let mark = changing
+            .iter_mut()
+            .find(|m| (m.first, m.end) == (first, end))
+            .expect("the pages were marked");
+        debug_assert!(mark.old.is_none());
+        mark.old = Some(old);
     }
 
     /// Removes the old translations of pages `first` to `end`, marked by
-    /// `mark` and then changed, and ends the mark. No lock may be held.
+    /// `mark` and then changed, ends the mark, and ends the use of the
+    /// frame that the change left, if it left one. No lock may be held.
     fn settle(&self, first: u64, end: u64) {
         self.unmap_in_steps(first, end);
-        self.unmark(first, end);
+        if let Some(old) = self.unmark(first, end) {
+            self.free([old]);
+        }
+    }
+
+    // See `leave`.
+    #[allow(dead_code)]
+    /// Gives page `index`, whose frame is shared, a frame of its own with
+    /// the same bytes, charged as any frame of the pages is, and marks the
+    /// page changing until `settle` has removed the translations of the
+    /// old frame, which it then ends the slot's use of. While the pages
+    /// are pinned the old frame is kept until the last `unpin` instead.
+    /// Fails, changing nothing, with `NoMemory` or `NoResources`. The
+    /// pages are locked.
+    fn break_slot(&self, pages: &mut Pages, index: u64) -> Result<(), Error> {
+        let old = pages
+            .frame(index)
+            .expect("the page of a shared frame has one");
+        debug_assert!(pages.is_shared(index));
+        self.mark(index, index + 1)?;
+        let pinned = pages.pinned();
+        let copy = match pages.reserve_orphan().and_then(|()| self.copy_frame(old)) {
+            Ok(copy) => copy,
+            Err(e) => {
+                self.unmark(index, index + 1);
+                return Err(e);
+            }
+        };
+        // The slot keeps its place in the pages, which need no room.
+        let left = pages.replace(index, copy, false);
+        if pinned {
+            pages.orphan(left).expect("room was reserved");
+        } else {
+            self.leave(index, index + 1, left);
+        }
+        Ok(())
+    }
+
+    /// A new frame with the bytes of the frame `phys`, charged to this
+    /// object's budget as any frame of its pages is, or `NoResources`
+    /// without room in the budget and `NoMemory` without a frame.
+    fn copy_frame(&self, phys: u64) -> Result<u64, Error> {
+        if let Some(budget) = &self.budget {
+            budget.charge_pages(1)?;
+            if let Err(e) = budget.charge_kernel(PAGE_ENTRY_COST) {
+                budget.release_pages(1);
+                return Err(e);
+            }
+        }
+        let Some(copy) = crate::frames::alloc_frame() else {
+            self.release(1);
+            return Err(Error::NoMemory);
+        };
+        // SAFETY: the copy was just allocated, and the frame being copied
+        // stays allocated while this object's slot uses it. Writes through
+        // the pages that share it may change it meanwhile, which only
+        // changes the bytes copied.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                crate::arch::frame_address(phys) as *const u8,
+                crate::arch::frame_address(copy) as *mut u8,
+                PAGE_SIZE as usize,
+            );
+        }
+        Ok(copy)
     }
 
     /// Whether page `index` is marked changing. The pages are locked.
     fn is_changing(&self, index: u64) -> bool {
         let changing = self.changing.lock();
-        changing
-            .iter()
-            .any(|&(first, end)| (first..end).contains(&index))
+        changing.iter().any(|m| (m.first..m.end).contains(&index))
     }
 
     /// Waits until page `index` is not marked changing. Fails with `Io`
@@ -2668,6 +2742,112 @@ mod tests {
         assert_eq!(arena.free(), start);
         assert_eq!(owner.usage(), (0, 0));
         drop((port, port2));
+    }
+
+    /// An object of one filled page, whose frame a lend shares, and that
+    /// frame.
+    fn shared_page(budget: &Arc<Budget>) -> (Arc<MemoryObject>, u64) {
+        let object = MemoryObject::new(Some(budget), PAGE_SIZE, 0).unwrap();
+        fill(&object, 0, PAGE_SIZE, 0x3c);
+        let mut pages = object.pages.lock();
+        let phys = pages.frame(0).unwrap();
+        crate::share::lend(phys, Some(budget)).unwrap();
+        pages.mark_shared(0);
+        drop(pages);
+        (object, phys)
+    }
+
+    #[test]
+    fn gives_a_shared_page_a_frame_of_its_own() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let start = arena.free();
+        let (object, shared) = shared_page(&budget);
+        let before = bytes(&object, 0, PAGE_SIZE);
+        {
+            let mut pages = object.pages.lock();
+            object.break_slot(&mut pages, 0).unwrap();
+            let copy = pages.frame(0).unwrap();
+            assert_ne!(copy, shared);
+            assert!(!pages.is_shared(0));
+        }
+        // The page is changing until its old translations are gone.
+        assert!(object.is_changing(0));
+        object.settle(0, 1);
+        assert!(!object.is_changing(0));
+        assert_eq!(bytes(&object, 0, PAGE_SIZE), before);
+        // The lent frame stays for its user, with the page the lend holds.
+        assert_eq!(arena.free(), start - 2);
+        assert_eq!(budget.usage().1, 2);
+        // Writes to the page no longer reach the shared frame.
+        fill(&object, 0, 8, 0xff);
+        assert!(crate::share::is_lent(shared));
+        crate::share::end_lend(shared);
+        assert_eq!(arena.free(), start - 1);
+        assert_eq!(budget.usage().1, 1);
+        drop(object);
+        assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
+    }
+
+    #[test]
+    fn leaves_a_shared_page_alone_without_room_in_the_budget() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let (object, shared) = shared_page(&budget);
+        let start = arena.free();
+        let used = budget.usage();
+        budget.set_limits(u64::MAX, 1);
+        let mut pages = object.pages.lock();
+        assert_eq!(object.break_slot(&mut pages, 0), Err(Error::NoResources));
+        assert_eq!((pages.frame(0), pages.is_shared(0)), (Some(shared), true));
+        drop(pages);
+        assert!(!object.is_changing(0));
+        assert_eq!((arena.free(), budget.usage()), (start, used));
+        budget.set_limits(u64::MAX, u64::MAX);
+        crate::share::end_lend(shared);
+    }
+
+    #[test]
+    fn leaves_a_shared_page_alone_without_a_frame() {
+        let _lock = mock::lock();
+        // One frame, which the object's page takes.
+        let arena = mock::Arena::new(2);
+        let budget = Budget::root();
+        let (object, shared) = shared_page(&budget);
+        assert_eq!(arena.free(), 0);
+        let used = budget.usage();
+        let mut pages = object.pages.lock();
+        assert_eq!(object.break_slot(&mut pages, 0), Err(Error::NoMemory));
+        assert_eq!(pages.frame(0), Some(shared));
+        drop(pages);
+        assert!(!object.is_changing(0));
+        assert_eq!(budget.usage(), used);
+        crate::share::end_lend(shared);
+    }
+
+    #[test]
+    fn keeps_the_old_frame_of_a_pinned_page_until_the_last_unpin() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let budget = Budget::root();
+        let start = arena.free();
+        let (object, shared) = shared_page(&budget);
+        object.pages.lock().pin();
+        {
+            let mut pages = object.pages.lock();
+            object.break_slot(&mut pages, 0).unwrap();
+        }
+        object.settle(0, 1);
+        // The old frame is still this slot's use, which the unpin ends.
+        assert_eq!(arena.free(), start - 2);
+        let mut work = Work::new(no_preempt);
+        object.unpin(&mut work);
+        crate::share::end_lend(shared);
+        assert_eq!(arena.free(), start - 1);
+        drop(object);
+        assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
     }
 
     #[test]

@@ -235,6 +235,15 @@ impl Pages {
         Ok(())
     }
 
+    /// Makes room for one more `orphan`, or fails with `NoMemory`, so that
+    /// a frame can leave the pages and be kept without failing.
+    pub fn reserve_orphan(&mut self) -> Result<(), Error> {
+        if self.pins == 0 {
+            return Ok(());
+        }
+        self.orphans.try_reserve(1).map_err(|_| Error::NoMemory)
+    }
+
     /// Whether a `pin` is in effect.
     pub fn pinned(&self) -> bool {
         self.pins > 0
