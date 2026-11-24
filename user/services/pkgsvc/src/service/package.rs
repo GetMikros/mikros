@@ -143,9 +143,13 @@ impl Opened {
     /// A memory object of `entry`, executable when `execute`: a clone of
     /// the package file's for a file that is not compressed and lies on
     /// its pages, and otherwise a new object with its contents.
-    fn memory(&self, entry: &Entry, execute: bool) -> Result<OwnedHandle, Error> {
-        let rights =
-            DUPLICATE | TRANSFER | READ | MAP | INSPECT | if execute { EXECUTE } else { 0 };
+    fn memory(&self, entry: &Entry, read: bool, execute: bool) -> Result<OwnedHandle, Error> {
+        let rights = DUPLICATE
+            | TRANSFER
+            | MAP
+            | INSPECT
+            | if read { READ } else { 0 }
+            | if execute { EXECUTE } else { 0 };
         let len = entry.size.next_multiple_of(PAGE).max(PAGE);
         if !entry.compressed && entry.data_offset.is_multiple_of(PAGE) {
             let package = self.package_memory()?;
@@ -458,6 +462,11 @@ fn serve(opened: &Arc<Opened>, end: ServerEnd<Node>, path: String, rights: Right
             R::GetMemoryObject(q, r) => r.reply(
                 s,
                 match file {
+                    Some(_)
+                        if !rights.contains(Rights::READ) && !rights.contains(Rights::EXECUTE) =>
+                    {
+                        Err(Error::AccessDenied)
+                    }
                     Some(_) if q.flags.contains(MemoryFlags::WRITE) => Err(read_only(rights)),
                     Some(_)
                         if q.flags.contains(MemoryFlags::EXECUTE)
@@ -466,7 +475,11 @@ fn serve(opened: &Arc<Opened>, end: ServerEnd<Node>, path: String, rights: Right
                         Err(Error::AccessDenied)
                     }
                     Some(e) => opened
-                        .memory(e, q.flags.contains(MemoryFlags::EXECUTE))
+                        .memory(
+                            e,
+                            rights.contains(Rights::READ),
+                            q.flags.contains(MemoryFlags::EXECUTE),
+                        )
                         .map(|memory| NodeGetMemoryObjectResponse { memory }),
                     None => Err(Error::IsDirectory),
                 },

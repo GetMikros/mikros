@@ -206,20 +206,26 @@ impl Connection {
     /// `EXECUTE`, and `WRITE` without `PRIVATE` a connection that may
     /// change the file system.
     pub(crate) fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
-        self.allowed(&self.open, Rights::READ)?;
+        let read = self.allowed(&self.open, Rights::READ).is_ok();
+        let may_execute = self.allowed(&self.open, Rights::EXECUTE).is_ok();
+        if !read && !may_execute {
+            return Err(Error::AccessDenied);
+        }
         self.file()?;
         let private = flags.contains(MemoryFlags::PRIVATE);
         let write = flags.contains(MemoryFlags::WRITE);
         let execute = flags.contains(MemoryFlags::EXECUTE);
-        if execute {
-            self.allowed(&self.open, Rights::EXECUTE)?;
+        if execute && !may_execute {
+            return Err(Error::AccessDenied);
         }
-        if write && !private {
-            self.require_write()?;
+        if write {
             self.allowed(&self.open, Rights::WRITE)?;
+            if !private {
+                self.require_write()?;
+            }
         }
         let file = self.fs.shared(&self.open)?;
-        let rights = crate::driver::share::rights(write, execute);
+        let rights = crate::driver::share::rights(read, write, execute);
         let memory = match private {
             true if write || !self.open.node.unchangeable() => file.clone_private(rights)?,
             true => file.handle_pinned(rights)?,

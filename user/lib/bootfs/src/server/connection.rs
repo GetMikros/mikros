@@ -304,24 +304,31 @@ impl Connection {
     /// of its own, and otherwise the file's paged object, which is never
     /// writable.
     fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
-        self.require(Rights::READ)?;
+        let read = self.require(Rights::READ).is_ok();
+        let may_execute = self.require(Rights::EXECUTE).is_ok();
+        if !read && !may_execute {
+            return Err(Error::AccessDenied);
+        }
         let (offset, size) = match self.kind(self.node) {
             NodeKind::File { offset, size } => (*offset, *size),
             NodeKind::Directory(_) => return Err(Error::IsDirectory),
             NodeKind::Symlink(_) => return Err(Error::Invalid),
         };
         let execute = flags.contains(MemoryFlags::EXECUTE);
-        if execute {
-            self.require(Rights::EXECUTE)?;
+        if execute && !may_execute {
+            return Err(Error::AccessDenied);
         }
         let write = flags.contains(MemoryFlags::WRITE);
+        if write {
+            self.require(Rights::WRITE)?;
+        }
         let memory = if flags.contains(MemoryFlags::PRIVATE) {
-            let rights = super::memory::rights(write, execute);
+            let rights = super::memory::rights(read, write, execute);
             self.fs.private_memory(offset, size, rights)
         } else if write {
             return Err(self.write_denied());
         } else {
-            let rights = super::memory::rights(false, execute);
+            let rights = super::memory::rights(read, false, execute);
             self.fs.paged_memory(self.node, size, rights)
         };
         match memory {

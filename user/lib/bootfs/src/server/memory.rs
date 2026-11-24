@@ -14,11 +14,13 @@ const EXECUTE: u32 = 1 << 4;
 const MAP: u32 = 1 << 5;
 const INSPECT: u32 = 1 << 9;
 
-/// The rights of a memory object handed out, with `WRITE` and `EXECUTE`
-/// only when asked for.
-pub(super) fn rights(write: bool, execute: bool) -> u32 {
-    let base = DUPLICATE | TRANSFER | READ | MAP | INSPECT;
-    base | if write { WRITE } else { 0 } | if execute { EXECUTE } else { 0 }
+/// The rights of a memory object handed out, with `READ` only when the
+/// connection has it and `WRITE` and `EXECUTE` only when asked for.
+pub(super) fn rights(read: bool, write: bool, execute: bool) -> u32 {
+    let base = DUPLICATE | TRANSFER | MAP | INSPECT;
+    base | if read { READ } else { 0 }
+        | if write { WRITE } else { 0 }
+        | if execute { EXECUTE } else { 0 }
 }
 
 fn owned(status: Status, raw: sys::Handle) -> Result<OwnedHandle, Status> {

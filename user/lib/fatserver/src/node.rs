@@ -363,19 +363,28 @@ impl<F: Format> Connection<F> {
     /// its own, and otherwise the file's paged object, which is never
     /// writable.
     fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
-        self.require(Rights::READ)?;
+        let read = self.require(Rights::READ).is_ok();
+        let may_execute = self.require(Rights::EXECUTE).is_ok();
+        if !read && !may_execute {
+            return Err(Error::AccessDenied);
+        }
         let id = self.file()?;
         let execute = flags.contains(MemoryFlags::EXECUTE);
-        if execute {
-            self.require(Rights::EXECUTE)?;
+        if execute && !may_execute {
+            return Err(Error::AccessDenied);
         }
         let write = flags.contains(MemoryFlags::WRITE);
+        if write {
+            self.require(Rights::WRITE)?;
+        }
         let memory = if flags.contains(MemoryFlags::PRIVATE) {
-            self.fs.private_memory(id, memory::rights(write, execute))?
+            self.fs
+                .private_memory(id, memory::rights(read, write, execute))?
         } else if write {
             return Err(Error::NotSupported);
         } else {
-            self.fs.paged_memory(id, memory::rights(false, execute))?
+            self.fs
+                .paged_memory(id, memory::rights(read, false, execute))?
         };
         Ok(NodeGetMemoryObjectResponse { memory })
     }

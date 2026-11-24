@@ -109,9 +109,11 @@ pub async fn serve(
 
 /// The rights of a memory object handed out: DUPLICATE, TRANSFER, READ,
 /// MAP and INSPECT, with WRITE and EXECUTE only when asked for.
-fn memory_rights(write: bool, execute: bool) -> u32 {
-    let base = 1 << 0 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 9;
-    base | if write { 1 << 3 } else { 0 } | if execute { 1 << 4 } else { 0 }
+fn memory_rights(read: bool, write: bool, execute: bool) -> u32 {
+    let base = 1 << 0 | 1 << 1 | 1 << 5 | 1 << 9;
+    base | if read { 1 << 2 } else { 0 }
+        | if write { 1 << 3 } else { 0 }
+        | if execute { 1 << 4 } else { 0 }
 }
 
 /// The range of a lock from `start` with `length` bytes, 0 meaning to the
@@ -450,17 +452,21 @@ impl Connection {
     /// object, writable when asked for. `WRITE` without `PRIVATE` needs
     /// the right, as `EXECUTE` does.
     fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
-        self.allowed(self.node, Rights::READ)?;
+        let read = self.allowed(self.node, Rights::READ).is_ok();
+        let may_execute = self.allowed(self.node, Rights::EXECUTE).is_ok();
+        if !read && !may_execute {
+            return Err(Error::AccessDenied);
+        }
         let execute = flags.contains(MemoryFlags::EXECUTE);
-        if execute {
-            self.allowed(self.node, Rights::EXECUTE)?;
+        if execute && !may_execute {
+            return Err(Error::AccessDenied);
         }
         let write = flags.contains(MemoryFlags::WRITE);
         let private = flags.contains(MemoryFlags::PRIVATE);
-        if write && !private {
+        if write {
             self.allowed(self.node, Rights::WRITE)?;
         }
-        let rights = memory_rights(write, execute);
+        let rights = memory_rights(read, write, execute);
         let memory = self.with_file(|file| {
             let made = if private {
                 file.private(rights)

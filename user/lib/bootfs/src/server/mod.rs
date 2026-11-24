@@ -233,7 +233,7 @@ impl Fs {
         if self.tree.nodes[node].mode & EXECUTE_BITS == 0 {
             return Err(ACCESS_DENIED);
         }
-        let rights = memory::rights(false, true);
+        let rights = memory::rights(true, false, true);
         let top = self.tree.resolve(0, b"system", true);
         let system = matches!(top, Ok(crate::Resolved::Node(top)) if self.tree.contains(top, node));
         Ok(Executable {

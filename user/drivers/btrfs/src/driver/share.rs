@@ -48,11 +48,13 @@ const EXECUTE: u32 = 1 << 4;
 const MAP: u32 = 1 << 5;
 const INSPECT: u32 = 1 << 9;
 
-/// The rights of a memory object handed out, with `WRITE` and `EXECUTE`
-/// only when asked for.
-pub fn rights(write: bool, execute: bool) -> u32 {
-    let base = DUPLICATE | TRANSFER | READ | MAP | INSPECT;
-    base | if write { WRITE } else { 0 } | if execute { EXECUTE } else { 0 }
+/// The rights of a memory object handed out, with `READ` only when the
+/// connection has it and `WRITE` and `EXECUTE` only when asked for.
+pub fn rights(read: bool, write: bool, execute: bool) -> u32 {
+    let base = DUPLICATE | TRANSFER | MAP | INSPECT;
+    base | if read { READ } else { 0 }
+        | if write { WRITE } else { 0 }
+        | if execute { EXECUTE } else { 0 }
 }
 
 /// The pager of the paged objects and the port of their requests, once
