@@ -100,6 +100,10 @@ pub struct Paged {
     /// The byte ranges of the outstanding writebacks, which their ends
     /// must name exactly. Locked after the pages.
     writebacks: SpinLock<Vec<(u64, u64)>>,
+    /// How many uses the object has: handles without the right `MANAGE`,
+    /// in a table or carried by a queued message, and mappings. The
+    /// object's `UNREFERENCED` signal is set exactly while it is 0.
+    uses: SpinLock<u64>,
 }
 
 /// Pages marked as changing, with the frame that a copy-on-write left,
@@ -469,9 +473,51 @@ impl MemoryObject {
                 revoked: AtomicBool::new(false),
                 charges: SpinLock::new(crate::lock_order::MEMORY_CHARGES, nodes::map()),
                 writebacks: SpinLock::new(crate::lock_order::MEMORY_WRITEBACK, Vec::new()),
+                uses: SpinLock::new(crate::lock_order::MEMORY_USES, 0),
             }),
             fixed: None,
         })
+        .inspect(|object| {
+            // No use exists yet, so the object starts unreferenced.
+            object
+                .header
+                .update_signals_quietly(0, crate::object::signals::UNREFERENCED);
+        })
+    }
+
+    /// Records one more use of the object, a handle without the right
+    /// `MANAGE` or a mapping: a paged object stops being unreferenced
+    /// before the call that makes the use returns.
+    pub(crate) fn use_begin(&self) {
+        let Some(paged) = &self.paged else {
+            return;
+        };
+        let mut uses = paged.uses.lock();
+        *uses += 1;
+        if *uses == 1 {
+            self.header
+                .update_signals(crate::object::signals::UNREFERENCED, 0);
+        }
+    }
+
+    /// Records the end of a use, and sets the signal when it was the last.
+    pub(crate) fn use_end(&self) {
+        let Some(paged) = &self.paged else {
+            return;
+        };
+        let mut uses = paged.uses.lock();
+        debug_assert!(*uses > 0, "a use ended that did not begin");
+        *uses -= 1;
+        if *uses == 0 {
+            self.header
+                .update_signals(0, crate::object::signals::UNREFERENCED);
+        }
+    }
+
+    /// How many uses the object has, 0 for an object that is not paged.
+    #[cfg(test)]
+    pub(crate) fn uses(&self) -> u64 {
+        self.paged.as_ref().map_or(0, |paged| *paged.uses.lock())
     }
 
     pub fn is_paged(&self) -> bool {
@@ -2697,6 +2743,9 @@ impl Mapping {
         if writable {
             mem.writable.fetch_add(1, Ordering::Relaxed);
         }
+        // A mapping is a use of the object, whatever handle it was made
+        // through.
+        mem.use_begin();
         Ok(Mapping(entry))
     }
 }
@@ -2731,6 +2780,7 @@ impl Drop for Mapping {
         if *writable {
             mem.writable.fetch_sub(1, Ordering::Relaxed);
         }
+        mem.use_end();
     }
 }
 
@@ -2986,6 +3036,66 @@ mod tests {
         );
         drop((clone, source));
         assert_eq!((arena.free(), budget.usage()), (start, (0, 0)));
+    }
+
+    #[test]
+    fn is_unreferenced_until_a_handle_without_manage_exists() {
+        use crate::object::handles::HandleTable;
+        use crate::object::{Object, rights, signals};
+        let _lock = mock::lock();
+        let _arena = mock::Arena::new(8);
+        let budget = Budget::root();
+        let (object, port) = paged(&budget, 1);
+        let unreferenced = || object.header().signals() & signals::UNREFERENCED != 0;
+        assert!(unreferenced() && object.uses() == 0);
+        let mut table = HandleTable::new();
+        let all = rights::DUPLICATE | rights::READ | rights::MAP;
+        // The handle that creates the object has MANAGE: no use.
+        let manage = table
+            .insert(object.clone(), all | rights::MANAGE | rights::WAIT, None)
+            .unwrap();
+        assert!(unreferenced());
+        // A duplicate without MANAGE is a use, from the call on.
+        let copy = table
+            .duplicate(manage, rights::READ | rights::MAP, None)
+            .unwrap();
+        assert!(!unreferenced() && object.uses() == 1);
+        let second = table.duplicate(copy, rights::SAME_RIGHTS, None);
+        assert!(second.is_err(), "the copy cannot duplicate");
+        // Narrowing a handle with MANAGE to one without makes a use before
+        // the old one goes.
+        let narrowed = table.replace(manage, rights::READ | rights::MAP).unwrap();
+        assert!(!unreferenced() && object.uses() == 2);
+        table.close(copy).unwrap();
+        assert!(!unreferenced());
+        table.close(narrowed).unwrap();
+        assert!(unreferenced() && object.uses() == 0);
+        drop((table, object, port));
+    }
+
+    #[test]
+    fn counts_a_use_in_a_queued_entry_and_a_cloned_one() {
+        use crate::object::handles::Entry;
+        use crate::object::{Object, rights, signals};
+        let _lock = mock::lock();
+        let _arena = mock::Arena::new(8);
+        let budget = Budget::root();
+        let (object, port) = paged(&budget, 1);
+        let entry = Entry::new(object.clone(), rights::READ);
+        let cloned = entry.clone();
+        assert_eq!(object.uses(), 2);
+        assert_eq!(object.header().signals() & signals::UNREFERENCED, 0);
+        drop(entry);
+        assert_eq!(object.header().signals() & signals::UNREFERENCED, 0);
+        drop(cloned);
+        assert_ne!(object.header().signals() & signals::UNREFERENCED, 0);
+        // An entry with MANAGE, or of an object that is not paged, is no use.
+        let manage = Entry::new(object.clone(), rights::MANAGE | rights::READ);
+        assert_eq!(object.uses(), 0);
+        let plain = MemoryObject::new(None, PAGE_SIZE, 0).unwrap();
+        let entry = Entry::new(plain.clone(), rights::READ);
+        assert_eq!(plain.uses(), 0);
+        drop((manage, entry, plain, object, port));
     }
 
     #[test]

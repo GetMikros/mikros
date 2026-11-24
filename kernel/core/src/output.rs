@@ -68,16 +68,7 @@ mod tests {
 
     fn entries() -> Vec<Entry> {
         let (a, b) = Endpoint::pair(None).unwrap();
-        vec![
-            Entry {
-                object: a,
-                rights: rights::READ,
-            },
-            Entry {
-                object: b,
-                rights: rights::WRITE,
-            },
-        ]
+        vec![Entry::new(a, rights::READ), Entry::new(b, rights::WRITE)]
     }
 
     /// User memory of `SIZE` bytes from address 0 whose pages below

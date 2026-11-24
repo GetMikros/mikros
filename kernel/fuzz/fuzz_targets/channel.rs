@@ -57,7 +57,7 @@ fuzz_target!(|ops: Vec<Op>| {
                     sequence = sequence.wrapping_add(1);
                     let bytes = vec![sequence; usize::from(len) % 70_000];
                     let handles: Vec<Entry> = (0..handles % 4)
-                        .map(|_| Entry { object: object.clone(), rights: ALL })
+                        .map(|_| Entry::new(object.clone(), ALL))
                         .collect();
                     let count = handles.len();
                     let message = Message::new(bytes.clone(), handles, None).unwrap();

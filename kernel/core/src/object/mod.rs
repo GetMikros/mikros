@@ -116,6 +116,9 @@ pub mod signals {
     pub const OVER_THRESHOLD: u32 = 1 << 6;
     /// Set on a process that a `CONT` resumed, until it stops again.
     pub const CONTINUED: u32 = 1 << 7;
+    /// Set on a paged memory object while nothing but handles with the
+    /// right `MANAGE` refers to it.
+    pub const UNREFERENCED: u32 = 1 << 8;
     /// `USER0` to `USER7`.
     pub const USER_ALL: u32 = 0xFF << 24;
 }
@@ -132,6 +135,7 @@ pub const fn allowed_signals(t: ObjectType) -> u32 {
         Process => TERMINATED | SUSPENDED | CONTINUED,
         Thread => TERMINATED | SUSPENDED,
         Budget => OVER_THRESHOLD,
+        MemoryObject => UNREFERENCED,
         _ => 0,
     }
 }

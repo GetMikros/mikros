@@ -279,30 +279,18 @@ pub fn start(info: &BootInfo) {
         crate::arch::dma_isolated(),
     );
     let clock_page = clock_page().unwrap_or_else(|e| panic!("no memory for the clock page: {e:?}"));
-    let entry = |object: Arc<dyn Object>, kind| Entry {
-        object,
-        rights: default_rights(kind),
-    };
+    let entry = |object: Arc<dyn Object>, kind| Entry::new(object, default_rights(kind));
     let mut handles: Vec<Entry> = vec![
         entry(loaded.process.clone(), ObjectType::Process),
         entry(loaded.thread.clone(), ObjectType::Thread),
         entry(Resource::root(), ObjectType::Resource),
-        Entry {
-            object: loaded.boot_image.object,
-            rights: READ_ONLY,
-        },
+        Entry::new(loaded.boot_image.object, READ_ONLY),
         entry(crate::log::object(), ObjectType::Log),
         entry(budget.clone(), ObjectType::Budget),
-        Entry {
-            object: clock_page,
-            rights: READ_ONLY,
-        },
+        Entry::new(clock_page, READ_ONLY),
     ];
     if let Some(fb) = framebuffer(info) {
-        handles.push(Entry {
-            object: fb,
-            rights: PHYSICAL,
-        });
+        handles.push(Entry::new(fb, PHYSICAL));
     }
     if bytes.len() > BYTES_MAX || handles.len() > HANDLES_MAX {
         panic!(

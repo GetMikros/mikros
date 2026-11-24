@@ -24,6 +24,7 @@ fn main(m: &Managed) -> i64 {
             ("pagers", pagers),
             ("pager_operations", pager_operations),
             ("lending_frames", lending_frames),
+            ("unreferenced_objects", unreferenced_objects),
             ("writebacks_and_discards", writebacks_and_discards),
             ("large_pager_operations", large_pager_operations),
             ("paged_outputs", paged_outputs),
@@ -232,6 +233,68 @@ fn pager_operations(s: &Own) -> Result {
         "failing without a pager",
         unsafe { sys::mem_read(mem, PAGE_SIZE, byte.as_mut_ptr(), 1) } == IO,
     )
+}
+
+/// A paged object is unreferenced while only handles with `MANAGE` refer
+/// to it: a handle without it, in the table, and a mapping, each end that.
+fn unreferenced_objects(s: &Own) -> Result {
+    const UNREFERENCED: u32 = 1 << 8;
+    const READ: u32 = 1 << 2;
+    const MAP: u32 = 1 << 5;
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 1, PAGE_SIZE, 0, &mut mem);
+        check("creating a paged object", status)?;
+    }
+    ensure(
+        "starting unreferenced",
+        wait(mem, UNREFERENCED, 0).0 == mikros_rt::OK,
+    )?;
+    let mut view = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("duplicating without MANAGE", unsafe {
+        sys::handle_duplicate(mem, READ | MAP, &mut view)
+    })?;
+    ensure(
+        "referenced by a handle",
+        wait(mem, UNREFERENCED, 0).0 == TIMED_OUT,
+    )?;
+    let mut at = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("mapping", unsafe {
+        sys::vm_map(s.process, PERM_READ, 0, view, 0, PAGE_SIZE, &mut at)
+    })?;
+    // SAFETY: closing takes no pointers.
+    check("closing the handle", unsafe { sys::handle_close(view) })?;
+    ensure(
+        "referenced by a mapping",
+        wait(mem, UNREFERENCED, 0).0 == TIMED_OUT,
+    )?;
+    // SAFETY: unmapping takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })?;
+    ensure(
+        "unreferenced again",
+        wait(mem, UNREFERENCED, 0).0 == mikros_rt::OK,
+    )?;
+    // A wait for the signal that starts before the last use ends is woken
+    // by it.
+    // SAFETY: the pointer is valid for the call.
+    check("duplicating again", unsafe {
+        sys::handle_duplicate(mem, READ | MAP, &mut view)
+    })?;
+    // SAFETY: closing takes no pointers.
+    check("closing the duplicate", unsafe { sys::handle_close(view) })?;
+    ensure(
+        "unreferenced after the last handle",
+        wait(mem, UNREFERENCED, 0).0 == mikros_rt::OK,
+    )?;
+    // SAFETY: closing takes no pointers.
+    check("closing the object", unsafe { sys::handle_close(mem) })
 }
 
 /// `pager_lend` makes absent pages of a paged object use the frames of an

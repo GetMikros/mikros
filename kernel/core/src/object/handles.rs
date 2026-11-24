@@ -14,11 +14,53 @@ pub const HANDLE_LIMIT: usize = 65536;
 const GENERATION_BITS: u32 = 8;
 const GENERATION_MASK: u32 = (1 << GENERATION_BITS) - 1;
 
-/// What a handle refers to.
-#[derive(Clone)]
+/// What a handle refers to. The rights are those the entry was made
+/// with: an entry of a paged memory object without the right `MANAGE` is a
+/// use of the object for as long as it exists, so a new entry is made to
+/// change them, and one is made before the old one is dropped.
 pub struct Entry {
     pub object: Arc<dyn Object>,
     pub rights: u32,
+    /// Whether the entry is counted as a use of its object.
+    counted: bool,
+}
+
+impl Entry {
+    pub fn new(object: Arc<dyn Object>, rights: u32) -> Entry {
+        // An entry of a paged memory object is a use of it, unless it has
+        // the right `MANAGE`.
+        let mem =
+            memory_object_of(&object).filter(|m| m.is_paged() && rights & rights::MANAGE == 0);
+        let counted = mem.is_some();
+        if let Some(mem) = mem {
+            mem.use_begin();
+        }
+        Entry {
+            object,
+            rights,
+            counted,
+        }
+    }
+}
+
+impl Clone for Entry {
+    fn clone(&self) -> Entry {
+        Entry::new(self.object.clone(), self.rights)
+    }
+}
+
+impl Drop for Entry {
+    fn drop(&mut self) {
+        let mem = memory_object_of(&self.object).filter(|_| self.counted);
+        if let Some(mem) = mem {
+            mem.use_end();
+        }
+    }
+}
+
+/// The object behind `object`, if it is a memory object.
+fn memory_object_of(object: &Arc<dyn Object>) -> Option<&crate::memory_object::MemoryObject> {
+    (&**object as &dyn core::any::Any).downcast_ref::<crate::memory_object::MemoryObject>()
 }
 
 struct Slot {
@@ -150,7 +192,7 @@ impl HandleTable {
             }
         };
         let slot = &mut self.slots[index];
-        slot.entry = Some(Entry { object, rights });
+        slot.entry = Some(Entry::new(object, rights));
         self.count += 1;
         Ok(value(index, slot.generation))
     }
@@ -250,8 +292,11 @@ impl HandleTable {
         let rights = Self::derived(self.get(handle)?.rights, rights)?;
         let entry = self.take(handle)?;
         // The slot just freed makes room, and inserting into a free slot
-        // allocates nothing and charges nothing.
-        self.insert(entry.object, rights, None)
+        // allocates nothing and charges nothing. The new entry exists
+        // before the old one is dropped, so the object has a use meanwhile.
+        let replaced = self.insert(entry.object.clone(), rights, None);
+        drop(entry);
+        replaced
     }
 
     /// Like `duplicate`, but passes the new handle to `publish` and keeps
@@ -356,7 +401,9 @@ impl HandleTable {
         let next = value(i, (self.slots[i].generation + 1) & GENERATION_MASK);
         publish(next)?;
         let entry = self.take(handle)?;
-        let new = self.insert(entry.object, rights, None)?;
+        let new = self.insert(entry.object.clone(), rights, None);
+        drop(entry);
+        let new = new?;
         debug_assert_eq!(new, next);
         Ok(new)
     }
@@ -453,10 +500,7 @@ mod tests {
             let free = t.free.clone();
             let count = t.len();
             let charged = kernel_used(&owner);
-            let entries = core::array::from_fn::<_, 4, _>(|_| Entry {
-                object: event(),
-                rights: rights::READ,
-            });
+            let entries = core::array::from_fn::<_, 4, _>(|_| Entry::new(event(), rights::READ));
             for _ in 0..8 {
                 assert_eq!(
                     t.insert_many_then::<4>(&entries, Some(&small), |_| {
@@ -500,10 +544,7 @@ mod tests {
             let free = t.free.clone();
             let slots = t.slots.len();
             let charged = kernel_used(&owner);
-            let entries = core::array::from_fn::<_, 3, _>(|_| Entry {
-                object: event(),
-                rights: rights::READ,
-            });
+            let entries = core::array::from_fn::<_, 3, _>(|_| Entry::new(event(), rights::READ));
             for _ in 0..8 {
                 let mut seen = [HANDLE_INVALID; 3];
                 assert_eq!(
@@ -549,14 +590,8 @@ mod tests {
         let old = t.insert(event(), 0, Some(&root)).unwrap();
         t.close(old).unwrap();
         let entries = [
-            Entry {
-                object: event(),
-                rights: rights::READ,
-            },
-            Entry {
-                object: event(),
-                rights: rights::WRITE,
-            },
+            Entry::new(event(), rights::READ),
+            Entry::new(event(), rights::WRITE),
         ];
         let mut seen = [HANDLE_INVALID; 2];
         assert_eq!(

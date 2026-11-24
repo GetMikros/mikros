@@ -94,7 +94,7 @@ fn give_pair(
 ) -> Result<(), Error> {
     let process = current_process()?;
     let outputs = prepare(&process, &[outs[0].range(1), outs[1].range(1)])?;
-    let entries = objects.map(|object| kernel_core::object::handles::Entry { object, rights });
+    let entries = objects.map(|object| kernel_core::object::handles::Entry::new(object, rights));
     let mut values = [0; 2];
     process.handles().lock().insert_many_then::<2>(
         &entries,
@@ -290,7 +290,7 @@ pub fn process_start(
         let arg = arg.as_ref().map_or(HANDLE_INVALID, |a| a.value);
         let mut table = caller.handles().lock_nested();
         let entry = table.check(arg, &[], rights::TRANSFER)?.clone();
-        let handle = target.insert(entry.object, entry.rights, Some(caller.budget()))?;
+        let handle = target.insert(entry.object.clone(), entry.rights, Some(caller.budget()))?;
         table.close(arg)?;
         drop(table);
         crate::wait::handle_closed(&caller, arg);
@@ -1737,10 +1737,10 @@ pub fn interrupt_create_msi(
     entries.try_reserve(n).map_err(|_| Error::NoMemory)?;
     let mut bytes = [0u8; 16 * MSI_MAX];
     for (i, (interrupt, message)) in made.iter().enumerate() {
-        entries.push(Entry {
-            object: interrupt.clone(),
-            rights: default_rights(ObjectType::Interrupt),
-        });
+        entries.push(Entry::new(
+            interrupt.clone(),
+            default_rights(ObjectType::Interrupt),
+        ));
         bytes[16 * i..16 * i + 8].copy_from_slice(&message.address.to_le_bytes());
         bytes[16 * i + 8..16 * i + 12].copy_from_slice(&message.data.to_le_bytes());
     }
@@ -2274,6 +2274,10 @@ pub fn mem_clone(
         rights |= kernel_core::object::rights::WRITE;
     }
     let source = object::<MemoryObject>(mem);
+    // A clone of a paged object is not one the pager can wait on or manage.
+    if source.is_paged() {
+        rights &= !(kernel_core::object::rights::MANAGE | kernel_core::object::rights::WAIT);
+    }
     let process = current_process()?;
     let mut work = Work::new(crate::sched::preempt_point);
     let clone = source.clone_range(
@@ -2311,7 +2315,11 @@ pub fn pager_create_memory(
     let budget = current_process()?.budget().clone();
     let mem = MemoryObject::new_paged(&budget, pager.header().koid(), &port, key, size, options)?;
     pager.add(&mem)?;
-    give(mem, ObjectType::MemoryObject, out)
+    // The handle can wait for the object to become unreferenced, and has
+    // the right `MANAGE`, which allows nothing and keeps the object from
+    // counting its own handle as a use.
+    let rights = default_rights(ObjectType::MemoryObject) | rights::WAIT | rights::MANAGE;
+    give_with(mem, rights, out)
 }
 
 /// The paged object `mem` of `pager`, or `AccessDenied` when `pager` is

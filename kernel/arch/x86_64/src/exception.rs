@@ -156,10 +156,7 @@ fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
         .map_err(|_| Error::NoMemory)
         .and_then(|()| {
             bytes.extend_from_slice(&report.bytes());
-            handles.push(Entry {
-                object: thread.clone(),
-                rights: REPORT_RIGHTS,
-            });
+            handles.push(Entry::new(thread.clone(), REPORT_RIGHTS));
             Message::new(bytes, handles, None)
         })
         .and_then(|message| channel.write(message).map_err(|(e, _)| e));

@@ -58,6 +58,8 @@ classes! {
     CHANNEL_OUTER,
     CHANNEL_OBSERVER,
     STREAM_SHARED,
+    // Held while a paged memory object's unreferenced signal changes.
+    MEMORY_USES,
     PORT_REGISTRATIONS,
     PORT_STATE,
     PAGER_WAITERS,

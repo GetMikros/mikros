@@ -133,7 +133,8 @@ fn take_last(message: &mut Message, list: &mut Option<Arc<Core>>) {
             continue;
         }
         let entry = message.handles.swap_remove(i);
-        let core = super::downcast::<Core>(entry.object).expect("a queued endpoint");
+        let core = super::downcast::<Core>(entry.object.clone()).expect("a queued endpoint");
+        drop(entry);
         left_queue(&core);
         *core.dying.lock() = list.take();
         *list = Some(core);
@@ -1003,10 +1004,7 @@ mod tests {
     }
 
     fn carrying(end: &Arc<Endpoint>) -> Message {
-        let entry = Entry {
-            object: end.clone(),
-            rights: 0,
-        };
+        let entry = Entry::new(end.clone(), 0);
         message(b"x", vec![entry])
     }
 
@@ -1335,10 +1333,7 @@ mod tests {
         let (a, b) = Endpoint::pair(None).unwrap();
         let carried: Arc<dyn Object> = Arc::new(Plain(Header::new(ObjectType::Event)));
         let weak = Arc::downgrade(&carried);
-        let entry = Entry {
-            object: carried,
-            rights: 0,
-        };
+        let entry = Entry::new(carried, 0);
         b.write(message(b"to a", vec![entry])).ok().unwrap();
         a.write(message(b"to b", vec![])).ok().unwrap();
         drop(a);
