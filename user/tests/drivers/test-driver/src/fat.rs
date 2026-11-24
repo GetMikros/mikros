@@ -37,7 +37,7 @@ pub fn failed<T>(reply: Reply<T>) -> Option<Error> {
 }
 
 /// A connection to the root of `instance` of the `filesystem` service,
-/// read and write, once it appears, without asking any other instance's
+/// read, write and execute, once it appears, without asking any other instance's
 /// server anything.
 pub async fn named(
     directory: &DirectoryAsyncClient,
@@ -60,7 +60,9 @@ pub async fn named(
             let fs =
                 FilesystemAsyncClient::new(ClientEnd::new(client.into_handle()), reactor.clone());
             let (node, node_server) = endpoints::<Node>().ok()?;
-            let rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+            // A connection that can also run what it finds, which
+            // connections opened from it can have too.
+            let rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0);
             ok(fs.get_root(node_server, rights).await)?;
             return Some(NodeAsyncClient::new(node, reactor.clone()));
         }

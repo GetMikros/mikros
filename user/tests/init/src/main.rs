@@ -6383,9 +6383,19 @@ mod bootfs {
             // Memory objects hold the file's contents: a private copy, and
             // a paged object whose pages come even while this thread, the
             // executor's, waits for them.
-            let private = MemoryFlags::PRIVATE | MemoryFlags::WRITE;
-            let private = reply("getting memory", file.get_memory_object(private).await)?
-                .map_err(|_| failed("getting a private memory object"))?;
+            // A private copy that can be written needs the right to write,
+            // which this connection lacks.
+            let writable = MemoryFlags::PRIVATE | MemoryFlags::WRITE;
+            let writable = reply("getting memory", file.get_memory_object(writable).await)?;
+            ensure(
+                "refusing a writable copy",
+                writable.err() == Some(Error::AccessDenied),
+            )?;
+            let private = reply(
+                "getting memory",
+                file.get_memory_object(MemoryFlags::PRIVATE).await,
+            )?
+            .map_err(|_| failed("getting a private memory object"))?;
             let mut head = [0u8; 4];
             // SAFETY: the pointer describes `head`.
             check("reading private memory", unsafe {

@@ -125,6 +125,7 @@ async fn check(
     expect(attributes.owner == 1234 && attributes.mode == 0o644)?;
     ok(file.sync().await)?;
     memory(&file, process).await?;
+    running(&root, &file, reactor).await?;
 
     watches(&dir, reactor).await?;
     links(&dir, reactor).await?;
@@ -392,6 +393,117 @@ async fn memory(file: &NodeAsyncClient, process: sys::Handle) -> Option<()> {
     }
     ok(file.write(0, b"hello".to_vec()).await)?;
     Some(())
+}
+
+/// Whether a file that is run from cannot be changed while the object it
+/// was run from is in use: with a handle that has `EXECUTE`, writes,
+/// truncation and a writable object fail with `BUSY`, whatever the rights
+/// of the connection, and when the handle is closed the server learns
+/// that nothing refers to the object and the file can be written. Also
+/// that a writable object, given with `WRITE`, keeps an object to run
+/// from from being given. `file` holds "hello btrfs!".
+async fn running(root: &NodeAsyncClient, file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    let runner = open_runner(root, reactor).await?;
+    let object = got(
+        "an object to run from",
+        ok(runner.get_memory_object(MemoryFlags::EXECUTE).await),
+    )?
+    .memory;
+    step(
+        "busy writing",
+        failed(file.write(0, b"x".to_vec()).await) == Some(Error::Busy),
+    )?;
+    step(
+        "busy truncating",
+        failed(file.truncate(0).await) == Some(Error::Busy),
+    )?;
+    step(
+        "busy writable object",
+        failed(file.get_memory_object(MemoryFlags::WRITE).await) == Some(Error::Busy),
+    )?;
+    // Reading and a private copy are not kept from.
+    let read = got("reading", ok(file.read(0, 5).await))?;
+    step("reading the file", read.data == b"hello")?;
+    got(
+        "a private copy",
+        ok(file.get_memory_object(MemoryFlags::PRIVATE).await),
+    )?;
+    drop(object);
+    drop(runner);
+    changeable(file, reactor).await?;
+    // A writable object keeps an object to run from from being given
+    // until it is unreferenced and has no dirty page.
+    let writable = got(
+        "a writable object",
+        ok(file.get_memory_object(MemoryFlags::WRITE).await),
+    )?
+    .memory;
+    let runner = open_runner(root, reactor).await?;
+    let busy = runner.get_memory_object(MemoryFlags::EXECUTE).await;
+    step("busy running", failed(busy) == Some(Error::Busy))?;
+    drop(writable);
+    // Once it is unreferenced the object to run from can be given.
+    let mut given = None;
+    for _ in 0..SETTLES {
+        if let Some(response) = ok(runner.get_memory_object(MemoryFlags::EXECUTE).await) {
+            given = Some(response.memory);
+            break;
+        }
+        let _ = reactor.sleep_until(crate::now() + SETTLE_STEP).await;
+    }
+    let given = got("an object to run from at last", given)?;
+    drop(given);
+    drop(runner);
+    changeable(file, reactor).await
+}
+
+/// Logs `what` and returns `None` when `condition` does not hold.
+fn step(what: &str, condition: bool) -> Option<()> {
+    if !condition {
+        mikros_rt::log!(Error, "test-btrfs: {what} failed");
+    }
+    condition.then_some(())
+}
+
+/// The value of a step, or a log of `what` having failed.
+fn got<T>(what: &str, value: Option<T>) -> Option<T> {
+    if value.is_none() {
+        mikros_rt::log!(Error, "test-btrfs: {what} failed");
+    }
+    value
+}
+
+/// A connection to the file `btrfs-test/file` that may read and run it.
+async fn open_runner(root: &NodeAsyncClient, reactor: &Reactor) -> Option<NodeAsyncClient> {
+    let (node, server) = endpoints::<Node>().ok()?;
+    let rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
+    ok(root
+        .open(
+            "btrfs-test/file".into(),
+            OpenFlags(0),
+            0o644,
+            rights,
+            server,
+        )
+        .await)?;
+    Some(NodeAsyncClient::new(node, reactor.clone()))
+}
+
+/// How often and how long to wait for the server to see an object
+/// unreferenced.
+const SETTLES: usize = 200;
+const SETTLE_STEP: i64 = 20_000_000;
+
+/// Waits until `file` can be written again, and writes "hello" to it.
+async fn changeable(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    for _ in 0..SETTLES {
+        if file.write(0, b"hello".to_vec()).await.is_ok() {
+            return Some(());
+        }
+        let _ = reactor.sleep_until(crate::now() + SETTLE_STEP).await;
+    }
+    mikros_rt::log!(Error, "test-btrfs: the file never became writable again");
+    None
 }
 
 /// A new connection to `file` that only reads, as the source of a
