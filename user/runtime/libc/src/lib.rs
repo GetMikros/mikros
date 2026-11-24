@@ -21,6 +21,7 @@ mod library;
 mod lock;
 mod memfd;
 mod poll;
+mod privmap;
 mod process;
 mod services;
 mod signal;

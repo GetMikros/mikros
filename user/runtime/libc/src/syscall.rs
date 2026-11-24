@@ -6,10 +6,12 @@
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENODEV, ENOSYS, ENOTTY};
 use crate::fd::Description;
+use crate::privmap;
 use crate::{
     clock, dir, epoll, fd, files, fs, futex, io, poll, process, signal, spawn, stat, thread,
     timerfd, uname,
 };
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::{Error as FsError, MemoryFlags};
@@ -283,7 +285,7 @@ extern "C" fn __mikros_syscall(
         SYS_MMAP => mmap(a1 as u64, a2 as u64, a3, a4, a5, a6),
         SYS_MPROTECT => mprotect(a1 as u64, a2 as u64, a3),
         // SAFETY: unmapping takes no pointers.
-        SYS_MUNMAP => errno::result(unsafe { sys::vm_unmap(process(), a1 as u64, a2 as u64) }, 0),
+        SYS_MUNMAP => munmap(a1 as u64, a2 as u64),
         // There is no program break; malloc maps memory instead.
         SYS_BRK => 0,
         SYS_SET_THREAD_AREA => {
@@ -460,6 +462,7 @@ fn mmap(addr: u64, len: u64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
         // SAFETY: unmapping takes no pointers. Nothing may be mapped
         // there, which is no error.
         unsafe { sys::vm_unmap(process(), addr, size) };
+        privmap::forget(addr, size);
     }
     let at = if fixed { addr } else { 0 };
     let Some((file, offset)) = file else {
@@ -482,6 +485,7 @@ fn mmap(addr: u64, len: u64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
     } else {
         (file.memory, offset)
     };
+    let track = file.track;
     if in_file == len {
         let mut mapped = 0;
         // SAFETY: the out pointer is valid for the call.
@@ -496,6 +500,14 @@ fn mmap(addr: u64, len: u64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
                 &mut mapped,
             )
         };
+        if status == mikros_rt::OK && track {
+            privmap::track(
+                mapped,
+                len.next_multiple_of(PAGE_SIZE),
+                Arc::new(memory),
+                offset,
+            );
+        }
         return errno::result(status, mapped as i64);
     }
     // The range runs past the end of the file. It is reserved without
@@ -526,6 +538,9 @@ fn mmap(addr: u64, len: u64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
             // SAFETY: unmapping takes no pointers.
             unsafe { sys::vm_unmap(process(), base, size) };
             return -errno::from_status(status);
+        }
+        if track {
+            privmap::track(base, pages, Arc::new(memory), offset);
         }
     }
     base as i64
@@ -558,6 +573,9 @@ fn map_anonymous(options: u32, at: u64, size: u64) -> Result<u64, i64> {
 struct FileMemory {
     memory: OwnedHandle,
     clone: bool,
+    /// Whether the mapping maps the file's object itself and can be given
+    /// the right to write later, which `privmap` remembers.
+    track: bool,
 }
 
 /// The memory object of the file of descriptor `fd` for a mapping with
@@ -581,6 +599,7 @@ fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<FileMemory, i64> {
         return Ok(FileMemory {
             memory,
             clone: false,
+            track: false,
         });
     }
     let node = match &*description {
@@ -607,8 +626,15 @@ fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<FileMemory, i64> {
         (true, false, true) => (private_copy, false),
         (true, false, false) => (0, false),
     };
+    // Only the file's object for a private mapping that cannot be
+    // written is remembered; a private copy is the mapping's own.
+    let track = private && !write && wanted & MemoryFlags::PRIVATE.0 == 0;
     match ask(wanted) {
-        Ok(memory) => Ok(FileMemory { memory, clone }),
+        Ok(memory) => Ok(FileMemory {
+            memory,
+            clone,
+            track,
+        }),
         // A view that cannot give the file's object, which only a private
         // copy of the whole file then replaces.
         Err(FsError::NotSupported) if wanted & MemoryFlags::PRIVATE.0 == 0 && private => {
@@ -616,6 +642,7 @@ fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<FileMemory, i64> {
                 .map(|memory| FileMemory {
                     memory,
                     clone: false,
+                    track: false,
                 })
                 .map_err(errno::from_fs)
         }
@@ -657,12 +684,82 @@ fn memory_size(mem: Handle) -> u64 {
     u64::from_le_bytes(record[..8].try_into().expect("8 bytes"))
 }
 
+/// `mprotect`: when it adds the right to write, the pages of the range
+/// that still map a file's object are first replaced by a clone of those
+/// pages, as `mmap` of a writable private file maps one.
 fn mprotect(addr: u64, len: u64, prot: i64) -> i64 {
-    match perms(prot) {
-        // SAFETY: changing permissions takes no pointers.
-        Ok(perms) => errno::result(unsafe { sys::vm_protect(process(), perms, addr, len) }, 0),
-        Err(e) => -e,
+    let perms = match perms(prot) {
+        Ok(perms) => perms,
+        Err(e) => return -e,
+    };
+    if perms & PERM_WRITE != 0 {
+        if !addr.is_multiple_of(PAGE_SIZE) {
+            return -EINVAL;
+        }
+        let Some(size) = len.checked_next_multiple_of(PAGE_SIZE) else {
+            return -errno::ENOMEM;
+        };
+        // A run that was replaced is forgotten, and one that was not stays
+        // for the next call.
+        for run in privmap::within(addr, size) {
+            if let Err(e) = replace_by_clone(&run, perms) {
+                return -e;
+            }
+            privmap::forget(run.start, run.len);
+        }
     }
+    // SAFETY: changing permissions takes no pointers.
+    errno::result(unsafe { sys::vm_protect(process(), perms, addr, len) }, 0)
+}
+
+/// Maps a clone of the pages of `run` over them, with `perms`. When that
+/// fails, the pages map the file's object again, for reading.
+fn replace_by_clone(run: &privmap::Run, perms: u32) -> Result<(), i64> {
+    let clone = clone_range(&run.source, run.offset, run.len)?;
+    let mut mapped = 0;
+    // SAFETY: unmapping and mapping take no pointers but the out
+    // pointer, which is valid for the call.
+    let status = unsafe {
+        sys::vm_unmap(process(), run.start, run.len);
+        sys::vm_map(
+            process(),
+            perms | SPECIFIC,
+            run.start,
+            clone.raw(),
+            0,
+            run.len,
+            &mut mapped,
+        )
+    };
+    if status == mikros_rt::OK {
+        return Ok(());
+    }
+    // SAFETY: as above.
+    unsafe {
+        sys::vm_map(
+            process(),
+            PERM_READ | SPECIFIC,
+            run.start,
+            run.source.raw(),
+            run.offset,
+            run.len,
+            &mut mapped,
+        )
+    };
+    Err(errno::from_status(status))
+}
+
+/// `munmap`.
+fn munmap(addr: u64, len: u64) -> i64 {
+    // SAFETY: unmapping takes no pointers.
+    let status = unsafe { sys::vm_unmap(process(), addr, len) };
+    if status == mikros_rt::OK {
+        privmap::forget(
+            addr,
+            len.saturating_add(PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE,
+        );
+    }
+    errno::result(status, 0)
 }
 
 fn getrandom(buf: *mut u8, len: u64) -> i64 {

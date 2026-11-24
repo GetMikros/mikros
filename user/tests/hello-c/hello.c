@@ -287,6 +287,21 @@ static int files_map(void)
 		&& errno == EINVAL
 		&& mmap(0, n, PROT_READ, MAP_PRIVATE, dirfd, 0) == MAP_FAILED
 		&& errno == ENODEV;
+	/* Adding the right to write to a private mapping of the file gives it
+	   a copy of its pages, whose changes the file does not see, also
+	   when the mapping runs past the end of the file. */
+	char *late = mmap(0, 3 * 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+	ok = ok && late != MAP_FAILED
+		&& mprotect(late, 3 * 4096, PROT_READ | PROT_WRITE) == 0;
+	if (ok) {
+		late[0] = 'Z';
+		late[4096 + 5] = 7;
+		first = 0;
+		ok = late[1] == GREETING_TEXT[1] && late[4096 + 5] == 7
+			&& memcmp(late + 1, GREETING_TEXT + 1, n - 1) == 0
+			&& pread(fd, &first, 1, 0) == 1 && first == 'a';
+	}
+	munmap(late, 3 * 4096);
 	munmap(view, n);
 	munmap(copy, n);
 	munmap(span, 3 * 4096);
