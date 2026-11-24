@@ -12,7 +12,7 @@ use crate::{
 };
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
-use mikros_rt::interfaces::mikros::fs::MemoryFlags;
+use mikros_rt::interfaces::mikros::fs::{Error as FsError, MemoryFlags};
 use mikros_rt::sys::{self, Handle};
 
 const SYS_READ: i64 = 0;
@@ -146,6 +146,8 @@ const PERM_WRITE: u32 = 1 << 1;
 const PERM_EXECUTE: u32 = 1 << 2;
 const SPECIFIC: u32 = 1 << 8;
 const PAGE_SIZE: u64 = 4096;
+/// The option of `mem_clone` that gives the clone the right to write.
+const CLONE_WRITE: u32 = 1 << 1;
 /// The `object_get_info` topic of a memory object's size and kind.
 const INFO_MEMORY: u32 = 4;
 const INFO_MEMORY_SIZE: usize = 24;
@@ -445,7 +447,7 @@ fn mmap(addr: u64, len: u64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
             return -EINVAL;
         }
         match file_memory(fd, prot, flags) {
-            Ok(memory) => Some((memory, offset)),
+            Ok(file) => Some((file, offset)),
             Err(e) => return -e,
         }
     } else {
@@ -460,14 +462,26 @@ fn mmap(addr: u64, len: u64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
         unsafe { sys::vm_unmap(process(), addr, size) };
     }
     let at = if fixed { addr } else { 0 };
-    let Some((memory, offset)) = file else {
+    let Some((file, offset)) = file else {
         return match map_anonymous(options | perms, at, size) {
             Ok(mapped) => mapped as i64,
             Err(e) => -e,
         };
     };
     let offset = offset as u64;
-    let in_file = memory_size(memory.raw()).saturating_sub(offset).min(len);
+    let in_file = memory_size(file.memory.raw())
+        .saturating_sub(offset)
+        .min(len);
+    // A private writable mapping gets a clone of the pages it maps, at
+    // offset 0 of the clone, and nothing of the rest of the file.
+    let (memory, offset) = if file.clone && in_file > 0 {
+        match clone_range(&file.memory, offset, in_file) {
+            Ok(clone) => (clone, 0),
+            Err(e) => return -e,
+        }
+    } else {
+        (file.memory, offset)
+    };
     if in_file == len {
         let mut mapped = 0;
         // SAFETY: the out pointer is valid for the call.
@@ -539,41 +553,88 @@ fn map_anonymous(options: u32, at: u64, size: u64) -> Result<u64, i64> {
     }
 }
 
+/// The memory object for a mapping of a file, and whether `mmap` maps a
+/// clone of the pages it needs instead of the object itself.
+struct FileMemory {
+    memory: OwnedHandle,
+    clone: bool,
+}
+
 /// The memory object of the file of descriptor `fd` for a mapping with
-/// `prot` and `flags`: a private copy for `MAP_PRIVATE`.
-fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<OwnedHandle, i64> {
-    let mut wanted = match flags & MAP_TYPE {
-        MAP_PRIVATE => MemoryFlags::PRIVATE.0,
-        MAP_SHARED | MAP_SHARED_VALIDATE => 0,
+/// `prot` and `flags`. A private mapping that can be written asks the
+/// file for its object as shared and without `WRITE`, so that only the
+/// mapped pages are copied, and a private mapping that can run asks for a
+/// private copy.
+fn file_memory(fd: i64, prot: i64, flags: i64) -> Result<FileMemory, i64> {
+    let private = match flags & MAP_TYPE {
+        MAP_PRIVATE => true,
+        MAP_SHARED | MAP_SHARED_VALIDATE => false,
         _ => return Err(EINVAL),
     };
-    if prot & PROT_WRITE != 0 {
-        wanted |= MemoryFlags::WRITE.0;
-    }
-    if prot & PROT_EXEC != 0 {
-        wanted |= MemoryFlags::EXECUTE.0;
-    }
+    let write = prot & PROT_WRITE != 0;
+    let execute = prot & PROT_EXEC != 0;
     let description = fd::get(fd).ok_or(EBADF)?;
     // A memory descriptor maps its object, or a copy-on-write clone of
     // all of it, so that the mapping's offset stays the same.
     if let Description::Memory(m) = &*description {
-        let private = flags & MAP_TYPE == MAP_PRIVATE;
-        return m.mapped(private, 0, memory_size(m.object.raw()));
+        let memory = m.mapped(private, 0, memory_size(m.object.raw()))?;
+        return Ok(FileMemory {
+            memory,
+            clone: false,
+        });
     }
     let node = match &*description {
         Description::File(node) => node,
         Description::Handle(_) => return Err(EINVAL),
         _ => return Err(ENODEV),
     };
-    match node
+    let ask = |wanted: u32| match node
         .node
         .lock()
         .get_memory_object(MemoryFlags(wanted), FOREVER)
     {
         Ok(Ok(r)) => Ok(r.memory),
-        Ok(Err(e)) => Err(errno::from_fs(e)),
-        Err(_) => Err(errno::EIO),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(FsError::Io),
+    };
+    let execute_flag = if execute { MemoryFlags::EXECUTE.0 } else { 0 };
+    let write_flag = if write { MemoryFlags::WRITE.0 } else { 0 };
+    // The private copy that mappings of files asked for before: whole.
+    let private_copy = MemoryFlags::PRIVATE.0 | execute_flag | write_flag;
+    let (wanted, clone) = match (private, write, execute) {
+        (false, ..) => (execute_flag | write_flag, false),
+        (true, true, _) => (execute_flag, true),
+        (true, false, true) => (private_copy, false),
+        (true, false, false) => (0, false),
+    };
+    match ask(wanted) {
+        Ok(memory) => Ok(FileMemory { memory, clone }),
+        // A view that cannot give the file's object, which only a private
+        // copy of the whole file then replaces.
+        Err(FsError::NotSupported) if wanted & MemoryFlags::PRIVATE.0 == 0 && private => {
+            ask(private_copy)
+                .map(|memory| FileMemory {
+                    memory,
+                    clone: false,
+                })
+                .map_err(errno::from_fs)
+        }
+        Err(e) => Err(errno::from_fs(e)),
     }
+}
+
+/// A clone with the right to write of the `len` bytes of `memory` from
+/// `offset`, rounded up to whole pages.
+fn clone_range(memory: &OwnedHandle, offset: u64, len: u64) -> Result<OwnedHandle, i64> {
+    let len = len.checked_next_multiple_of(PAGE_SIZE).ok_or(EINVAL)?;
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::mem_clone(memory.raw(), CLONE_WRITE, offset, len, &mut out) };
+    if status != mikros_rt::OK {
+        return Err(errno::from_status(status));
+    }
+    // SAFETY: the kernel just created the handle for us.
+    Ok(unsafe { OwnedHandle::from_raw(out) })
 }
 
 /// The size of memory object `mem`, or 0 when it cannot be inspected.
