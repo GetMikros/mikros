@@ -441,6 +441,12 @@ impl MemoryObject {
             drop(pages);
             match failed {
                 None => break,
+                // A kernel write into a frame of a lend group is under way:
+                // look again once it ends.
+                Some(Error::BadState) => {
+                    Self::end_copies(&shared);
+                    let _ = crate::sched::sleep_until(crate::arch::monotonic_now() + 1_000_000);
+                }
                 Some(e) => {
                     Self::end_copies(&shared);
                     return Err(e);
@@ -1977,7 +1983,18 @@ impl MemoryObject {
                     });
                     match owner {
                         Some(owner) => {
-                            crate::share::copy(phys, owner.as_ref(), self.budget.as_ref())?;
+                            match crate::share::copy(phys, owner.as_ref(), self.budget.as_ref()) {
+                                Ok(()) => {}
+                                // A kernel write into the frame is under way.
+                                Err(Error::BadState) => {
+                                    drop(pages);
+                                    let _ = crate::sched::sleep_until(
+                                        crate::arch::monotonic_now() + 1_000_000,
+                                    );
+                                    continue;
+                                }
+                                Err(e) => return Err(e),
+                            }
                             if let Some(budget) = &self.budget
                                 && let Err(e) = budget.charge_kernel(PAGE_ENTRY_COST)
                             {
@@ -2246,6 +2263,7 @@ impl MemoryObject {
             return Ok(Some(Held {
                 mem: self.clone(),
                 backing: Some(Backing::Mapped(virt)),
+                counted: false,
             }));
         }
         if let Some(paged) = &self.paged {
@@ -2283,14 +2301,31 @@ impl MemoryObject {
                 self.settle(index, index + 1);
                 return Ok(None);
             }
-            if write {
-                state.written(index)?;
+            let counted = match write && pages.is_shared(index) && !pages.is_copy(index) {
+                true => match crate::share::hold(phys) {
+                    crate::share::Hold::Plain => false,
+                    crate::share::Hold::Counted => true,
+                    crate::share::Hold::Moved => {
+                        drop(state);
+                        drop(pages);
+                        move_group(phys)?;
+                        return Ok(None);
+                    }
+                },
+                false => false,
+            };
+            if write && let Err(e) = state.written(index) {
+                if counted {
+                    crate::share::unhold(phys);
+                }
+                return Err(e);
             }
             drop(state);
             pages.pin();
             return Ok(Some(Held {
                 mem: self.clone(),
                 backing: Some(Backing::Frame(phys)),
+                counted,
             }));
         }
         if self.is_changing(index) {
@@ -2320,10 +2355,23 @@ impl MemoryObject {
             self.settle(index, index + 1);
             return Ok(None);
         }
+        let counted = match write && pages.is_shared(index) && !pages.is_copy(index) {
+            true => match crate::share::hold(phys) {
+                crate::share::Hold::Plain => false,
+                crate::share::Hold::Counted => true,
+                crate::share::Hold::Moved => {
+                    drop(pages);
+                    move_group(phys)?;
+                    return Ok(None);
+                }
+            },
+            false => false,
+        };
         pages.pin();
         Ok(Some(Held {
             mem: self.clone(),
             backing: Some(Backing::Frame(phys)),
+            counted,
         }))
     }
 
@@ -2977,12 +3025,20 @@ pub struct Held {
     mem: Arc<MemoryObject>,
     /// `None` once released.
     backing: Option<Backing>,
+    /// Whether the write is counted in its frame's lend group.
+    counted: bool,
 }
 
 impl Held {
     fn end<F: FnMut()>(&mut self, work: &mut Work<F>) {
         match self.backing.take() {
-            Some(Backing::Frame(_)) => self.mem.unpin(work),
+            Some(Backing::Frame(phys)) => {
+                // Before the pin goes, which keeps the frame allocated.
+                if self.counted {
+                    crate::share::unhold(phys);
+                }
+                self.mem.unpin(work)
+            }
             // SAFETY: the mapping came from `physical_page_map`, and the hold
             // that used it is gone.
             Some(Backing::Mapped(virt)) => unsafe { crate::arch::physical_page_unmap(virt) },
@@ -4867,5 +4923,33 @@ mod tests {
         drop((clone, lender, port, owner));
         assert_eq!(arena.free(), start);
         assert_eq!((owner_budget.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    #[test]
+    fn a_clone_waits_for_a_kernel_write_into_a_frame_of_a_lend_group() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (owner_budget, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let owner = MemoryObject::new(Some(&owner_budget), PAGE_SIZE, 0).unwrap();
+        fill(&owner, 0, PAGE_SIZE, 0x3c);
+        let (lender, port) = paged(&user, 1);
+        lender.lend(0, PAGE_SIZE, &owner, 0).unwrap();
+        let phys = owner.pages.lock().frame(0).unwrap();
+        // A write that is counted keeps a clone from taking the frame.
+        assert_eq!(crate::share::hold(phys), crate::share::Hold::Counted);
+        assert_eq!(
+            crate::share::copy(phys, owner.budget.as_ref(), Some(&user)),
+            Err(Error::BadState)
+        );
+        crate::share::unhold(phys);
+        // Once it ended a clone takes it, and a write that begins then
+        // moves the group first.
+        crate::share::copy(phys, owner.budget.as_ref(), Some(&user)).unwrap();
+        assert_eq!(crate::share::hold(phys), crate::share::Hold::Moved);
+        crate::share::end(phys, crate::share::Kind::Copy);
+        drop((lender, port, owner));
+        assert_eq!(arena.free(), start);
+        assert_eq!((owner_budget.usage(), user.usage()), ((0, 0), (0, 0)));
     }
 }

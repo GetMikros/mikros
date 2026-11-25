@@ -32,6 +32,9 @@ struct Group {
     moving: bool,
     /// The group moved to another frame: nothing joins this one.
     retired: bool,
+    /// How many kernel writes into the frame are under way, held by
+    /// `hold`: no clone takes the frame while one is.
+    held: u64,
 }
 
 impl Group {
@@ -144,6 +147,7 @@ pub fn lend(
                         members: Vec::new(),
                         moving: false,
                         retired: false,
+                        held: 0,
                     })?;
                     group.add(source, index)?;
                     share.group = Some(group);
@@ -161,6 +165,7 @@ pub fn lend(
                 members: Vec::new(),
                 moving: false,
                 retired: false,
+                held: 0,
             })?;
             group.add(source, index)?;
             Some(group)
@@ -206,6 +211,47 @@ pub enum Write {
     /// The slot is one of a lend group, whose clones see the frame: the
     /// whole group moves to a new frame first.
     Group,
+}
+
+/// What starting a kernel write into a slot of the frame `phys` found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// Nothing to count: nobody shares the frame as a group.
+    Plain,
+    /// The write is counted, until `unhold`.
+    Counted,
+    /// A clone uses the frame: the write moves the group first.
+    Moved,
+}
+
+/// Starts a kernel write into the slot, not a clone's, that has the
+/// frame `phys`, which pins the object. A clone does not take the frame of
+/// a lend group while one is under way.
+pub fn hold(phys: u64) -> Hold {
+    if SHARED.load(Ordering::Acquire) == 0 {
+        return Hold::Plain;
+    }
+    let mut shares = SHARES.lock();
+    let Some(share) = shares.get_mut(&phys) else {
+        return Hold::Plain;
+    };
+    let copies = share.copies;
+    match share.group.as_mut() {
+        None => Hold::Plain,
+        Some(_) if copies > 0 => Hold::Moved,
+        Some(group) => {
+            group.held += 1;
+            Hold::Counted
+        }
+    }
+}
+
+/// Ends a kernel write that `hold` counted.
+pub fn unhold(phys: u64) {
+    let mut shares = SHARES.lock();
+    if let Some(group) = shares.get_mut(&phys).and_then(|s| s.group.as_mut()) {
+        group.held = group.held.saturating_sub(1);
+    }
 }
 
 /// How a write to a shared slot of the frame `phys` goes, `copy` when the
@@ -311,6 +357,7 @@ pub fn create_moved(
         members: Vec::new(),
         moving: false,
         retired: false,
+        held: 0,
     })?;
     for (mem, index) in members {
         group.add(mem, *index)?;
@@ -378,6 +425,10 @@ pub fn copy(
 ) -> Result<(), Error> {
     let mut shares = SHARES.lock();
     if let Some(share) = shares.get_mut(&phys) {
+        // A kernel write into the frame that is under way finishes first.
+        if share.group.as_ref().is_some_and(|group| group.held > 0) {
+            return Err(Error::BadState);
+        }
         share.uses += 1;
         share.copies += 1;
         return Ok(());
@@ -443,7 +494,8 @@ pub fn release(phys: u64, kind: Kind) -> Released {
             Kind::Lent => share.lent -= 1,
             Kind::Copy => share.copies -= 1,
         }
-        if share.uses > 1 || share.copies > 0 || share.lent > 0 {
+        let held = share.group.as_ref().is_some_and(|group| group.held > 0);
+        if share.uses > 1 || share.copies > 0 || share.lent > 0 || held {
             return Released::Used;
         }
         if share.uses == 1 {
