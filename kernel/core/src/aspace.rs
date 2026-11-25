@@ -663,6 +663,9 @@ pub enum Fault {
     /// A write to the page of a `STABLE` paged object waits until the
     /// writeback that records it ends.
     Stable(u64),
+    /// The page of a clone is still to come from its paged origin; the
+    /// access asks for it, with no lock held, and tries again.
+    Pending(u64),
 }
 
 /// Resolves a page fault of the running thread at the user address
@@ -693,6 +696,11 @@ pub fn resolve_fault(addr: u64, write: bool, fetch: bool) -> Fault {
             Fault::Busy(index) => match mem.wait_settled(index) {
                 Ok(()) => {}
                 Err(Error::NoResources) => return Fault::OutOfMemory,
+                Err(_) => return Fault::Denied,
+            },
+            Fault::Pending(index) => match mem.resolve_pending(index) {
+                Ok(()) => {}
+                Err(Error::NoResources | Error::NoMemory) => return Fault::OutOfMemory,
                 Err(_) => return Fault::Denied,
             },
             Fault::Stable(index) => match mem.wait_stable(index) {

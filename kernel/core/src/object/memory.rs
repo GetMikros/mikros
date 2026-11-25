@@ -138,14 +138,19 @@ impl Ranges {
             self.list.insert(from + 1, (end, tail.1));
             return Ok(());
         }
-        let mut kept = Vec::new();
+        // At most two ranges stay, in the room of the span's own, which
+        // holds at least two here: this allocates nothing.
+        let mut kept = [(0, 0); 2];
+        let mut count = 0;
         if keep_head {
-            kept.push((head.0, first));
+            kept[count] = (head.0, first);
+            count += 1;
         }
         if keep_tail {
-            kept.push((end, tail.1));
+            kept[count] = (end, tail.1);
+            count += 1;
         }
-        self.list.splice(from..to, kept);
+        self.list.splice(from..to, kept.into_iter().take(count));
         Ok(())
     }
 

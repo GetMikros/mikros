@@ -11,8 +11,8 @@ use crate::nodes::{self, Map};
 use crate::object::budget::{Budget, Scratch};
 use crate::object::memory::{
     Frame, INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_CONTIGUOUS, KIND_PAGED, KIND_PHYSICAL,
-    KIND_PINNED, PAGE_ENTRY_COST, PAGE_SIZE, Pages, RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK,
-    SEAL_WRITE, SEALS, STABLE, TRACK_DIRTY,
+    KIND_PINNED, PAGE_ENTRY_COST, PAGE_SIZE, Pages, RESIZABLE, Ranges, SEAL_GROW, SEAL_SEAL,
+    SEAL_SHRINK, SEAL_WRITE, SEALS, STABLE, TRACK_DIRTY,
 };
 use crate::object::{Header, Object, ObjectType};
 use crate::paging::{Absent, Paging};
@@ -81,6 +81,72 @@ pub struct MemoryObject {
 pub enum Fixed {
     Contiguous(u64),
     Pinned,
+}
+
+/// The pages of a clone that are still to come from a paged object, the
+/// origin, which the clone keeps alive and which stays in use for as long
+/// as one is left: page `i` of the clone is page `base + i` of the origin.
+/// A pending page has no frame.
+pub(crate) struct Pending {
+    origin: Arc<MemoryObject>,
+    base: u64,
+    ranges: Ranges,
+    /// The budget that the ranges' storage is charged to, and how many
+    /// ranges were charged.
+    budget: Option<Arc<Budget>>,
+    charged: u64,
+}
+
+impl Pending {
+    /// The pending pages `ranges` of a clone charged to `budget`, which
+    /// has paid for them already. The origin is in use from now on.
+    fn new(
+        origin: Arc<MemoryObject>,
+        base: u64,
+        ranges: Ranges,
+        budget: Option<Arc<Budget>>,
+    ) -> Pending {
+        origin.use_begin();
+        let charged = ranges.len() as u64;
+        Pending {
+            origin,
+            base,
+            ranges,
+            budget,
+            charged,
+        }
+    }
+
+    /// Takes the pages `first` to `end`, exclusive, out of the pending
+    /// ones. Fails, changing nothing, when that needs one more range and
+    /// there is no room or no budget for it.
+    fn cut(&mut self, first: u64, end: u64) -> Result<(), Error> {
+        if self.ranges.splits_inside(first, end) {
+            self.ranges.reserve(1)?;
+            if let Some(budget) = &self.budget {
+                budget.charge_kernel(PAGE_ENTRY_COST)?;
+            }
+            self.charged += 1;
+        }
+        self.ranges.cut(first, end)
+    }
+}
+
+/// What `resolve_pending` took for a page: a frame that the origin and
+/// this clone use, or a copy of a lent one.
+enum Taken {
+    Nothing,
+    Shared(u64),
+    Copied(u64),
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.budget {
+            budget.release_kernel(self.charged * PAGE_ENTRY_COST);
+        }
+        self.origin.use_end();
+    }
 }
 
 /// The part of a paged memory object that its pager drives.
@@ -260,9 +326,28 @@ impl MemoryObject {
         }
         self.check_range(offset, len)?;
         let clone = MemoryObject::new(Some(budget), len, options)?;
+        // The pages that the clone takes from a paged origin when it
+        // first uses them: those that a paged source has not got, and
+        // those that an anonymous source takes from its own origin.
+        let origin = match &self.paged {
+            Some(_) => Some((self.clone(), offset / PAGE_SIZE)),
+            None => self
+                .pages
+                .lock()
+                .pending
+                .as_ref()
+                .map(|p| (p.origin.clone(), p.base + offset / PAGE_SIZE)),
+        };
+        let mut absent = Ranges::new();
         in_pieces(0, len / PAGE_SIZE, |from, to| {
-            self.share_pages(&clone, offset, (from, to), budget, work)
+            self.share_pages(&clone, offset, (from, to), budget, work, &mut absent)
         })?;
+        if !absent.is_empty() {
+            let (origin, base) = origin.ok_or(Error::Internal)?;
+            budget.charge_kernel(absent.len() as u64 * PAGE_ENTRY_COST)?;
+            let pending = Pending::new(origin, base, absent, Some(budget.clone()));
+            clone.pages.lock().pending = Some(pending);
+        }
         Ok(clone)
     }
 
@@ -280,6 +365,7 @@ impl MemoryObject {
         (from, to): (u64, u64),
         budget: &Arc<Budget>,
         work: &mut Work<F>,
+        absent: &mut Ranges,
     ) -> Result<(), Error> {
         // A revocation waits for the sharing to end, and fails it when it
         // came first.
@@ -291,10 +377,13 @@ impl MemoryObject {
         let count = (to - from) as usize;
         let mut shared: Vec<(u64, u64)> = Vec::new();
         let mut lent: Vec<u64> = Vec::new();
+        let mut gone: Vec<u64> = Vec::new();
         shared
             .try_reserve_exact(count)
             .map_err(|_| Error::NoMemory)?;
         lent.try_reserve_exact(count).map_err(|_| Error::NoMemory)?;
+        gone.try_reserve_exact(count).map_err(|_| Error::NoMemory)?;
+        absent.reserve(count)?;
         // The uses are taken with the pages locked and once no output into
         // the source is still to be written, and none of its pages is
         // being changed.
@@ -312,14 +401,17 @@ impl MemoryObject {
             pages.check_range((first + from) * PAGE_SIZE, (to - from) * PAGE_SIZE)?;
             shared.clear();
             lent.clear();
+            gone.clear();
             let mut failed = None;
             for i in from..to {
                 let index = first + i;
                 let Some(phys) = pages.frame(index) else {
-                    // A page of a paged object that is absent is obtained
-                    // and copied; one of an anonymous object reads as zero.
-                    if self.paged.is_some() {
-                        lent.push(i);
+                    // A page that is absent from a paged object, or that
+                    // an anonymous one is still to take from its own
+                    // origin, is taken by the clone when it first uses it;
+                    // another reads as zero.
+                    if self.paged.is_some() || Self::is_pending(&pages, index) {
+                        gone.push(i);
                     }
                     continue;
                 };
@@ -383,6 +475,9 @@ impl MemoryObject {
             }
         }
         drop(guard);
+        for &i in &gone {
+            absent.push(i, i + 1);
+        }
         // What cannot be shared is copied.
         for i in lent {
             self.copy_pages(
@@ -1794,6 +1889,131 @@ impl MemoryObject {
         self.settle(index, index + 1);
     }
 
+    /// Whether page `index` is still to come from the paged origin of
+    /// this clone. The pages are locked.
+    fn is_pending(pages: &Pages, index: u64) -> bool {
+        pages
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.ranges.contains(index))
+    }
+
+    /// Gives page `index` of this clone, if it is pending, the frame that
+    /// the origin has for it, which it asks the origin's pager for as an
+    /// access to the origin does, and ends its being pending. The access
+    /// fails as an access to the origin would, and the page stays
+    /// pending. Waits for the pager with no lock held.
+    pub fn resolve_pending(&self, index: u64) -> Result<(), Error> {
+        loop {
+            let (origin, at) = {
+                let pages = self.pages.lock();
+                match &pages.pending {
+                    Some(p) if p.ranges.contains(index) => (p.origin.clone(), p.base + index),
+                    _ => return Ok(()),
+                }
+            };
+            origin.obtain(at)?;
+            // As `mem_clone` of the origin does, frames are shared once no
+            // kernel copy holds the origin and its page is not changing.
+            origin.wait_unpinned();
+            let claim = nodes::claim_insert()?;
+            // The origin's frame is used from now on, as a clone's slot.
+            let mut taken =
+                {
+                    // A revocation waits for the sharing, or came first and
+                    // fails it.
+                    let _supply = Supplying::begin(&origin, || origin.check_revoked())?;
+                    let mut pages = origin.pages.lock();
+                    if pages.pinned() {
+                        drop(pages);
+                        continue;
+                    }
+                    if origin.is_changing(at) {
+                        drop(pages);
+                        origin.wait_settled(at)?;
+                        continue;
+                    }
+                    let Some(phys) = pages.frame(at) else {
+                        // Gone again since it was obtained.
+                        drop(pages);
+                        continue;
+                    };
+                    let owner = origin.paged.as_ref().and_then(|paged| {
+                        match paged.charges.lock().get(&phys) {
+                            Some(Charge::Supplied(owner)) => Some(owner.clone()),
+                            _ => None,
+                        }
+                    });
+                    match owner {
+                        Some(owner) => {
+                            crate::share::copy(phys, owner.as_ref(), self.budget.as_ref())?;
+                            if let Some(budget) = &self.budget
+                                && let Err(e) = budget.charge_kernel(PAGE_ENTRY_COST)
+                            {
+                                crate::share::end(phys, crate::share::Kind::Copy);
+                                return Err(e);
+                            }
+                            pages.mark_shared(at);
+                            Taken::Shared(phys)
+                        }
+                        // A lent frame is copied, as a clone's pages are.
+                        None => Taken::Copied(self.copy_frame(phys)?),
+                    }
+                };
+            let mut pages = self.pages.lock();
+            let ended = match pages.pending.as_mut() {
+                Some(p) if p.ranges.contains(index) => match p.cut(index, index + 1) {
+                    Ok(()) => Some(p.ranges.is_empty()),
+                    Err(e) => {
+                        drop(pages);
+                        self.give_back(core::mem::replace(&mut taken, Taken::Nothing));
+                        return Err(e);
+                    }
+                },
+                // Another thread, or a decommit, was first.
+                _ => None,
+            };
+            match (ended, core::mem::replace(&mut taken, Taken::Nothing)) {
+                (Some(done), Taken::Shared(phys)) => {
+                    pages.insert_copy(index, phys, claim);
+                    let origin = if done { pages.pending.take() } else { None };
+                    drop(pages);
+                    drop(origin);
+                    return Ok(());
+                }
+                (Some(done), Taken::Copied(phys)) => {
+                    pages.insert(index, phys, claim);
+                    let origin = if done { pages.pending.take() } else { None };
+                    drop(pages);
+                    drop(origin);
+                    return Ok(());
+                }
+                (_, other) => {
+                    drop(pages);
+                    self.give_back(other);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Ends the use of a frame that `resolve_pending` took and did not
+    /// need after all.
+    fn give_back(&self, taken: Taken) {
+        match taken {
+            Taken::Nothing => {}
+            Taken::Shared(phys) => {
+                crate::share::end(phys, crate::share::Kind::Copy);
+                if let Some(budget) = &self.budget {
+                    budget.release_kernel(PAGE_ENTRY_COST);
+                }
+            }
+            Taken::Copied(phys) => {
+                self.free([Frame::private(phys)]);
+            }
+        }
+    }
+
     /// Enters the page at `virt` of `space` into its tables for a fault
     /// that was a write or a fetch as given. Pages read before they were
     /// written map the shared zero page read-only. Fails with `Denied`
@@ -1871,6 +2091,7 @@ impl MemoryObject {
                 (phys, false)
             }
             (None, Some(phys)) => (phys, perms & PERM_WRITE != 0),
+            (None, None) if Self::is_pending(&pages, index) => return Fault::Pending(index),
             // The page is entered once the zero page is gone everywhere.
             (None, None) if write => match self.alloc_changing(&mut pages, index) {
                 Ok(_) => return Fault::Changed(index),
@@ -2031,6 +2252,11 @@ impl MemoryObject {
             return Ok(None);
         }
         let Some(phys) = pages.frame(index) else {
+            if Self::is_pending(&pages, index) {
+                drop(pages);
+                self.resolve_pending(index)?;
+                return Ok(None);
+            }
             self.alloc_changing(&mut pages, index)?;
             drop(pages);
             self.settle(index, index + 1);
@@ -2059,6 +2285,9 @@ impl MemoryObject {
             return Err(Error::WrongType);
         }
         let mut pages = self.pages.lock();
+        if pages.pending.is_some() {
+            return Err(Error::WrongType);
+        }
         let mut frames = Vec::new();
         frames
             .try_reserve_exact(pages.count() as usize)
@@ -2173,7 +2402,16 @@ impl MemoryObject {
         source.pinned = true;
         for index in first..first + count {
             work.item();
-            let pages = self.pages.lock();
+            let mut pages = self.pages.lock();
+            // A pending page is taken from the origin first.
+            while Self::is_pending(&pages, index) {
+                drop(pages);
+                if let Err(e) = self.resolve_pending(index) {
+                    source.release(work);
+                    return Err(e);
+                }
+                pages = self.pages.lock();
+            }
             let found = pages.check_range(offset, len).map(|()| pages.frame(index));
             drop(pages);
             match found {
@@ -2405,6 +2643,11 @@ impl MemoryObject {
                         continue;
                     }
                     (None, Some(phys)) => phys,
+                    (None, None) if Self::is_pending(&pages, index) => {
+                        drop(pages);
+                        self.resolve_pending(index)?;
+                        continue;
+                    }
                     (None, None) => {
                         self.alloc_changing(&mut pages, index)?;
                         drop(pages);
@@ -2431,6 +2674,13 @@ impl MemoryObject {
         self.pages.lock().check_range(offset, len)?;
         let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
         in_pieces(first, end, |from, to| {
+            // A pending page is taken from the origin, as the first access
+            // of the clone would.
+            if self.pages.lock().pending.is_some() {
+                for index in from..to {
+                    self.resolve_pending(index)?;
+                }
+            }
             let mut pages = self.pages.lock();
             // The object may have shrunk since the last piece.
             pages.check_range(from * PAGE_SIZE, (to - from) * PAGE_SIZE)?;
@@ -2470,8 +2720,23 @@ impl MemoryObject {
             if from >= end {
                 return Ok(());
             }
-            let freed = pages.decommit(from, end)?;
+            // The pending pages read as zero from now on; they have no
+            // frames, so this stands also if freeing the others fails.
+            let ended = match pages.pending.as_mut() {
+                Some(pending) => {
+                    pending.cut(from, end)?;
+                    if pending.ranges.is_empty() {
+                        pages.pending.take()
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+            let freed = pages.decommit(from, end);
             drop(pages);
+            drop(ended);
+            let freed = freed?;
             // The translations go before the frames.
             self.unmap_in_steps(from, end);
             self.free(freed);
@@ -2541,8 +2806,23 @@ impl MemoryObject {
         if new >= old {
             return Ok(());
         }
+        // Pending pages past the end go: that never needs a new range.
+        let ended = match pages.pending.as_mut() {
+            Some(pending) => {
+                // A tail never splits a range, so this needs no room.
+                let cut = pending.cut(new, old);
+                debug_assert!(cut.is_ok(), "cutting a tail needs no new range");
+                if pending.ranges.is_empty() {
+                    pages.pending.take()
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
         pages.set_trimming(true);
         drop(pages);
+        drop(ended);
         let mut removed = resized.removed;
         // The pieces cannot fail: one waits until the frames it cannot
         // keep for kernel copies are no longer used.
@@ -3959,5 +4239,146 @@ mod tests {
         drop((clone, origin, port));
         assert_eq!(arena.free(), start);
         assert_eq!((supplier.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    /// A paged object of two pages whose first page was supplied with
+    /// `byte` from an object charged to `supplier`, the second absent.
+    fn half_supplied(
+        supplier: &Arc<Budget>,
+        user: &Arc<Budget>,
+        byte: u8,
+    ) -> (Arc<MemoryObject>, Arc<Port>) {
+        let source = MemoryObject::new(Some(supplier), PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, PAGE_SIZE, byte);
+        let (origin, port) = paged(user, 2);
+        origin.supply(0, PAGE_SIZE, &source, 0).unwrap();
+        (origin, port)
+    }
+
+    /// Supplies the second page of `origin`, as its pager does once the
+    /// page is asked for.
+    fn supply_second(origin: &MemoryObject, supplier: &Arc<Budget>, byte: u8) {
+        let source = MemoryObject::new(Some(supplier), PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, PAGE_SIZE, byte);
+        origin.supply(PAGE_SIZE, PAGE_SIZE, &source, 0).unwrap();
+    }
+
+    #[test]
+    fn a_clone_leaves_the_pages_absent_from_its_origin_pending_until_it_uses_them() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (supplier, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (origin, port) = half_supplied(&supplier, &user, 0x3c);
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, 2 * PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        // The first page is shared, and the second is neither copied nor
+        // requested: it is pending, and keeps the origin in use.
+        assert!(clone.pages.lock().frame(0).is_some());
+        assert_eq!(clone.pages.lock().frame(1), None);
+        assert!(MemoryObject::is_pending(&clone.pages.lock(), 1));
+        assert!(!MemoryObject::is_pending(&clone.pages.lock(), 0));
+        assert_eq!(origin.uses(), 1);
+        // The page is supplied meanwhile, and the clone's first use of it
+        // takes what the origin has then.
+        supply_second(&origin, &supplier, 0x55);
+        let frame = origin.pages.lock().frame(1).unwrap();
+        clone.resolve_pending(1).unwrap();
+        assert_eq!(clone.pages.lock().frame(1), Some(frame));
+        assert!(clone.pages.lock().is_copy(1));
+        assert!(clone.pages.lock().pending.is_none());
+        assert_eq!(origin.uses(), 0);
+        assert_eq!(frame_head(frame, 4), alloc::vec![0x55; 4]);
+        // A write through the origin then gives it a frame of its own.
+        fill(&origin, PAGE_SIZE, 4, 0x77);
+        assert_ne!(origin.pages.lock().frame(1), Some(frame));
+        assert_eq!(frame_head(frame, 4), alloc::vec![0x55; 4]);
+        drop(clone);
+        drop((origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((supplier.usage(), user.usage()), ((0, 0), (0, 0)));
+    }
+
+    #[test]
+    fn pending_pages_go_with_the_clone_or_become_zero_when_decommitted() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (supplier, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (origin, port) = half_supplied(&supplier, &user, 0x3c);
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, 2 * PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        // The clone of a clone takes over the pending page, which the
+        // origin stays in use for.
+        let again = clone
+            .clone_range(PAGE_SIZE, PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        assert!(MemoryObject::is_pending(&again.pages.lock(), 0));
+        assert_eq!(origin.uses(), 2);
+        // Decommitting the pending page makes it read as zero, and ends it.
+        clone.decommit(PAGE_SIZE, PAGE_SIZE).unwrap();
+        assert!(clone.pages.lock().pending.is_none());
+        assert_eq!(origin.uses(), 1);
+        drop(again);
+        assert_eq!(origin.uses(), 0);
+        drop(clone);
+        drop((origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((supplier.usage(), user.usage()), ((0, 0), (0, 0)));
+    }
+
+    #[test]
+    fn a_shrunk_clone_forgets_the_pending_pages_it_lost() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (supplier, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (origin, port) = half_supplied(&supplier, &user, 0x3c);
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, 2 * PAGE_SIZE, RESIZABLE, &user, &mut work)
+            .unwrap();
+        assert_eq!(origin.uses(), 1);
+        clone.set_size(PAGE_SIZE).unwrap();
+        assert!(clone.pages.lock().pending.is_none());
+        assert_eq!(origin.uses(), 0);
+        drop(clone);
+        drop((origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((supplier.usage(), user.usage()), ((0, 0), (0, 0)));
+    }
+
+    #[test]
+    fn decommitting_the_middle_of_the_pending_pages_leaves_those_around_it_pending() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let user = Budget::root();
+        let start = arena.free();
+        let (origin, port) = paged(&user, 4);
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, 4 * PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        clone.decommit(PAGE_SIZE, 2 * PAGE_SIZE).unwrap();
+        let pages = clone.pages.lock();
+        let pending = |i| MemoryObject::is_pending(&pages, i);
+        assert_eq!(
+            [pending(0), pending(1), pending(2), pending(3)],
+            [true, false, false, true]
+        );
+        drop(pages);
+        // The origin stays in use until the last pending page is gone.
+        assert_eq!(origin.uses(), 1);
+        clone.decommit(0, PAGE_SIZE).unwrap();
+        assert_eq!(origin.uses(), 1);
+        clone.decommit(3 * PAGE_SIZE, PAGE_SIZE).unwrap();
+        assert_eq!(origin.uses(), 0);
+        drop((clone, origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!(user.usage(), (0, 0));
     }
 }
