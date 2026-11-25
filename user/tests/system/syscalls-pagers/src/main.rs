@@ -27,6 +27,10 @@ fn main(m: &Managed) -> i64 {
             ("cloning_paged_objects", cloning_paged_objects),
             ("cloning_absent_pages", cloning_absent_pages),
             ("cloning_mapped_origin", cloning_mapped_origin),
+            (
+                "cloning_lent_pages_under_writes",
+                cloning_lent_pages_under_writes,
+            ),
             ("unreferenced_objects", unreferenced_objects),
             ("writebacks_and_discards", writebacks_and_discards),
             ("large_pager_operations", large_pager_operations),
@@ -599,6 +603,92 @@ fn cloning_mapped_origin(s: &Own) -> Result {
         check("unmapping", sys::vm_unmap(s.process, at, PAGE_SIZE))?;
         check("closing the clone", sys::handle_close(clone))
     }
+}
+
+/// How many writer threads of `cloning_lent_pages_under_writes` are done.
+static WRITERS_DONE: AtomicU64 = AtomicU64::new(0);
+/// How many writes through the paged object failed.
+static WRITES_FAILED: AtomicU64 = AtomicU64::new(0);
+const WRITES: u64 = 2000;
+
+/// Stores bytes through a mapping of the source of a lent page.
+extern "sysv64" fn store_through_source(at: u64, _unused: u64) -> ! {
+    for i in 0..WRITES {
+        // SAFETY: the mapping is writable and covers a page.
+        unsafe { ((at + 16 + i % 16) as *mut u8).write_volatile(i as u8) };
+    }
+    WRITERS_DONE.fetch_add(1, Ordering::AcqRel);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Writes bytes through the paged object that the page is lent to.
+extern "sysv64" fn write_through_lender(mem: u64, _unused: u64) -> ! {
+    for i in 0..WRITES {
+        if mem_write_at(mem as Handle, 32 + i % 16, &[i as u8]).is_err() {
+            WRITES_FAILED.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+    WRITERS_DONE.fetch_add(1, Ordering::AcqRel);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A lent page that a thread stores to through a mapping of the source
+/// and another writes through the paged object, while this one clones
+/// both: every clone keeps the bytes it was made with, and in the end the
+/// source and the paged object show the same page.
+fn cloning_lent_pages_under_writes(s: &Own) -> Result {
+    let (pager, mem) = paged_object(s, 1, 2)?;
+    let source = create_memory(PAGE_SIZE)?;
+    mem_write_at(source, 0, &[0xa5; 64])?;
+    // SAFETY: the call takes no pointers.
+    check("lending", unsafe {
+        sys::pager_lend(pager, mem, 0, PAGE_SIZE, source, 0)
+    })?;
+    let at = map(s.process, source, PAGE_SIZE)?;
+    WRITERS_DONE.store(0, Ordering::Release);
+    WRITES_FAILED.store(0, Ordering::Release);
+    spawn2(s, store_through_source, at, 0)?;
+    spawn2(s, write_through_lender, u64::from(mem), 0)?;
+    let mut clones = 0;
+    while WRITERS_DONE.load(Ordering::Acquire) < 2 || clones < 20 {
+        let from = if clones % 2 == 0 { source } else { mem };
+        let mut clone = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("cloning", unsafe {
+            sys::mem_clone(from, 0, 0, PAGE_SIZE, &mut clone)
+        })?;
+        let first = mem_read_at::<64>(clone, 0)?;
+        sleep_ms(1);
+        ensure(
+            "keeping the bytes a clone was made with",
+            mem_read_at::<64>(clone, 0)? == first,
+        )?;
+        // SAFETY: the call takes no pointers.
+        check("closing the clone", unsafe { sys::handle_close(clone) })?;
+        clones += 1;
+    }
+    ensure(
+        "writing through the lender",
+        WRITES_FAILED.load(Ordering::Acquire) == 0,
+    )?;
+    // The last write to each byte is the one that shows, through both.
+    let seen = mem_read_at::<64>(mem, 0)?;
+    ensure(
+        "showing the same page through the source and the lender",
+        mem_read_at::<64>(source, 0)? == seen,
+    )?;
+    for k in 0..16u64 {
+        let last = (WRITES - 16 + k) as u8;
+        ensure(
+            "keeping the last write of each byte",
+            seen[16 + k as usize] == last && seen[32 + k as usize] == last,
+        )?;
+    }
+    Ok(())
 }
 
 /// Supplying, writing back and evicting a paged object of more pages
