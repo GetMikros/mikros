@@ -24,6 +24,7 @@ fn main(m: &Managed) -> i64 {
             ("pagers", pagers),
             ("pager_operations", pager_operations),
             ("lending_frames", lending_frames),
+            ("cloning_paged_objects", cloning_paged_objects),
             ("unreferenced_objects", unreferenced_objects),
             ("writebacks_and_discards", writebacks_and_discards),
             ("large_pager_operations", large_pager_operations),
@@ -390,6 +391,90 @@ fn lending_frames(s: &Own) -> Result {
             sys::pager_lend(pager, mem, 0, PAGE_SIZE, create_memory(PAGE_SIZE)?, 0) == -13,
         )
     }
+}
+
+/// A clone of a paged object uses the frames that its pages have, with no
+/// request to the pager: a write through the object, through a mapping of
+/// it, or through the clone gives the one written a frame of its own,
+/// and the other keeps what it had, also when the object evicts the page.
+fn cloning_paged_objects(s: &Own) -> Result {
+    let (pager, mem) = paged_object(s, 2, 2)?;
+    ensure(
+        "reading the pages",
+        mem_read_at::<6>(mem, 0)? == *b"page 0" && mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1",
+    )?;
+    let before = REQUESTS.load(Ordering::Acquire);
+    let clone_of = |what: &'static str| -> Result<Handle> {
+        let mut clone = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check(what, unsafe {
+            sys::mem_clone(mem, 0, 0, 2 * PAGE_SIZE, &mut clone)
+        })?;
+        Ok(clone)
+    };
+    let clone = clone_of("cloning")?;
+    ensure(
+        "requesting no page for a clone",
+        REQUESTS.load(Ordering::Acquire) == before,
+    )?;
+    ensure(
+        "reading the object's pages through the clone",
+        mem_read_at::<6>(clone, 0)? == *b"page 0"
+            && mem_read_at::<6>(clone, PAGE_SIZE)? == *b"page 1",
+    )?;
+    // A write through the object stays out of the clone.
+    mem_write_at(mem, 0, b"P")?;
+    ensure(
+        "keeping the clone's page against a write to the object",
+        mem_read_at::<6>(clone, 0)? == *b"page 0" && mem_read_at::<6>(mem, 0)? == *b"Page 0",
+    )?;
+    // A write through the clone stays out of the object.
+    mem_write_at(clone, PAGE_SIZE, b"C")?;
+    ensure(
+        "keeping the object's page against a write to the clone",
+        mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1"
+            && mem_read_at::<6>(clone, PAGE_SIZE)? == *b"Cage 1",
+    )?;
+    ensure(
+        "marking the written page dirty",
+        dirty(pager, mem, 2 * PAGE_SIZE)?.1 >= 1,
+    )?;
+    // A store through a mapping of the object gets the page a frame of its
+    // own, as a read through the mapping saw the shared one.
+    let second = clone_of("cloning again")?;
+    let at = map(s.process, mem, PAGE_SIZE)?;
+    // SAFETY: the mapping is readable and writable.
+    let first = unsafe { (at as *const u8).read_volatile() };
+    ensure("reading through a mapping", first == b'P')?;
+    // SAFETY: the mapping is writable.
+    unsafe { ((at + 1) as *mut u8).write_volatile(b'A') };
+    ensure(
+        "keeping the clone's page against a store through a mapping",
+        mem_read_at::<6>(second, 0)? == *b"Page 0" && mem_read_at::<6>(mem, 0)? == *b"PAge 0",
+    )?;
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::vm_unmap(s.process, at, PAGE_SIZE) };
+    // A page that the object discards stays with the clone, and is
+    // requested again for the object.
+    let third = clone_of("cloning a third time")?;
+    // The page is dirty, which only a discard drops.
+    check("discarding", pager_op(pager, mem, 6, 0, PAGE_SIZE))?;
+    ensure(
+        "keeping a page that was discarded for the clone",
+        mem_read_at::<6>(third, 0)? == *b"PAge 0",
+    )?;
+    let requested = REQUESTS.load(Ordering::Acquire);
+    ensure(
+        "requesting the discarded page again for the object",
+        mem_read_at::<6>(mem, 0)? == *b"page 0" && REQUESTS.load(Ordering::Acquire) > requested,
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        for handle in [clone, second, third] {
+            check("closing a clone", sys::handle_close(handle))?;
+        }
+    }
+    Ok(())
 }
 
 /// Supplying, writing back and evicting a paged object of more pages

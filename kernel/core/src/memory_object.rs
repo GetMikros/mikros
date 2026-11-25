@@ -3869,4 +3869,95 @@ mod tests {
         assert_eq!(arena.free(), start);
         assert_eq!((supplier.usage(), user.usage().1), ((0, 0), 0));
     }
+
+    /// A paged object whose one page, filled with `byte`, was supplied from
+    /// an object charged to `supplier`.
+    fn supplied(
+        supplier: &Arc<Budget>,
+        user: &Arc<Budget>,
+        byte: u8,
+    ) -> (Arc<MemoryObject>, Arc<Port>) {
+        let source = MemoryObject::new(Some(supplier), PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, PAGE_SIZE, byte);
+        let (origin, port) = paged(user, 1);
+        origin.supply(0, PAGE_SIZE, &source, 0).unwrap();
+        (origin, port)
+    }
+
+    #[test]
+    fn a_paged_object_keeps_its_frame_when_the_clone_that_shared_it_goes_first() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (supplier, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (origin, port) = supplied(&supplier, &user, 0x3c);
+        let frame = origin.pages.lock().frame(0).unwrap();
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        drop(clone);
+        // No clone is left, so a write needs no copy.
+        fill(&origin, 0, 4, 0x77);
+        assert_eq!(origin.pages.lock().frame(0), Some(frame));
+        assert_eq!(supplier.usage().1, 1);
+        drop((origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((supplier.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    #[test]
+    fn a_clone_keeps_the_frame_of_a_page_that_the_paged_object_evicts() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (supplier, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (origin, port) = supplied(&supplier, &user, 0x3c);
+        let frame = origin.pages.lock().frame(0).unwrap();
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        origin.pager_op(OP_EVICT, 0, PAGE_SIZE).unwrap();
+        assert_eq!(origin.pages.lock().frame(0), None);
+        // The frame stays charged to the supplier while the clone uses it.
+        assert_eq!(clone.pages.lock().frame(0), Some(frame));
+        assert_eq!(frame_head(frame, 4), alloc::vec![0x3c; 4]);
+        assert_eq!(supplier.usage().1, 1);
+        drop(clone);
+        assert_eq!(supplier.usage().1, 0);
+        drop((origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((supplier.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    #[test]
+    fn a_write_to_a_shared_page_of_a_paged_object_fails_when_the_supplier_has_no_room() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let root = Budget::root();
+        let user = Budget::root();
+        // Room for the page that is supplied, and for no copy of it.
+        let supplier = Budget::child(&root, u64::MAX, 1, None).unwrap();
+        let start = arena.free();
+        let (origin, port) = supplied(&supplier, &user, 0x3c);
+        let frame = origin.pages.lock().frame(0).unwrap();
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        let mut work = Work::new(no_preempt);
+        let written = origin.write(0, 4, &mut work, |to| {
+            to.fill(0x77);
+            Ok(())
+        });
+        assert_eq!(written, Err(Error::NoResources));
+        // Nothing changed: the object and the clone still use the frame.
+        assert_eq!(origin.pages.lock().frame(0), Some(frame));
+        assert_eq!(frame_head(frame, 4), alloc::vec![0x3c; 4]);
+        assert_eq!(supplier.usage().1, 1);
+        drop((clone, origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((supplier.usage(), user.usage().1), ((0, 0), 0));
+    }
 }
