@@ -335,12 +335,7 @@ fn write_accounts(held: &[&StandIn], password: &str, kind: Kind) -> Result<(Path
     fs::write(&store, encode(&users)).with_context(|| format!("writing {}", store.display()))?;
     let file = dir.join("stand-in-password");
     let lines: String = names.iter().map(|n| format!("{n} {password}\n")).collect();
-    fs::write(&file, lines).with_context(|| format!("writing {}", file.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o600))?;
-    }
+    write_secret(&file, &lines)?;
     Ok((
         store,
         Account {
@@ -349,6 +344,31 @@ fn write_accounts(held: &[&StandIn], password: &str, kind: Kind) -> Result<(Path
             file,
         },
     ))
+}
+
+/// Writes `text` to `path`, readable by its owner only on Unix systems. The
+/// file is written beside it and renamed, so that a file that another user of
+/// a shared checkout made earlier, which this user cannot write to, is
+/// replaced, and so is a link at `path`, which is not written through. A
+/// process that is killed in between leaves the file `<stem>.tmp<pid>`.
+pub(crate) fn write_secret(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let temp = path.with_extension(format!("tmp{}", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = options
+        .open(&temp)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .and_then(|()| fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result.with_context(|| format!("writing {}", path.display()))
 }
 
 /// Builds the stand-ins `held` of an image of the build kind `kind`, and the
@@ -420,6 +440,25 @@ mod tests {
             executable: executable.into(),
             arguments: arguments.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn a_secret_is_replaced_and_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("secret-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("password");
+        write_secret(&file, "first\n").unwrap();
+        // A file that cannot be written to, as another user's would be.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
+        write_secret(&file, "second\n").unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "second\n");
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

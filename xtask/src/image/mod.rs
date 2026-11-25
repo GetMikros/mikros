@@ -230,8 +230,9 @@ pub fn run(args: &Args) -> Result<()> {
         match (&built.stand_in_account, args.tests) {
             (Some(account), false) => {
                 let copy = out.with_extension("password");
-                fs::copy(&account.file, &copy)
-                    .with_context(|| format!("writing {}", copy.display()))?;
+                let text = fs::read_to_string(&account.file)
+                    .with_context(|| format!("reading {}", account.file.display()))?;
+                crate::standin_build::write_secret(&copy, &text)?;
                 println!(
                     "stand-ins: this image holds stand-ins for the greeter and the shell, and the \
                      account {}, whose password is {}, which is also in {}, a secret of \
