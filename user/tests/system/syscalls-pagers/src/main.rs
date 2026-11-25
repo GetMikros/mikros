@@ -43,6 +43,7 @@ fn main(m: &Managed) -> i64 {
             ("seal_waits_for_outputs", seal_waits_for_outputs),
             ("evict_waits_for_outputs", evict_waits_for_outputs),
             ("supply_waits_for_outputs", supply_waits_for_outputs),
+            ("lend_waits_for_outputs", lend_waits_for_outputs),
             ("clone_waits_for_outputs", clone_waits_for_outputs),
             (
                 "map_checks_again_after_waiting",
@@ -1276,6 +1277,34 @@ fn supply_waits_for_outputs(s: &Own) -> Result {
     ensure("waiting for the write", read_done())?;
     ensure(
         "moving the written bytes",
+        mem_read_at::<8>(mem, PAGE_SIZE - 8)? == *b"01234567",
+    )
+}
+
+/// Lending pages of an object waits for a kernel write into it that is
+/// under way, and lends the pages with the written bytes.
+fn lend_waits_for_outputs(s: &Own) -> Result {
+    let plain = create_memory(PAGE_SIZE)?;
+    let at = start_straddling_read(s, plain)?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })?;
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 9, PAGE_SIZE, 0, &mut mem);
+        check("creating a paged object", status)?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("lending", unsafe {
+        sys::pager_lend(pager, mem, 0, PAGE_SIZE, plain, 0)
+    })?;
+    ensure("waiting for the write", read_done())?;
+    ensure(
+        "lending the written bytes",
         mem_read_at::<8>(mem, PAGE_SIZE - 8)? == *b"01234567",
     )
 }

@@ -1227,14 +1227,28 @@ impl MemoryObject {
             // locked, so that the source frees none of them before.
             loop {
                 source.commit((source_first + from) * PAGE_SIZE, (to - from) * PAGE_SIZE)?;
+                // Frames are lent once no kernel copy holds the source, and
+                // none of its pages is changing.
+                source.wait_unpinned();
                 let mut pages = source.pages.lock();
+                if pages.pinned() {
+                    continue;
+                }
+                if let Some(index) =
+                    (source_first + from..source_first + to).find(|&i| source.is_changing(i))
+                {
+                    drop(pages);
+                    source.wait_settled(index)?;
+                    continue;
+                }
                 // A frame that slots of clones share is not lent as it is:
                 // the paged object's writes would reach them. The page
-                // gets a frame of its own first.
+                // gets a frame of its own first, and so does the slot of a
+                // clone, which is not the owner of its frame.
                 let copied = (source_first + from..source_first + to).find(|&index| {
-                    pages
-                        .frame(index)
-                        .is_some_and(|phys| source.needs_copy(&pages, index, phys))
+                    pages.frame(index).is_some_and(|phys| {
+                        source.needs_copy(&pages, index, phys) || pages.is_copy(index)
+                    })
                 });
                 if let Some(index) = copied {
                     if source.is_changing(index) {
@@ -4384,5 +4398,31 @@ mod tests {
         drop((clone, origin, port));
         assert_eq!(arena.free(), start);
         assert_eq!(user.usage(), (0, 0));
+    }
+
+    #[test]
+    fn lends_a_frame_of_its_own_from_the_slot_of_a_clone_that_is_the_only_user() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (owner_budget, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let owner = MemoryObject::new(Some(&owner_budget), PAGE_SIZE, 0).unwrap();
+        fill(&owner, 0, PAGE_SIZE, 0x3c);
+        let shared = owner.pages.lock().frame(0).unwrap();
+        let clone = clone_of(&owner, &user);
+        drop(owner);
+        let (lender, port) = paged(&user, 1);
+        lender.lend(0, PAGE_SIZE, &clone, 0).unwrap();
+        // The clone is not the owner of the frame it had, so what is lent
+        // is a frame that is its own, with the bytes it had.
+        let lent = clone.pages.lock().frame(0).unwrap();
+        assert_ne!(lent, shared);
+        assert!(!clone.pages.lock().is_copy(0));
+        assert!(crate::share::is_lent(lent) && !crate::share::has_copies(lent));
+        assert_eq!(lender.pages.lock().frame(0), Some(lent));
+        assert_eq!(frame_head(lent, 4), alloc::vec![0x3c; 4]);
+        drop((lender, clone, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((owner_budget.usage(), user.usage().1), ((0, 0), 0));
     }
 }
