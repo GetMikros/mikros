@@ -260,10 +260,6 @@ impl MemoryObject {
         }
         self.check_range(offset, len)?;
         let clone = MemoryObject::new(Some(budget), len, options)?;
-        if !self.is_anonymous() {
-            self.copy_pages(&clone, offset, len, 0, budget, work)?;
-            return Ok(clone);
-        }
         in_pieces(0, len / PAGE_SIZE, |from, to| {
             self.share_pages(&clone, offset, (from, to), budget, work)
         })?;
@@ -271,8 +267,9 @@ impl MemoryObject {
     }
 
     /// Makes the pages `from` to `to`, exclusive, of `clone` use the
-    /// frames of the pages from `offset` of this anonymous object, which
-    /// the table of shared frames counts, and copies the lent ones. Each
+    /// frames of the pages from `offset` of this object, which the table
+    /// of shared frames counts, and copies the lent ones and, for a paged
+    /// object, those that are absent. Each
     /// slot's entry is charged to `budget`. No writable translation of the
     /// shared frames is left in this object's mappings when it returns,
     /// and a failure leaves no use taken that `clone` does not hold.
@@ -284,6 +281,12 @@ impl MemoryObject {
         budget: &Arc<Budget>,
         work: &mut Work<F>,
     ) -> Result<(), Error> {
+        // A revocation waits for the sharing to end, and fails it when it
+        // came first.
+        let guard = match &self.paged {
+            Some(_) => Some(Supplying::begin(self, || self.check_revoked())?),
+            None => None,
+        };
         let first = offset / PAGE_SIZE;
         let count = (to - from) as usize;
         let mut shared: Vec<(u64, u64)> = Vec::new();
@@ -313,13 +316,30 @@ impl MemoryObject {
             for i in from..to {
                 let index = first + i;
                 let Some(phys) = pages.frame(index) else {
+                    // A page of a paged object that is absent is obtained
+                    // and copied; one of an anonymous object reads as zero.
+                    if self.paged.is_some() {
+                        lent.push(i);
+                    }
                     continue;
                 };
                 if crate::share::is_lent(phys) {
                     lent.push(i);
                     continue;
                 }
-                if let Err(e) = crate::share::copy(phys, self.budget.as_ref(), Some(budget)) {
+                // The budget that the frame's page is charged to: the
+                // object's, or the one that supplied it to a paged object.
+                let owner = match &self.paged {
+                    None => self.budget.clone(),
+                    Some(paged) => match paged.charges.lock().get(&phys) {
+                        Some(Charge::Supplied(owner)) => owner.clone(),
+                        _ => {
+                            lent.push(i);
+                            continue;
+                        }
+                    },
+                };
+                if let Err(e) = crate::share::copy(phys, owner.as_ref(), Some(budget)) {
                     failed = Some(e);
                     break;
                 }
@@ -362,6 +382,7 @@ impl MemoryObject {
                 cpages.insert_copy(i, phys, claim);
             }
         }
+        drop(guard);
         // What cannot be shared is copied.
         for i in lent {
             self.copy_pages(
@@ -1628,11 +1649,9 @@ impl MemoryObject {
     /// a frame of its own, because slots of objects made by `mem_clone`
     /// still see the bytes of this one, or, for a slot of such an object,
     /// because another use does. A slot that was never marked
-    /// shared is not looked up in the table, and a paged object's pages
-    /// come from its pager. The pages are locked.
+    /// shared is not looked up in the table. The pages are locked.
     fn needs_copy(&self, pages: &Pages, index: u64, phys: u64) -> bool {
-        self.paged.is_none()
-            && pages.is_shared(index)
+        pages.is_shared(index)
             && if pages.is_copy(index) {
                 // A clone's slot shares the frame while any other use does.
                 crate::share::uses(phys) > 1
@@ -1649,20 +1668,42 @@ impl MemoryObject {
     /// Fails, changing nothing, with `NoMemory` or `NoResources`. The
     /// pages are locked.
     fn break_slot(&self, pages: &mut Pages, index: u64) -> Result<(), Error> {
-        debug_assert!(self.paged.is_none(), "only anonymous pages are copied here");
         let old = pages
             .frame(index)
             .expect("the page of a shared frame has one");
         debug_assert!(pages.is_shared(index));
+        // The copy of a paged object's frame is charged to the budget
+        // that the frame was supplied with, as any of its frames is.
+        let supplied = match &self.paged {
+            None => None,
+            Some(paged) => match paged.charges.lock().get(&old) {
+                Some(Charge::Supplied(owner)) => Some(owner.clone()),
+                _ => return Err(Error::Internal),
+            },
+        };
+        let owner = supplied.as_ref().unwrap_or(&self.budget);
         self.mark(index, index + 1)?;
         let pinned = pages.pinned();
-        let copy = match pages.reserve_orphan().and_then(|()| self.copy_frame(old)) {
-            Ok(copy) => copy,
+        let claim = match supplied {
+            Some(_) => nodes::claim_insert().map(Some),
+            None => Ok(None),
+        };
+        let copy = match claim.and_then(|claim| {
+            pages.reserve_orphan()?;
+            let copy = self.copy_frame_to(old, owner.as_ref())?;
+            Ok((claim, copy))
+        }) {
+            Ok(done) => done,
             Err(e) => {
                 self.unmark(index, index + 1);
                 return Err(e);
             }
         };
+        let (claim, copy) = copy;
+        if let (Some(paged), Some(owner)) = (&self.paged, supplied) {
+            paged.charges.lock().insert(copy, Charge::Supplied(owner));
+        }
+        drop(claim);
         // The slot keeps its place in the pages, which need no room.
         let left = pages.replace(index, copy, false);
         if pinned {
@@ -1677,7 +1718,14 @@ impl MemoryObject {
     /// object's budget as any frame of its pages is, or `NoResources`
     /// without room in the budget and `NoMemory` without a frame.
     fn copy_frame(&self, phys: u64) -> Result<u64, Error> {
-        if let Some(budget) = &self.budget {
+        self.copy_frame_to(phys, self.budget.as_ref())
+    }
+
+    /// A new frame with the bytes of the frame `phys`, charged to
+    /// `budget`, or `NoResources` without room in it and `NoMemory`
+    /// without a frame.
+    fn copy_frame_to(&self, phys: u64, budget: Option<&Arc<Budget>>) -> Result<u64, Error> {
+        if let Some(budget) = budget {
             budget.charge_pages(1)?;
             if let Err(e) = budget.charge_kernel(PAGE_ENTRY_COST) {
                 budget.release_pages(1);
@@ -1685,7 +1733,10 @@ impl MemoryObject {
             }
         }
         let Some(copy) = crate::frames::alloc_frame() else {
-            self.release(1);
+            if let Some(budget) = budget {
+                budget.release_pages(1);
+                budget.release_kernel(PAGE_ENTRY_COST);
+            }
             return Err(Error::NoMemory);
         };
         // SAFETY: the copy was just allocated, and the frame being copied
@@ -1768,13 +1819,27 @@ impl MemoryObject {
             let Some(phys) = pages.frame(index) else {
                 return Fault::Absent(index);
             };
+            if self.is_changing(index) {
+                return Fault::Busy(index);
+            }
             if write && state.write_waits(index) {
                 return Fault::Stable(index);
             }
+            // A page whose frame clones share gets one of its own on a
+            // store, and until then is mapped to be read only.
+            let shared = self.needs_copy(&pages, index, phys);
+            if shared && write {
+                drop(state);
+                return match self.break_slot(&mut pages, index) {
+                    Ok(()) => Fault::Changed(index),
+                    Err(_) => Fault::OutOfMemory,
+                };
+            }
             // With dirty tracking, a page becomes writable through a
             // mapping only on a write, which marks it dirty.
-            let writable =
-                perms & PERM_WRITE != 0 && (write || state.writable_without_fault(index));
+            let writable = !shared
+                && perms & PERM_WRITE != 0
+                && (write || state.writable_without_fault(index));
             if write && state.written(index).is_err() {
                 return Fault::OutOfMemory;
             }
@@ -1931,10 +1996,23 @@ impl MemoryObject {
                 self.obtain(index)?;
                 return Ok(None);
             };
+            if self.is_changing(index) {
+                drop(state);
+                drop(pages);
+                self.wait_settled(index)?;
+                return Ok(None);
+            }
             if write && state.write_waits(index) {
                 drop(state);
                 drop(pages);
                 self.wait_stable(index)?;
+                return Ok(None);
+            }
+            if write && self.needs_copy(&pages, index, phys) {
+                drop(state);
+                self.break_slot(&mut pages, index)?;
+                drop(pages);
+                self.settle(index, index + 1);
                 return Ok(None);
             }
             if write {
@@ -2308,6 +2386,13 @@ impl MemoryObject {
                             drop(state);
                             drop(pages);
                             self.wait_stable(index)?;
+                            continue;
+                        }
+                        if self.needs_copy(&pages, index, phys) {
+                            drop(state);
+                            self.break_slot(&mut pages, index)?;
+                            drop(pages);
+                            self.settle(index, index + 1);
                             continue;
                         }
                         state.written(index)?;
@@ -3716,5 +3801,72 @@ mod tests {
         let mut work = Work::new(no_preempt);
         let past = source.clone_range(PAGE_SIZE, 2 * PAGE_SIZE, 0, &budget, &mut work);
         assert_eq!(past.err(), Some(Error::OutOfRange));
+    }
+
+    #[test]
+    fn a_clone_shares_the_supplied_frame_of_a_paged_object_until_either_is_written() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (supplier, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let source = MemoryObject::new(Some(&supplier), PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, PAGE_SIZE, 0x3c);
+        let (origin, port) = paged(&user, 1);
+        origin.supply(0, PAGE_SIZE, &source, 0).unwrap();
+        drop(source);
+        let frame = origin.pages.lock().frame(0).unwrap();
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        // Nothing was copied, and the page is still charged to the supplier.
+        assert_eq!(clone.pages.lock().frame(0), Some(frame));
+        assert!(crate::share::has_copies(frame));
+        assert_eq!(supplier.usage().1, 1);
+        // A write through the paged object gives it a frame of its own,
+        // charged to the supplier as the first was; the clone keeps the
+        // bytes it had.
+        fill(&origin, 0, 4, 0x77);
+        let own = origin.pages.lock().frame(0).unwrap();
+        assert_ne!(own, frame);
+        assert_eq!(clone.pages.lock().frame(0), Some(frame));
+        assert_eq!(frame_head(frame, 4), alloc::vec![0x3c; 4]);
+        assert_eq!(frame_head(own, 4), alloc::vec![0x77; 4]);
+        assert_eq!(supplier.usage().1, 2);
+        // The frame goes with the clone, which was the last to use it.
+        drop(clone);
+        assert_eq!(supplier.usage().1, 1);
+        drop((origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((supplier.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    #[test]
+    fn a_write_through_a_clone_of_a_paged_object_leaves_the_object_alone() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (supplier, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let source = MemoryObject::new(Some(&supplier), PAGE_SIZE, 0).unwrap();
+        fill(&source, 0, PAGE_SIZE, 0x3c);
+        let (origin, port) = paged(&user, 1);
+        origin.supply(0, PAGE_SIZE, &source, 0).unwrap();
+        drop(source);
+        let frame = origin.pages.lock().frame(0).unwrap();
+        let mut work = Work::new(no_preempt);
+        let clone = origin
+            .clone_range(0, PAGE_SIZE, 0, &user, &mut work)
+            .unwrap();
+        fill(&clone, 0, 4, 0x55);
+        // The object keeps its frame, which no clone uses any more.
+        assert_eq!(origin.pages.lock().frame(0), Some(frame));
+        assert!(!crate::share::has_copies(frame));
+        assert_eq!(frame_head(frame, 4), alloc::vec![0x3c; 4]);
+        let copy = clone.pages.lock().frame(0).unwrap();
+        assert_eq!(frame_head(copy, 4), alloc::vec![0x55; 4]);
+        drop(clone);
+        drop((origin, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((supplier.usage(), user.usage().1), ((0, 0), 0));
     }
 }
