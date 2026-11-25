@@ -129,6 +129,7 @@ fn failed(e: Failed) -> Error {
     match e {
         Failed::NoSpace => Error::NoSpace,
         Failed::Io => Error::Io,
+        Failed::Busy => Error::Busy,
     }
 }
 
@@ -471,7 +472,7 @@ impl Connection {
             let made = if private {
                 file.private(rights)
             } else {
-                file.shared(rights)
+                file.shared(rights, &self.fs)
             };
             made.map_err(failed)
         })?;

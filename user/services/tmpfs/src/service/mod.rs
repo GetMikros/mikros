@@ -7,6 +7,7 @@ mod budget;
 mod file;
 mod fs;
 mod node;
+mod paged;
 mod watch;
 use crate::service::fs::Fs;
 use alloc::rc::Rc;

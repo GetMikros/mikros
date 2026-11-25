@@ -118,6 +118,11 @@ impl Tracker {
         }
     }
 
+    /// Whether a registered wait is outstanding.
+    pub fn waiting(&self) -> bool {
+        self.registered.is_some()
+    }
+
     /// Whether the tracker has nothing to remember: it can be dropped.
     pub fn idle(&self) -> bool {
         !self.executing && !self.writable && self.registered.is_none()

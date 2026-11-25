@@ -12,6 +12,7 @@ mikros-casefold = { path = "../../lib/casefold" }
 [target.'cfg(target_os = "mikros")'.dependencies]
 mikros-acl = { path = "../../lib/acl", features = ["midl"] }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+mikros-runtrack = { path = "../../lib/runtrack" }
 
 [package.metadata.mikros]
 kind = "service"

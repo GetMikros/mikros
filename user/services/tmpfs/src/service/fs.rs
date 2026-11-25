@@ -82,6 +82,8 @@ pub struct Fs {
     pub(crate) directory: DirectoryAsyncClient,
     pub reactor: Reactor,
     pub spawner: Spawner,
+    /// The pager of the files' paged objects.
+    pub pager: Option<Rc<OwnedHandle>>,
 }
 
 /// The protocol's error for the tree's.
@@ -186,6 +188,15 @@ impl Fs {
             directory,
             reactor,
             spawner,
+            pager: {
+                let mut raw = 0;
+                // SAFETY: the out pointer is valid for the call.
+                match unsafe { sys::pager_create(0, &mut raw) } {
+                    // SAFETY: the kernel just created the handle for us.
+                    mikros_rt::OK => Some(Rc::new(unsafe { OwnedHandle::from_raw(raw) })),
+                    _ => None,
+                }
+            },
         }
     }
 
