@@ -289,8 +289,10 @@ impl Display {
                 return;
             }
             match phase.get() {
+                // The client's fence is slow, which is not a fault of the
+                // driver.
                 Phase::Acquire => mikros_rt::log!(
-                    Error,
+                    Warning,
                     "virtiogpu: commit {id} was not presented after 2 s; waiting for a sync object"
                 ),
                 Phase::Command { at, of, kind } => mikros_rt::log!(
