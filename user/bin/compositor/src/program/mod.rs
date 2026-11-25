@@ -26,7 +26,7 @@ mod themes;
 use crate::connections;
 use crate::haze;
 use crate::restarts::{LIMIT, Restarts};
-use crate::server::{ClientId, Cursor, Point, Rect, Server, shape_name};
+use crate::server::{BufferId, ClientId, Cursor, Point, Rect, Server, shape_name};
 use crate::wayland::wire::{CHANNEL_BYTES, CHANNEL_HANDLES, Fd};
 use imports::{Importer, Store};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
@@ -123,6 +123,12 @@ pub struct Compositor {
     /// that the last frame drew, with where (MIKSPEC-0066.R17).
     damaged_all: Cell<bool>,
     drawn_cursor: Cell<Option<(Cursor, Rect)>>,
+    /// The image of a client's cursor surface that the cursor plane shows,
+    /// and how many times a cursor surface was committed, which tells when
+    /// it is out of date.
+    plane_surface: RefCell<Option<PlaneSurface>>,
+    cursor_commits: Cell<u64>,
+    plane_made: Cell<u64>,
     /// The compositor itself, for the tasks it starts.
     me: std::rc::Weak<Compositor>,
     /// The clients whose events wait until their channels take more.
@@ -174,6 +180,17 @@ fn duplicate(raw: u32) -> Option<OwnedHandle> {
 /// Milliseconds of the monotonic clock, for frame callbacks.
 fn milliseconds() -> u32 {
     (mikros_rt::objects::now() / 1_000_000) as u32
+}
+
+/// A client's cursor surface as the cursor plane shows it: the buffer it
+/// came from, how many commits of cursor surfaces had been made, and its
+/// premultiplied `0xAARRGGBB` pixels, `size` across and down.
+struct PlaneSurface {
+    buffer: BufferId,
+    commits: u64,
+    id: u64,
+    size: u32,
+    pixels: Vec<u32>,
 }
 
 impl Compositor {
@@ -532,6 +549,9 @@ impl Compositor {
                 }
                 _ => false,
             };
+            if cursor_committed {
+                self.cursor_commits.set(self.cursor_commits.get() + 1);
+            }
             let (drawn, fading, next_cursor, changed) = {
                 let mut store = self.store.borrow_mut();
                 let whole = std::mem::take(&mut store.damaged_all);
@@ -558,6 +578,66 @@ impl Compositor {
                                 size: i.size,
                                 corner: i.corner,
                             }));
+                        })
+                        .is_some(),
+                    // A client's cursor surface that fits the plane, with its
+                    // corner on the output, as its pixels with the alpha
+                    // that its format has (MIKSPEC-0066.R28).
+                    (Some(limit), Cursor::Surface { .. }) => cursor_surface
+                        .and_then(|(buffer, (hx, hy))| {
+                            let b = store.buffers.get(&buffer)?;
+                            let (width, height) = (b.width, b.height);
+                            let corner = (at.0 - hx, at.1 - hy);
+                            if width == 0
+                                || height == 0
+                                || width.max(height) > limit
+                                || corner.0 < 0
+                                || corner.1 < 0
+                            {
+                                return None;
+                            }
+                            let commits = self.cursor_commits.get();
+                            let mut cached = self.plane_surface.borrow_mut();
+                            let current = cached
+                                .as_ref()
+                                .is_some_and(|c| c.buffer == buffer && c.commits == commits);
+                            if !current {
+                                let read = self.renderer.read(b).ok()?;
+                                let size = width.max(height) as usize;
+                                let mut pixels = vec![0u32; size * size];
+                                for y in 0..height as usize {
+                                    for x in 0..width as usize {
+                                        let p = read[y * width as usize + x];
+                                        pixels[y * size + x] =
+                                            if b.alpha { p } else { p | 0xff00_0000 };
+                                    }
+                                }
+                                self.plane_made.set(self.plane_made.get() + 1);
+                                // Said once for each size, not at every
+                                // commit of an animated cursor.
+                                if cached.as_ref().is_none_or(|c| c.size as usize != size) {
+                                    mikros_rt::log!(
+                                        Info,
+                                        "compositor: a client's cursor surface of {width}x{height} goes on the cursor plane"
+                                    );
+                                }
+                                *cached = Some(PlaneSurface {
+                                    buffer,
+                                    commits,
+                                    // Apart from the ids of the theme's images.
+                                    id: (1 << 63) | self.plane_made.get(),
+                                    size: size as u32,
+                                    pixels,
+                                });
+                            }
+                            let c = cached.as_ref()?;
+                            output.set_cursor(Some(Want {
+                                id: c.id,
+                                pixels: &c.pixels,
+                                size: c.size,
+                                corner,
+                            }));
+                            Some(())
                         })
                         .is_some(),
                     _ => false,
@@ -981,6 +1061,9 @@ pub fn main() {
         pointer: RefCell::new(pointer::Pointer::new()),
         damaged_all: Cell::new(false),
         drawn_cursor: Cell::new(None),
+        plane_surface: RefCell::new(None),
+        cursor_commits: Cell::new(0),
+        plane_made: Cell::new(0),
         acquiring: RefCell::default(),
         keymap: RefCell::new(None),
         layout: RefCell::new(None),
