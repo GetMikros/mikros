@@ -11,15 +11,17 @@
 # - Vulkan is offered on Mikros, with the loader libvulkan.dlib;
 # - SDL_CloseFileDialogs closes the file dialogs that are still open;
 # - the Wayland driver does not dereference a missing data device when the
-#   keyboard leaves a window.
+#   keyboard leaves a window;
+# - the Wayland driver gives an app a click that focuses its window, unless
+#   the app sets SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH to false.
 # Only the Wayland video driver is built, with the dummy and offscreen
 # ones, and no audio but the dummy and disk drivers; libwayland and
 # xkbcommon are linked, not loaded when they are first used.
 
 [source]
-url = "https://github.com/GetMikros/SDL/archive/617f74c8dd08ff576ba876c5a23208e0f9092d94.tar.gz"
-sha256 = "49c224872e5b4309a9b93366b4b673f6daf48d10ee31273c44c2cf4e66a0254f"
-dir = "SDL-617f74c8dd08ff576ba876c5a23208e0f9092d94"
+url = "https://github.com/GetMikros/SDL/archive/5fc1749c4b64137e8ec340200f72c9210d4450fd.tar.gz"
+sha256 = "984f6d58f07ec8902f70124e14cfef57fbaa76e1915da2623aed7235dfaf9d20"
+dir = "SDL-5fc1749c4b64137e8ec340200f72c9210d4450fd"
 
 [build]
 options = [
