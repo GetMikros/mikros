@@ -17,8 +17,8 @@ use alloc::string::String;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    AclEntry, AclTag, Error, Filesystem, FilesystemClient, Node, NodeClient, NodeType, OpenFlags,
-    Rights, TemporaryFilesystem, TemporaryFilesystemClient,
+    AclEntry, AclTag, Error, Filesystem, FilesystemClient, MemoryFlags, Node, NodeClient, NodeType,
+    OpenFlags, Rights, TemporaryFilesystem, TemporaryFilesystemClient,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
@@ -32,6 +32,7 @@ const TEMPORARY: &str = "mikros.fs.TemporaryFilesystem";
 /// The startup handle ID of the root budget, a boot handle.
 const ROOT_BUDGET_ID: u32 = 3;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+const RWX: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0);
 const PAGE: u64 = 4096;
 
 type Reply<T> = Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>;
@@ -63,6 +64,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     match budgets(&root, &directory, budget)
         .and_then(|()| acls(&root))
         .and_then(|()| exchanges(&root))
+        .and_then(|()| running(&root, managed.header.process.raw()))
     {
         Ok(()) => 0,
         Err(failed) => failed,
@@ -201,7 +203,7 @@ fn acls(root: &NodeClient) -> Result<(), i64> {
     Ok(())
 }
 
-/// A connection, read and write, to the root of the file system.
+/// A connection, read, write and execute, to the root of the file system.
 fn root(directory: &DirectoryClient) -> Option<NodeClient> {
     let (client, server) = endpoints::<Filesystem>().ok()?;
     ok(directory
@@ -209,14 +211,14 @@ fn root(directory: &DirectoryClient) -> Option<NodeClient> {
         .map(|r| r.map_err(|_| Error::Io)))?;
     let fs = FilesystemClient::new(ClientEnd::new(client.into_handle()));
     let (node, node_server) = endpoints::<Node>().ok()?;
-    ok(fs.get_root(node_server, RW, FOREVER))?;
+    ok(fs.get_root(node_server, RWX, FOREVER))?;
     Some(NodeClient::new(node))
 }
 
-/// The probe's own directory under `root`, read and write.
+/// The probe's own directory under `root`, read, write and execute.
 fn own_directory(root: &NodeClient) -> Option<NodeClient> {
     let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0 | OpenFlags::EXCLUSIVE.0);
-    open(root, "tmpfs-probe", flags, RW)
+    open(root, "tmpfs-probe", flags, RWX)
         .ok()
         .map(|(dir, _, _)| dir)
 }
@@ -363,4 +365,86 @@ fn exchanges(root: &NodeClient) -> Result<(), i64> {
     let missing = a.exchange("one".into(), token, "gone".into(), FOREVER);
     expect(matches!(missing, Ok(Err(Error::NotFound))), 92)?;
     Ok(())
+}
+
+/// How many times to try again, 10 ms apart, for the file system to see
+/// an object unreferenced.
+const SETTLES: usize = 200;
+
+/// Whether a file that a program runs from keeps its contents: while an
+/// object to run from is in use it cannot be written, truncated or given
+/// to be written, and it can again once the object is let go of; and an
+/// object that was given to write keeps an object to run from from being
+/// given until it is let go of.
+fn running(root: &NodeClient, process: sys::Handle) -> Result<(), i64> {
+    use OpenFlags as F;
+    let (file, _, _) = open(root, "run", F::CREATE, RWX).map_err(|_| 100)?;
+    expect(ok(file.write(0, b"hello".to_vec(), FOREVER)).is_some(), 100)?;
+    let rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
+    let (runner, server) = endpoints::<Node>().map_err(|_| 100)?;
+    expect(ok(file.clone(server, rights, FOREVER)).is_some(), 100)?;
+    let runner = NodeClient::new(runner);
+    let object = ok(runner.get_memory_object(MemoryFlags::EXECUTE, FOREVER))
+        .ok_or(101)?
+        .memory;
+    let busy = |code: i64| -> Result<(), i64> {
+        let write = file.write(0, b"x".to_vec(), FOREVER);
+        expect(matches!(write, Ok(Err(Error::Busy))), code)?;
+        let truncate = file.truncate(0, FOREVER);
+        expect(matches!(truncate, Ok(Err(Error::Busy))), code)?;
+        let writable = file.get_memory_object(MemoryFlags::WRITE, FOREVER);
+        expect(matches!(writable, Ok(Err(Error::Busy))), code)
+    };
+    busy(102)?;
+    // Reading, and a private copy, are not kept from.
+    expect(
+        ok(file.read(0, 5, FOREVER)).ok_or(103)?.data == b"hello",
+        103,
+    )?;
+    let copy = ok(file.get_memory_object(MemoryFlags::PRIVATE, FOREVER)).ok_or(103)?;
+    drop(copy);
+    // A mapping keeps the object in use after its handle is closed.
+    let mut view = 0;
+    // SAFETY: the out pointer is valid; the kernel picks a free range.
+    let mapped = unsafe { sys::vm_map(process, 1, 0, object.raw(), 0, PAGE, &mut view) };
+    expect(mapped == mikros_rt::OK, 104)?;
+    drop(object);
+    busy(104)?;
+    // SAFETY: the page mapped at `view` is unmapped once.
+    unsafe { sys::vm_unmap(process, view, PAGE) };
+    let mut changed = false;
+    for _ in 0..SETTLES {
+        if ok(file.write(0, b"J".to_vec(), FOREVER)).is_some() {
+            changed = true;
+            break;
+        }
+        sleep_ms(10);
+    }
+    expect(changed, 105)?;
+    // A writable object keeps an object to run from from being given
+    // until it is let go of.
+    let writable = ok(file.get_memory_object(MemoryFlags::WRITE, FOREVER))
+        .ok_or(106)?
+        .memory;
+    let refused = runner.get_memory_object(MemoryFlags::EXECUTE, FOREVER);
+    expect(matches!(refused, Ok(Err(Error::Busy))), 106)?;
+    drop(writable);
+    let mut given = false;
+    for _ in 0..SETTLES {
+        if ok(runner.get_memory_object(MemoryFlags::EXECUTE, FOREVER)).is_some() {
+            given = true;
+            break;
+        }
+        sleep_ms(10);
+    }
+    expect(given, 107)
+}
+
+/// Sleeps for `ms` milliseconds.
+fn sleep_ms(ms: i64) {
+    let mut now = 0;
+    // SAFETY: the out pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_sleep(now + ms * 1_000_000) };
 }

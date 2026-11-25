@@ -31,6 +31,7 @@ fn main(m: &Managed) -> i64 {
         &[
             ("files", files),
             ("memory_objects", memory_objects),
+            ("memory_resizing", memory_resizing),
             ("byte_range_locks", byte_range_locks),
             ("directory_watches", directory_watches),
             ("socket_nodes", socket_nodes),
@@ -87,6 +88,10 @@ fn files(s: &Own) -> mikros_test::Result {
 
 fn memory_objects(s: &Own) -> mikros_test::Result {
     in_directory(s, "memory_objects", false, |dir| memory(dir, s.process))
+}
+
+fn memory_resizing(s: &Own) -> mikros_test::Result {
+    in_directory(s, "memory_resizing", false, |dir| resizing(dir, s.process))
 }
 
 fn byte_range_locks(s: &Own) -> mikros_test::Result {
@@ -157,9 +162,14 @@ fn names(dir: &NodeClient) -> Option<Vec<String>> {
 
 /// Maps a page of the memory object `mem` with `perms`.
 fn map(mem: sys::Handle, process: sys::Handle, perms: u32) -> Option<u64> {
+    map_from(mem, process, perms, 0)
+}
+
+/// Maps the page of the memory object `mem` at `offset` with `perms`.
+fn map_from(mem: sys::Handle, process: sys::Handle, perms: u32, offset: u64) -> Option<u64> {
     let mut at = 0;
     // SAFETY: the out pointer is valid; the kernel picks a free range.
-    let status = unsafe { sys::vm_map(process, perms, 0, mem, 0, PAGE, &mut at) };
+    let status = unsafe { sys::vm_map(process, perms, 0, mem, offset, PAGE, &mut at) };
     (status == mikros_rt::OK).then_some(at)
 }
 
@@ -537,4 +547,47 @@ fn case_insensitive(root: &NodeClient) -> Result<(), i64> {
         expect(ok(clone.unlink(name.into(), false, FOREVER)).is_some(), 78)?;
     }
     expect(ok(root.unlink("Case".into(), true, FOREVER)).is_some(), 79)
+}
+
+/// Whether the pages of a file's memory object follow its size: what a
+/// shorter file loses reads as zero when the file grows again, through
+/// a mapping that touched it before, and a page of a longer file shows.
+fn resizing(root: &NodeClient, process: sys::Handle) -> Result<(), i64> {
+    use OpenFlags as F;
+    let (file, _, _) = open(root, "r", F::CREATE, RW).map_err(|_| 40)?;
+    let data = alloc::vec![b'a'; 2 * PAGE as usize];
+    expect(ok(file.write(0, data, FOREVER)).is_some(), 40)?;
+    let object = ok(file.get_memory_object(MemoryFlags::WRITE, FOREVER))
+        .ok_or(41)?
+        .memory;
+    let first = map_from(object.raw(), process, PERM_READ | PERM_WRITE, 0).ok_or(41)?;
+    let second = map_from(object.raw(), process, PERM_READ | PERM_WRITE, PAGE).ok_or(41)?;
+    expect(bytes(second, 4) == b"aaaa", 41)?;
+    // A page the file gains shows through the object, which grew with it.
+    expect(
+        ok(file.write(3 * PAGE, b"tail".to_vec(), FOREVER)).is_some(),
+        42,
+    )?;
+    let last = map_from(object.raw(), process, PERM_READ | PERM_WRITE, 3 * PAGE).ok_or(45)?;
+    expect(bytes(last, 4) == b"tail", 46)?;
+    // SAFETY: the object is mapped writable at `last` for a page.
+    unsafe { core::ptr::write_volatile(last as *mut u8, b'T') };
+    expect(
+        ok(file.read(3 * PAGE, 5, FOREVER)).ok_or(47)?.data == b"Tail",
+        47,
+    )?;
+    // A shorter file loses the pages past its end and the rest of its
+    // last page, which read as zero once it grows again.
+    expect(ok(file.truncate(10, FOREVER)).is_some(), 43)?;
+    expect(ok(file.truncate(4 * PAGE, FOREVER)).is_some(), 43)?;
+    expect(bytes(first, 10) == b"aaaaaaaaaa", 43)?;
+    expect(bytes(first + 10, 4) == [0; 4], 43)?;
+    let again = map_from(object.raw(), process, PERM_READ | PERM_WRITE, PAGE).ok_or(43)?;
+    expect(bytes(again, 4) == [0; 4], 43)?;
+    let last = map_from(object.raw(), process, PERM_READ | PERM_WRITE, 3 * PAGE).ok_or(43)?;
+    expect(bytes(last, 5) == [0; 5], 43)?;
+    // SAFETY: the object is mapped writable at `again` for a page.
+    unsafe { core::ptr::write_volatile(again as *mut u8, b'z') };
+    expect(ok(file.read(PAGE, 1, FOREVER)).ok_or(44)?.data == b"z", 44)?;
+    Ok(())
 }
