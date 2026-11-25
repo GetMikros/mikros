@@ -52,6 +52,122 @@ pub const PAGE_ENTRY_COST: u64 = 2 * size_of::<(u64, u64)>() as u64;
 const SHARED: u64 = 1;
 const COPY: u64 = 2;
 
+/// A set of page indexes kept as sorted ranges, start inclusive and end
+/// exclusive, that never touch each other.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ranges {
+    list: Vec<(u64, u64)>,
+}
+
+impl Ranges {
+    pub fn new() -> Ranges {
+        Ranges { list: Vec::new() }
+    }
+
+    /// How many ranges there are.
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// Makes room for `more` ranges, or fails with `NoMemory`.
+    pub fn reserve(&mut self, more: usize) -> Result<(), Error> {
+        self.list.try_reserve(more).map_err(|_| Error::NoMemory)
+    }
+
+    /// Adds the pages `first` to `end`, exclusive, which lie after those
+    /// already in the set, and joins them to the last range when they
+    /// touch it. Needs room, which `reserve` makes.
+    pub fn push(&mut self, first: u64, end: u64) {
+        debug_assert!(first < end && self.list.last().is_none_or(|&(_, last)| last <= first));
+        match self.list.last_mut() {
+            Some(last) if last.1 == first => last.1 = end,
+            _ => self.list.push((first, end)),
+        }
+    }
+
+    /// The position of the range that holds `index`.
+    fn find(&self, index: u64) -> Option<usize> {
+        let at = self.list.partition_point(|&(_, end)| end <= index);
+        self.list
+            .get(at)
+            .is_some_and(|&(first, _)| first <= index)
+            .then_some(at)
+    }
+
+    pub fn contains(&self, index: u64) -> bool {
+        self.find(index).is_some()
+    }
+
+    /// Whether taking out `index` leaves one more range than there is.
+    pub fn splits(&self, index: u64) -> bool {
+        self.find(index)
+            .is_some_and(|at| self.list[at].0 < index && index + 1 < self.list[at].1)
+    }
+
+    /// Whether taking out the pages `first` to `end`, exclusive, leaves one
+    /// more range than there is, because they lie inside one.
+    pub fn splits_inside(&self, first: u64, end: u64) -> bool {
+        self.find(first)
+            .is_some_and(|at| self.list[at].0 < first && end < self.list[at].1)
+    }
+
+    /// Takes `index` out of the set. Fails with `NoMemory`, changing
+    /// nothing, when that splits a range and there is no room.
+    pub fn remove(&mut self, index: u64) -> Result<(), Error> {
+        self.cut(index, index + 1)
+    }
+
+    /// Takes the pages `first` to `end`, exclusive, out of the set. Fails
+    /// with `NoMemory`, changing nothing, when that splits a range and
+    /// there is no room.
+    pub fn cut(&mut self, first: u64, end: u64) -> Result<(), Error> {
+        let from = self.list.partition_point(|&(_, e)| e <= first);
+        let to = self.list.partition_point(|&(s, _)| s < end);
+        if from >= to {
+            return Ok(());
+        }
+        let (head, tail) = (self.list[from], self.list[to - 1]);
+        let (keep_head, keep_tail) = (head.0 < first, tail.1 > end);
+        if keep_head && keep_tail && from == to - 1 {
+            self.reserve(1)?;
+            self.list[from] = (head.0, first);
+            self.list.insert(from + 1, (end, tail.1));
+            return Ok(());
+        }
+        let mut kept = Vec::new();
+        if keep_head {
+            kept.push((head.0, first));
+        }
+        if keep_tail {
+            kept.push((end, tail.1));
+        }
+        self.list.splice(from..to, kept);
+        Ok(())
+    }
+
+    /// The pages of the set inside `first` to `end`, exclusive, with
+    /// `first` taken as 0. Fails with `NoMemory` without room.
+    pub fn within(&self, first: u64, end: u64) -> Result<Ranges, Error> {
+        let from = self.list.partition_point(|&(_, e)| e <= first);
+        let to = self.list.partition_point(|&(s, _)| s < end);
+        let mut out = Ranges::new();
+        out.reserve(to.saturating_sub(from))?;
+        for &(s, e) in &self.list[from.min(to)..to] {
+            out.list.push((s.max(first) - first, e.min(end) - first));
+        }
+        Ok(out)
+    }
+
+    /// The ranges, by their first page.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.list.iter().copied()
+    }
+}
+
 /// A frame that left the pages of an object, with whether it was shared
 /// when it left.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +213,9 @@ pub struct Pages {
     /// Whether the frames of a shrink are still being removed, during
     /// which the size does not change again.
     trimming: bool,
+    /// The pages that are still to be taken from a paged object, which
+    /// have no frame.
+    pub(crate) pending: Option<crate::memory_object::Pending>,
 }
 
 /// What changing the size leaves to the caller.
@@ -133,6 +252,7 @@ impl Pages {
             pins: 0,
             orphans: Vec::new(),
             trimming: false,
+            pending: None,
         })
     }
 
@@ -360,6 +480,48 @@ mod tests {
         let pages = Pages::new(MAX, RESIZABLE, MAX).unwrap();
         assert_eq!(pages.count(), MAX / PAGE_SIZE);
         assert_eq!(Pages::new(4097, 0, MAX).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn ranges_hold_pages_and_split_when_one_is_taken() {
+        let mut ranges = Ranges::new();
+        ranges.reserve(4).unwrap();
+        ranges.push(2, 5);
+        ranges.push(5, 6);
+        ranges.push(9, 12);
+        assert_eq!(ranges.iter().collect::<Vec<_>>(), [(2, 6), (9, 12)]);
+        assert!(ranges.contains(2) && ranges.contains(5) && !ranges.contains(6));
+        assert!(!ranges.contains(1) && !ranges.contains(8) && ranges.contains(11));
+        assert!(ranges.splits(3) && !ranges.splits(2) && !ranges.splits(5) && !ranges.splits(7));
+        ranges.remove(3).unwrap();
+        assert_eq!(ranges.iter().collect::<Vec<_>>(), [(2, 3), (4, 6), (9, 12)]);
+        ranges.remove(2).unwrap();
+        ranges.remove(11).unwrap();
+        assert_eq!(ranges.iter().collect::<Vec<_>>(), [(4, 6), (9, 11)]);
+        ranges.cut(5, 10).unwrap();
+        assert_eq!(ranges.iter().collect::<Vec<_>>(), [(4, 5), (10, 11)]);
+        ranges.cut(0, 100).unwrap();
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn ranges_cut_the_middle_of_one_and_rebase_what_lies_inside() {
+        let mut ranges = Ranges::new();
+        ranges.reserve(4).unwrap();
+        ranges.push(10, 20);
+        ranges.push(30, 40);
+        ranges.cut(12, 15).unwrap();
+        assert_eq!(
+            ranges.iter().collect::<Vec<_>>(),
+            [(10, 12), (15, 20), (30, 40)]
+        );
+        let inside = ranges.within(11, 35).unwrap();
+        assert_eq!(
+            inside.iter().collect::<Vec<_>>(),
+            [(0, 1), (4, 9), (19, 24)]
+        );
+        assert!(ranges.within(20, 30).unwrap().is_empty());
+        assert!(ranges.within(50, 60).unwrap().is_empty());
     }
 
     #[test]
