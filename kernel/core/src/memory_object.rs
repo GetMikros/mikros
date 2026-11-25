@@ -5,7 +5,7 @@ use crate::aspace::{self, Access, AddressSpace, Fault};
 use crate::frames::FRAMES;
 use crate::port::Port;
 use crate::publish::{ITEM_STEP, Work};
-use crate::share::Released;
+use crate::share::{Released, Write};
 
 use crate::nodes::{self, Map};
 use crate::object::budget::{Budget, Scratch};
@@ -1247,7 +1247,7 @@ impl MemoryObject {
                 // clone, which is not the owner of its frame.
                 let copied = (source_first + from..source_first + to).find(|&index| {
                     pages.frame(index).is_some_and(|phys| {
-                        source.needs_copy(&pages, index, phys) || pages.is_copy(index)
+                        source.class(&pages, index, phys) == Write::Break || pages.is_copy(index)
                     })
                 });
                 if let Some(index) = copied {
@@ -1767,13 +1767,18 @@ impl MemoryObject {
     /// because another use does. A slot that was never marked
     /// shared is not looked up in the table. The pages are locked.
     fn needs_copy(&self, pages: &Pages, index: u64, phys: u64) -> bool {
-        pages.is_shared(index)
-            && if pages.is_copy(index) {
-                // A clone's slot shares the frame while any other use does.
-                crate::share::uses(phys) > 1
-            } else {
-                crate::share::has_copies(phys)
-            }
+        self.class(pages, index, phys) != Write::InPlace
+    }
+
+    /// How a write to page `index`, which has the frame `phys`, goes: in
+    /// place, with a frame of its own for the page, or, for a page of a
+    /// lend group, once the group moved to a new frame. The pages are
+    /// locked.
+    fn class(&self, pages: &Pages, index: u64, phys: u64) -> Write {
+        if !pages.is_shared(index) {
+            return Write::InPlace;
+        }
+        crate::share::write_class(phys, pages.is_copy(index))
     }
 
     /// Gives page `index`, whose frame is shared, a frame of its own with
@@ -2077,9 +2082,13 @@ impl MemoryObject {
             }
             // A page whose frame clones share gets one of its own on a
             // store, and until then is mapped to be read only.
-            let shared = self.needs_copy(&pages, index, phys);
+            let class = self.class(&pages, index, phys);
+            let shared = class != Write::InPlace;
             if shared && write {
                 drop(state);
+                if class == Write::Group {
+                    return Fault::Group(phys);
+                }
                 return match self.break_slot(&mut pages, index) {
                     Ok(()) => Fault::Changed(index),
                     Err(_) => Fault::OutOfMemory,
@@ -2113,6 +2122,9 @@ impl MemoryObject {
                 // A store gets a frame of its own, and a load maps the
                 // shared one so that the next store faults.
                 if write {
+                    if self.class(&pages, index, phys) == Write::Group {
+                        return Fault::Group(phys);
+                    }
                     return match self.break_slot(&mut pages, index) {
                         Ok(()) => Fault::Changed(index),
                         Err(_) => Fault::OutOfMemory,
@@ -2261,6 +2273,11 @@ impl MemoryObject {
             }
             if write && self.needs_copy(&pages, index, phys) {
                 drop(state);
+                if self.class(&pages, index, phys) == Write::Group {
+                    drop(pages);
+                    move_group(phys)?;
+                    return Ok(None);
+                }
                 self.break_slot(&mut pages, index)?;
                 drop(pages);
                 self.settle(index, index + 1);
@@ -2293,6 +2310,11 @@ impl MemoryObject {
             return Ok(None);
         };
         if write && self.needs_copy(&pages, index, phys) {
+            if self.class(&pages, index, phys) == Write::Group {
+                drop(pages);
+                move_group(phys)?;
+                return Ok(None);
+            }
             self.break_slot(&mut pages, index)?;
             drop(pages);
             self.settle(index, index + 1);
@@ -2664,6 +2686,11 @@ impl MemoryObject {
                         }
                         if self.needs_copy(&pages, index, phys) {
                             drop(state);
+                            if self.class(&pages, index, phys) == Write::Group {
+                                drop(pages);
+                                move_group(phys)?;
+                                continue;
+                            }
                             self.break_slot(&mut pages, index)?;
                             drop(pages);
                             self.settle(index, index + 1);
@@ -2673,6 +2700,11 @@ impl MemoryObject {
                         phys
                     }
                     (None, Some(phys)) if self.needs_copy(&pages, index, phys) => {
+                        if self.class(&pages, index, phys) == Write::Group {
+                            drop(pages);
+                            move_group(phys)?;
+                            continue;
+                        }
                         self.break_slot(&mut pages, index)?;
                         drop(pages);
                         self.settle(index, index + 1);
@@ -2811,6 +2843,9 @@ impl MemoryObject {
                     if self.is_changing(tail) {
                         drop(pages);
                         self.wait_settled(tail)?;
+                    } else if self.class(&pages, tail, phys) == Write::Group {
+                        drop(pages);
+                        move_group(phys)?;
                     } else {
                         self.break_slot(&mut pages, tail)?;
                         drop(pages);
@@ -3206,6 +3241,249 @@ impl<'a> Supplying<'a> {
 impl Drop for Supplying<'_> {
     fn drop(&mut self) {
         self.0.supplies.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// What `move_group` joins to a move: a page of a member, whether it is
+/// one lent to a paged object, and the room to record that.
+struct Joined {
+    mem: Arc<MemoryObject>,
+    index: u64,
+    lender: bool,
+    claim: Option<nodes::Claim>,
+}
+
+/// Moves the lend group of the frame `phys`, whose clones use it too,
+/// to a new frame with the same bytes, which is charged to the budget
+/// that `phys` is charged to, whoever wrote. The clones keep `phys`. Returns
+/// when the group moved, or when it is not for this call to move it, and
+/// the caller looks at its page again.
+pub(crate) fn move_group(phys: u64) -> Result<(), Error> {
+    let charge = match crate::share::begin_move(phys) {
+        crate::share::Begin::Gone => return Ok(()),
+        crate::share::Begin::Busy => {
+            let _ = crate::sched::sleep_until(crate::arch::monotonic_now() + 1_000_000);
+            return Ok(());
+        }
+        crate::share::Begin::Ready(charge) => charge,
+    };
+    let moved = move_members(phys, &charge);
+    crate::share::end_move(phys, matches!(moved, Ok(true)));
+    if matches!(moved, Ok(false)) {
+        // Something changed under the move: look again after a while.
+        let _ = crate::sched::sleep_until(crate::arch::monotonic_now() + 1_000_000);
+    }
+    moved.map(|_| ())
+}
+
+/// Frees the frame `new` that a move allocated and did not use, and
+/// gives its page back to `charge`.
+fn free_new_frame(new: u64, charge: &Option<Arc<Budget>>) {
+    if let Some(allocator) = FRAMES.lock().as_mut() {
+        allocator.free(new, 1);
+    }
+    if let Some(budget) = charge {
+        budget.release_pages(1);
+    }
+}
+
+/// Ends the marks that a move that did not go through put up, and gives
+/// back what it charged for the anchor.
+fn unwind(joined: Vec<Joined>) {
+    for j in joined {
+        j.mem.unmark(j.index, j.index + 1);
+        if !j.lender
+            && let Some(budget) = &j.mem.budget
+        {
+            budget.release_kernel(PAGE_ENTRY_COST);
+        }
+    }
+}
+
+/// The work of `move_group` with the group's frame `phys` marked as
+/// moving. Returns whether it moved.
+fn move_members(phys: u64, charge: &Option<Arc<Budget>>) -> Result<bool, Error> {
+    let members = crate::share::members(phys);
+    let mut joined: Vec<Joined> = Vec::new();
+    joined
+        .try_reserve_exact(members.len())
+        .map_err(|_| Error::NoMemory)?;
+    // Pass 1: every member that still uses the frame is marked changing,
+    // with what it needs to move recorded beforehand, so that the move
+    // can no longer fail once pages are replaced.
+    for (mem, index) in members {
+        let pages = mem.pages.lock();
+        let Some(lender) = mem.member_kind(&pages, index, phys) else {
+            continue;
+        };
+        if mem.is_changing(index) {
+            drop(pages);
+            unwind(joined);
+            return Ok(false);
+        }
+        // The anchor's new slot is charged as its old one was, and that
+        // one's entry goes back when it ends.
+        if !lender
+            && let Some(budget) = &mem.budget
+            && let Err(e) = budget.charge_kernel(PAGE_ENTRY_COST)
+        {
+            drop(pages);
+            unwind(joined);
+            return Err(e);
+        }
+        let prepared = mem.mark(index, index + 1).and_then(|()| match lender {
+            true => nodes::claim_insert().map(Some).inspect_err(|_| {
+                mem.unmark(index, index + 1);
+            }),
+            false => Ok(None),
+        });
+        drop(pages);
+        match prepared {
+            Ok(claim) => joined.push(Joined {
+                mem,
+                index,
+                lender,
+                claim,
+            }),
+            Err(e) => {
+                if !lender && let Some(budget) = &mem.budget {
+                    budget.release_kernel(PAGE_ENTRY_COST);
+                }
+                unwind(joined);
+                return Err(e);
+            }
+        }
+    }
+    if joined.is_empty() {
+        return Ok(false);
+    }
+    // The new frame, charged to the budget of the old one.
+    if let Some(budget) = charge
+        && let Err(e) = budget.charge_pages(1)
+    {
+        unwind(joined);
+        return Err(e);
+    }
+    let Some(new) = crate::frames::alloc_frame() else {
+        if let Some(budget) = charge {
+            budget.release_pages(1);
+        }
+        unwind(joined);
+        return Err(Error::NoMemory);
+    };
+    // SAFETY: the new frame was just allocated, and the old one stays
+    // allocated while the group uses it: no store reaches it meanwhile, as
+    // the writers wait for the move and no writable translation is left.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            crate::arch::frame_address(phys) as *const u8,
+            crate::arch::frame_address(new) as *mut u8,
+            PAGE_SIZE as usize,
+        );
+    }
+    let lent = joined.iter().filter(|j| j.lender).count() as u64;
+    let mut named: Vec<(Arc<MemoryObject>, u64)> = Vec::new();
+    if named.try_reserve_exact(joined.len()).is_err() {
+        free_new_frame(new, charge);
+        unwind(joined);
+        return Err(Error::NoMemory);
+    }
+    named.extend(joined.iter().map(|j| (j.mem.clone(), j.index)));
+    if let Err(e) =
+        crate::share::create_moved(new, charge.clone(), joined.len() as u64, lent, &named)
+    {
+        free_new_frame(new, charge);
+        unwind(joined);
+        return Err(e);
+    }
+    drop(named);
+    // Pass 2: every member that still uses the frame gets the new one.
+    let mut moved: Vec<(Arc<MemoryObject>, u64)> = Vec::new();
+    moved
+        .try_reserve_exact(joined.len())
+        .expect("room was found for the same members");
+    for j in joined {
+        let mut pages = j.mem.pages.lock();
+        let kind = match j.lender {
+            true => crate::share::Kind::Lent,
+            false => crate::share::Kind::Owner,
+        };
+        if pages.frame(j.index) != Some(phys) {
+            // It left the frame since: evicted, discarded or shrunk.
+            drop(pages);
+            j.mem.unmark(j.index, j.index + 1);
+            if !j.lender
+                && let Some(budget) = &j.mem.budget
+            {
+                budget.release_kernel(PAGE_ENTRY_COST);
+            }
+            if crate::share::skip_moved(new, kind) {
+                free_new_frame(new, charge);
+            }
+            continue;
+        }
+        let old = pages.replace(j.index, new, true);
+        if let (Some(paged), Some(claim)) = (&j.mem.paged, j.claim) {
+            let mut charges = paged.charges.lock();
+            match charges.get_mut(&new) {
+                Some(Charge::Lent(n)) => *n += 1,
+                _ => {
+                    charges.insert(new, Charge::Lent(1));
+                }
+            }
+            drop(claim);
+        }
+        j.mem.leave(j.index, j.index + 1, old);
+        drop(pages);
+        moved.push((j.mem, j.index));
+    }
+    // Pass 3: no member's old translation of the frame is left before any
+    // of them lets go of it.
+    for (mem, index) in &moved {
+        mem.unmap_in_steps(*index, *index + 1);
+    }
+    let did = !moved.is_empty();
+    for (mem, index) in moved {
+        if let Some(old) = mem.unmark(index, index + 1) {
+            mem.end_old(old);
+        }
+    }
+    Ok(did)
+}
+
+impl MemoryObject {
+    /// Whether page `index` is a member of the lend group of `phys`: its
+    /// frame is that one, not as a clone's, and, for a paged object, lent
+    /// to it. Returns whether it is lent. The pages are locked.
+    fn member_kind(&self, pages: &Pages, index: u64, phys: u64) -> Option<bool> {
+        if pages.frame(index) != Some(phys) || !pages.is_shared(index) || pages.is_copy(index) {
+            return None;
+        }
+        match &self.paged {
+            None => Some(false),
+            Some(paged) => {
+                matches!(paged.charges.lock().get(&phys), Some(Charge::Lent(_))).then_some(true)
+            }
+        }
+    }
+
+    /// Ends the use of `old`, the frame that a page left, which kernel
+    /// copies may still hold: while the pages are pinned it waits for the
+    /// last unpin instead.
+    fn end_old(&self, old: Frame) {
+        loop {
+            let mut pages = self.pages.lock();
+            if !pages.pinned() {
+                drop(pages);
+                self.free([old]);
+                return;
+            }
+            if pages.orphan(old).is_ok() {
+                return;
+            }
+            drop(pages);
+            self.wait_unpinned();
+        }
     }
 }
 
@@ -4483,6 +4761,110 @@ mod tests {
         drop((second, port2));
         assert!(member_pages(phys).is_empty());
         drop((first, port, owner));
+        assert_eq!(arena.free(), start);
+        assert_eq!((owner_budget.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    /// An owner with a page, which is lent to a paged object and shared
+    /// with a clone, as a clone of the lent page makes it.
+    fn lent_and_cloned(
+        owner_budget: &Arc<Budget>,
+        user: &Arc<Budget>,
+    ) -> (
+        Arc<MemoryObject>,
+        Arc<MemoryObject>,
+        Arc<Port>,
+        Arc<MemoryObject>,
+        u64,
+    ) {
+        let owner = MemoryObject::new(Some(owner_budget), PAGE_SIZE, 0).unwrap();
+        fill(&owner, 0, PAGE_SIZE, 0x3c);
+        let (lender, port) = paged(user, 1);
+        lender.lend(0, PAGE_SIZE, &owner, 0).unwrap();
+        let old = owner.pages.lock().frame(0).unwrap();
+        let clone = clone_of(&owner, user);
+        (owner, lender, port, clone, old)
+    }
+
+    #[test]
+    fn a_write_through_the_source_moves_the_lend_group_and_leaves_the_clone_its_frame() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (owner_budget, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (owner, lender, port, clone, old) = lent_and_cloned(&owner_budget, &user);
+        let used = owner_budget.usage().1;
+        fill(&owner, 0, 4, 0x77);
+        // The source and the lender use one new frame, charged to the
+        // owner as the old one was; the clone keeps the old one.
+        let new = owner.pages.lock().frame(0).unwrap();
+        assert_ne!(new, old);
+        assert_eq!(lender.pages.lock().frame(0), Some(new));
+        assert_eq!(clone.pages.lock().frame(0), Some(old));
+        assert_eq!(frame_head(new, 4), alloc::vec![0x77; 4]);
+        assert_eq!(frame_head(old, 4), alloc::vec![0x3c; 4]);
+        assert_eq!(owner_budget.usage().1, used + 1);
+        assert_eq!(arena.free(), start - 2);
+        assert!(crate::share::is_lent(new) && !crate::share::is_lent(old));
+        // A write through the lender is now seen by the source.
+        fill(&lender, 0, 4, 0x55);
+        assert_eq!(frame_head(new, 4), alloc::vec![0x55; 4]);
+        assert_eq!(owner.pages.lock().frame(0), Some(new));
+        drop(clone);
+        assert_eq!(owner_budget.usage().1, used);
+        drop((lender, port, owner));
+        assert_eq!(arena.free(), start);
+        assert_eq!((owner_budget.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    #[test]
+    fn a_write_through_a_lender_moves_the_lend_group_too() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (owner_budget, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let (owner, lender, port, clone, old) = lent_and_cloned(&owner_budget, &user);
+        let used = owner_budget.usage().1;
+        fill(&lender, 0, 4, 0x66);
+        let new = lender.pages.lock().frame(0).unwrap();
+        assert_ne!(new, old);
+        assert_eq!(owner.pages.lock().frame(0), Some(new));
+        assert_eq!(clone.pages.lock().frame(0), Some(old));
+        assert_eq!(frame_head(new, 4), alloc::vec![0x66; 4]);
+        assert_eq!(frame_head(old, 4), alloc::vec![0x3c; 4]);
+        // The owner's budget paid for the new frame, not the user's.
+        assert_eq!(owner_budget.usage().1, used + 1);
+        drop((clone, lender, port, owner));
+        assert_eq!(arena.free(), start);
+        assert_eq!((owner_budget.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    #[test]
+    fn a_write_that_moves_the_group_fails_when_the_owner_has_no_room() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (root, user) = (Budget::root(), Budget::root());
+        let owner_budget = Budget::child(&root, u64::MAX, 1, None).unwrap();
+        let start = arena.free();
+        let (owner, lender, port, clone, old) = lent_and_cloned(&owner_budget, &user);
+        let mut work = Work::new(no_preempt);
+        let written = lender.write(0, 4, &mut work, |to| {
+            to.fill(0x66);
+            Ok(())
+        });
+        assert_eq!(written, Err(Error::NoResources));
+        // Nothing moved, and nothing stays marked or charged.
+        assert_eq!(owner.pages.lock().frame(0), Some(old));
+        assert_eq!(lender.pages.lock().frame(0), Some(old));
+        assert_eq!(clone.pages.lock().frame(0), Some(old));
+        assert!(!owner.is_changing(0) && !lender.is_changing(0));
+        assert_eq!(frame_head(old, 4), alloc::vec![0x3c; 4]);
+        assert_eq!(owner_budget.usage().1, 1);
+        // The group can move once there is room.
+        owner_budget.set_limits(u64::MAX, 2);
+        fill(&lender, 0, 4, 0x66);
+        assert_ne!(lender.pages.lock().frame(0), Some(old));
+        drop((clone, lender, port, owner));
         assert_eq!(arena.free(), start);
         assert_eq!((owner_budget.usage(), user.usage().1), ((0, 0), 0));
     }

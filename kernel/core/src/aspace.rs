@@ -666,6 +666,9 @@ pub enum Fault {
     /// The page of a clone is still to come from its paged origin; the
     /// access asks for it, with no lock held, and tries again.
     Pending(u64),
+    /// A write to a page of a lend group whose frame clones use waits for
+    /// the group to move to a new frame, which is the frame `phys`'s.
+    Group(u64),
 }
 
 /// Resolves a page fault of the running thread at the user address
@@ -696,6 +699,11 @@ pub fn resolve_fault(addr: u64, write: bool, fetch: bool) -> Fault {
             Fault::Busy(index) => match mem.wait_settled(index) {
                 Ok(()) => {}
                 Err(Error::NoResources) => return Fault::OutOfMemory,
+                Err(_) => return Fault::Denied,
+            },
+            Fault::Group(phys) => match crate::memory_object::move_group(phys) {
+                Ok(()) => {}
+                Err(Error::NoResources | Error::NoMemory) => return Fault::OutOfMemory,
                 Err(_) => return Fault::Denied,
             },
             Fault::Pending(index) => match mem.resolve_pending(index) {

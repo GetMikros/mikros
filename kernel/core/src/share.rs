@@ -27,6 +27,11 @@ struct Member {
 /// one object.
 struct Group {
     members: Vec<Member>,
+    /// The group is being moved to a new frame, which the members' writers
+    /// wait for, and no page joins it meanwhile.
+    moving: bool,
+    /// The group moved to another frame: nothing joins this one.
+    retired: bool,
 }
 
 impl Group {
@@ -124,12 +129,21 @@ pub fn lend(
 ) -> Result<(), Error> {
     let mut shares = SHARES.lock();
     if let Some(share) = shares.get_mut(&phys) {
+        if share
+            .group
+            .as_ref()
+            .is_some_and(|group| group.moving || group.retired)
+        {
+            return Err(Error::BadState);
+        }
         if let Some((source, index)) = anchor {
             match &mut share.group {
                 Some(group) => group.add(source, index)?,
                 None => {
                     let mut group = crate::fallible::try_box(Group {
                         members: Vec::new(),
+                        moving: false,
+                        retired: false,
                     })?;
                     group.add(source, index)?;
                     share.group = Some(group);
@@ -145,6 +159,8 @@ pub fn lend(
         Some((source, index)) => {
             let mut group = crate::fallible::try_box(Group {
                 members: Vec::new(),
+                moving: false,
+                retired: false,
             })?;
             group.add(source, index)?;
             Some(group)
@@ -172,9 +188,148 @@ pub fn lend(
 pub fn landing(phys: u64, mem: &Arc<MemoryObject>, index: u64) -> Result<(), Error> {
     let mut shares = SHARES.lock();
     match shares.get_mut(&phys).and_then(|share| share.group.as_mut()) {
+        // A group that moved or is moving cannot take the page: the
+        // frame it has is not the group's.
+        Some(group) if group.moving || group.retired => Err(Error::BadState),
         Some(group) => group.add(mem, index),
         None => Ok(()),
     }
+}
+
+/// How a write to a slot of the frame `phys` goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Write {
+    /// The slot may write the frame, which no other object sees.
+    InPlace,
+    /// The slot gets a frame of its own first.
+    Break,
+    /// The slot is one of a lend group, whose clones see the frame: the
+    /// whole group moves to a new frame first.
+    Group,
+}
+
+/// How a write to a shared slot of the frame `phys` goes, `copy` when the
+/// slot is one of an object made by `mem_clone`.
+pub fn write_class(phys: u64, copy: bool) -> Write {
+    if SHARED.load(Ordering::Acquire) == 0 {
+        return Write::InPlace;
+    }
+    let shares = SHARES.lock();
+    let Some(share) = shares.get(&phys) else {
+        return Write::InPlace;
+    };
+    if copy {
+        return if share.uses > 1 {
+            Write::Break
+        } else {
+            Write::InPlace
+        };
+    }
+    match (share.copies, share.lent) {
+        (0, _) => Write::InPlace,
+        (_, 0) => Write::Break,
+        _ => Write::Group,
+    }
+}
+
+/// What starting to move a lend group found.
+pub enum Begin {
+    /// The frame has no group with clones any more: nothing to move.
+    Gone,
+    /// Another move of the frame is under way.
+    Busy,
+    /// The move begins, and the frame's page is charged to the budget.
+    Ready(Option<Arc<Budget>>),
+}
+
+/// Begins the move of the lend group of the frame `phys`, which clones
+/// use too, to a new frame.
+pub fn begin_move(phys: u64) -> Begin {
+    let mut shares = SHARES.lock();
+    let Some(share) = shares.get_mut(&phys) else {
+        return Begin::Gone;
+    };
+    if share.copies == 0 || share.lent == 0 {
+        return Begin::Gone;
+    }
+    let charge = share.charge.clone();
+    match share.group.as_mut() {
+        Some(group) if group.retired => Begin::Gone,
+        Some(group) if group.moving => Begin::Busy,
+        Some(group) => {
+            group.moving = true;
+            Begin::Ready(charge)
+        }
+        None => Begin::Gone,
+    }
+}
+
+/// Ends the move of the group of the frame `phys`: when `moved`, the
+/// group lives on another frame and this one is its no more.
+pub fn end_move(phys: u64, moved: bool) {
+    let mut shares = SHARES.lock();
+    if let Some(group) = shares.get_mut(&phys).and_then(|s| s.group.as_mut()) {
+        group.moving = false;
+        if moved {
+            group.retired = true;
+            group.members.clear();
+        }
+    }
+}
+
+/// Takes one member that did not move off the new frame `new` after all,
+/// of the kind `kind`. Returns whether none is left, in which case the
+/// entry went and the caller frees the frame and gives its page back.
+pub fn skip_moved(new: u64, kind: Kind) -> bool {
+    let mut shares = SHARES.lock();
+    let Some(share) = shares.get_mut(&new) else {
+        return false;
+    };
+    share.uses -= 1;
+    if kind == Kind::Lent {
+        share.lent -= 1;
+    }
+    if share.uses > 0 {
+        return false;
+    }
+    SHARED.fetch_sub(1, Ordering::Release);
+    shares.remove(&new);
+    true
+}
+
+/// Makes the entry of the frame `new`, which the group moves to: `uses`
+/// pages use it, `lent` of them as lent, charged to `charge`, with the
+/// members `members`. Fails with `NoMemory`, changing nothing.
+pub fn create_moved(
+    new: u64,
+    charge: Option<Arc<Budget>>,
+    uses: u64,
+    lent: u64,
+    members: &[(Arc<MemoryObject>, u64)],
+) -> Result<(), Error> {
+    let mut group = crate::fallible::try_box(Group {
+        members: Vec::new(),
+        moving: false,
+        retired: false,
+    })?;
+    for (mem, index) in members {
+        group.add(mem, *index)?;
+    }
+    let mut shares = SHARES.lock();
+    let _claim = nodes::claim_insert()?;
+    shares.insert(
+        new,
+        Share {
+            uses,
+            lent,
+            copies: 0,
+            bookkeeping: None,
+            charge,
+            group: Some(group),
+        },
+    );
+    SHARED.fetch_add(1, Ordering::Release);
+    Ok(())
 }
 
 /// Forgets the pages of the object `koid` as members of the lend group

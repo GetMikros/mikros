@@ -617,7 +617,8 @@ extern "sysv64" fn after_interrupt(frame: &mut Frame) {
                 | Fault::Changed(_)
                 | Fault::Busy(_)
                 | Fault::Stable(_)
-                | Fault::Pending(_) => crate::exception::raise(frame, kind::PAGE_FAULT, address),
+                | Fault::Pending(_)
+                | Fault::Group(_) => crate::exception::raise(frame, kind::PAGE_FAULT, address),
                 Fault::OutOfMemory => {
                     crate::exception::raise(frame, kind::OUT_OF_MEMORY, frame.rip)
                 }
