@@ -393,23 +393,35 @@ pub fn forget_members(phys: u64, koid: u64) {
 
 /// The pages that may use the frame `phys` as one lent to a paged object
 /// or as the source that lent it, as `(object, page)` pairs to check.
-/// Empty for a frame that was not lent.
-pub fn members(phys: u64) -> Vec<(Arc<MemoryObject>, u64)> {
-    let snapshot: Vec<(Weak<MemoryObject>, u64)> = {
+/// Empty for a frame that was not lent. Fails with `NoMemory`.
+pub fn members(phys: u64) -> Result<Vec<(Arc<MemoryObject>, u64)>, Error> {
+    let mut snapshot: Vec<(Weak<MemoryObject>, u64)> = Vec::new();
+    loop {
         let shares = SHARES.lock();
-        match shares.get(&phys).and_then(|share| share.group.as_ref()) {
-            Some(group) => group
-                .members
-                .iter()
-                .map(|m| (m.mem.clone(), m.index))
-                .collect(),
-            None => Vec::new(),
+        let Some(group) = shares.get(&phys).and_then(|share| share.group.as_ref()) else {
+            return Ok(Vec::new());
+        };
+        // The room is made with the table unlocked, and checked again.
+        if snapshot.capacity() >= group.members.len() {
+            snapshot.extend(group.members.iter().map(|m| (m.mem.clone(), m.index)));
+            break;
         }
-    };
-    snapshot
-        .into_iter()
-        .filter_map(|(mem, index)| mem.upgrade().map(|mem| (mem, index)))
-        .collect()
+        let wanted = group.members.len();
+        drop(shares);
+        snapshot
+            .try_reserve_exact(wanted)
+            .map_err(|_| Error::NoMemory)?;
+    }
+    let mut found = Vec::new();
+    found
+        .try_reserve_exact(snapshot.len())
+        .map_err(|_| Error::NoMemory)?;
+    found.extend(
+        snapshot
+            .into_iter()
+            .filter_map(|(mem, index)| mem.upgrade().map(|mem| (mem, index))),
+    );
+    Ok(found)
 }
 
 /// Records one more slot of an object made by `mem_clone` that uses the
