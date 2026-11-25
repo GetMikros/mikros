@@ -1954,6 +1954,10 @@ impl MemoryObject {
                                 return Err(e);
                             }
                             pages.mark_shared(at);
+                            drop(pages);
+                            // No store through a mapping of the origin
+                            // may reach the frame that the clone now uses.
+                            origin.unmap_in_steps(at, at + 1);
                             Taken::Shared(phys)
                         }
                         // A lent frame is copied, as a clone's pages are.

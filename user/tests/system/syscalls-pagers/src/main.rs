@@ -26,6 +26,7 @@ fn main(m: &Managed) -> i64 {
             ("lending_frames", lending_frames),
             ("cloning_paged_objects", cloning_paged_objects),
             ("cloning_absent_pages", cloning_absent_pages),
+            ("cloning_mapped_origin", cloning_mapped_origin),
             ("unreferenced_objects", unreferenced_objects),
             ("writebacks_and_discards", writebacks_and_discards),
             ("large_pager_operations", large_pager_operations),
@@ -565,6 +566,38 @@ fn cloning_absent_pages(s: &Own) -> Result {
         }
     }
     Ok(())
+}
+
+/// A page that a clone takes from its origin while a mapping of the origin
+/// can write it: the clone keeps the bytes it took, and later stores
+/// through the mapping reach only the origin.
+fn cloning_mapped_origin(s: &Own) -> Result {
+    let (_pager, mem) = paged_object(s, 2, 2)?;
+    let mut clone = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("cloning", unsafe {
+        sys::mem_clone(mem, 0, 0, 2 * PAGE_SIZE, &mut clone)
+    })?;
+    let at = map(s.process, mem, PAGE_SIZE)?;
+    // SAFETY: the mapping is writable.
+    unsafe { ((at + 1) as *mut u8).write_volatile(b'Q') };
+    ensure(
+        "taking the page that the mapping brought in",
+        mem_read_at::<6>(clone, 0)? == *b"pQge 0",
+    )?;
+    // The mapping's writable translation went when the clone took the
+    // page, so this store faults and the origin gets a frame of its own.
+    // SAFETY: the mapping is writable.
+    unsafe { ((at + 1) as *mut u8).write_volatile(b'R') };
+    ensure(
+        "keeping the clone's page against a store through the origin's mapping",
+        mem_read_at::<6>(clone, 0)? == *b"pQge 0" && mem_read_at::<6>(mem, 0)? == *b"pRge 0",
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("unmapping", sys::vm_unmap(s.process, at, PAGE_SIZE))?;
+        check("closing the clone", sys::handle_close(clone))
+    }
 }
 
 /// Supplying, writing back and evicting a paged object of more pages
