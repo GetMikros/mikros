@@ -2703,6 +2703,11 @@ impl MemoryObject {
                 } else {
                     crate::share::Kind::Owner
                 };
+                // An anonymous object's page that leaves the frame is no
+                // member of the frame's lend group any more.
+                if self.paged.is_none() && !copies[i] {
+                    crate::share::forget_members(phys, self.header.koid());
+                }
                 give[i] = match (crate::share::release(phys, kind), supplied) {
                     (Released::Alone, Some(budget)) => Give::Supplied(budget),
                     (Released::Alone, None) => Give::Own,
@@ -4981,8 +4986,16 @@ mod tests {
         let mut left = alloc::vec![(owner.koid(), 1), (second.koid(), 0)];
         left.sort_unstable();
         assert_eq!(member_pages(phys), left);
-        // The last lender going leaves the source alone with its frame,
-        // which is not shared and has no group.
+        // The source's page leaving the frame takes it out of the group,
+        // which the lender keeps.
+        let (third, port3) = paged(&user, 2);
+        third.lend(0, PAGE_SIZE, &owner, PAGE_SIZE).unwrap();
+        owner.decommit(PAGE_SIZE, PAGE_SIZE).unwrap();
+        let mut lenders = alloc::vec![(third.koid(), 0), (second.koid(), 0)];
+        lenders.sort_unstable();
+        assert_eq!(member_pages(phys), lenders);
+        drop((third, port3));
+        // The last lender going leaves the frame without a group.
         drop((second, port2));
         assert!(member_pages(phys).is_empty());
         drop((first, port, owner));

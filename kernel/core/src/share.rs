@@ -329,7 +329,10 @@ pub fn end_move(phys: u64, moved: bool) {
 pub fn skip_moved(new: u64, kind: Kind) -> bool {
     let mut shares = SHARES.lock();
     let Some(share) = shares.get_mut(&new) else {
-        return false;
+        // The entry went when the last of the others let go of the frame,
+        // as the owner alone holds it then: and the owner is the one that
+        // did not move, so nobody holds it.
+        return kind == Kind::Owner;
     };
     share.uses -= 1;
     if kind == Kind::Lent {
@@ -592,6 +595,24 @@ mod tests {
             panic!("the last use returns the charge");
         };
         assert!(Arc::ptr_eq(&charge, &budget));
+    }
+
+    #[test]
+    fn frees_a_moved_frame_that_nobody_holds_when_the_anchor_did_not_move() {
+        let _lock = crate::arch::mock::lock();
+        // Two uses were counted for the move: the anchor and one lender.
+        create_moved(A, None, 2, 1, &[]).unwrap();
+        // The lender went again, which left the owner alone with the
+        // frame, and the entry with it.
+        assert!(matches!(release(A, Kind::Lent), Released::Used));
+        assert!(!is_lent(A));
+        // The anchor did not move: nobody holds the frame.
+        assert!(skip_moved(A, Kind::Owner));
+        // A lender that did not move, with the owner on the frame, leaves
+        // it alone.
+        create_moved(B, None, 2, 1, &[]).unwrap();
+        assert!(!skip_moved(B, Kind::Lent));
+        assert!(matches!(release(B, Kind::Owner), Released::Last(None)));
     }
 
     #[test]
