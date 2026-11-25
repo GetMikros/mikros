@@ -28,6 +28,10 @@ fn main(m: &Managed) -> i64 {
             ("cloning_absent_pages", cloning_absent_pages),
             ("cloning_mapped_origin", cloning_mapped_origin),
             (
+                "writes_wait_for_recorded_lent_pages",
+                writes_wait_for_recorded_lent_pages,
+            ),
+            (
                 "cloning_lent_pages_under_writes",
                 cloning_lent_pages_under_writes,
             ),
@@ -689,6 +693,70 @@ fn cloning_lent_pages_under_writes(s: &Own) -> Result {
         )?;
     }
     Ok(())
+}
+
+/// Set once the write of `write_to_a_recorded_lent_page` is done.
+static RECORDED_WRITTEN: AtomicU64 = AtomicU64::new(0);
+
+/// Writes a byte into the source of a lent page.
+extern "sysv64" fn write_to_a_recorded_lent_page(source: u64, byte: u64) -> ! {
+    let _ = mem_write_at(source as Handle, 0, &[byte as u8]);
+    RECORDED_WRITTEN.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A write through the source of a page lent to a `STABLE` paged object
+/// waits for the writeback of that object that recorded the page, and goes
+/// through once it ends, which writes the page dirty again.
+fn writes_wait_for_recorded_lent_pages(s: &Own) -> Result {
+    let (pager, mem) = paged_object(s, 1, 2 | 4)?;
+    let source = create_memory(PAGE_SIZE)?;
+    mem_write_at(source, 0, b"lent")?;
+    // SAFETY: the call takes no pointers.
+    check("lending", unsafe {
+        sys::pager_lend(pager, mem, 0, PAGE_SIZE, source, 0)
+    })?;
+    mem_write_at(mem, 0, b"L")?;
+    check(
+        "beginning a writeback of the page",
+        pager_op(pager, mem, 3, 0, PAGE_SIZE),
+    )?;
+    RECORDED_WRITTEN.store(0, Ordering::Release);
+    spawn2(
+        s,
+        write_to_a_recorded_lent_page,
+        u64::from(source),
+        u64::from(b'z'),
+    )?;
+    sleep_ms(50);
+    ensure(
+        "making the write through the source wait",
+        RECORDED_WRITTEN.load(Ordering::Acquire) == 0,
+    )?;
+    ensure(
+        "keeping what the writeback recorded",
+        mem_read_at::<4>(mem, 0)? == *b"Lent",
+    )?;
+    check(
+        "ending the writeback",
+        pager_op(pager, mem, 4, 0, PAGE_SIZE),
+    )?;
+    let deadline = now() + 5_000_000_000;
+    while RECORDED_WRITTEN.load(Ordering::Acquire) == 0 {
+        ensure("writing then", now() < deadline)?;
+        sleep_ms(1);
+    }
+    ensure(
+        "showing the write through the paged object",
+        mem_read_at::<4>(mem, 0)? == *b"zent",
+    )?;
+    let (ranges, count) = dirty(pager, mem, PAGE_SIZE)?;
+    ensure(
+        "writing the page dirty again",
+        count == 1 && ranges[..2] == [0, PAGE_SIZE],
+    )
 }
 
 /// Supplying, writing back and evicting a paged object of more pages
