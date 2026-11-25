@@ -25,6 +25,7 @@ fn main(m: &Managed) -> i64 {
             ("pager_operations", pager_operations),
             ("lending_frames", lending_frames),
             ("cloning_paged_objects", cloning_paged_objects),
+            ("cloning_absent_pages", cloning_absent_pages),
             ("unreferenced_objects", unreferenced_objects),
             ("writebacks_and_discards", writebacks_and_discards),
             ("large_pager_operations", large_pager_operations),
@@ -471,6 +472,95 @@ fn cloning_paged_objects(s: &Own) -> Result {
     // SAFETY: the calls take no pointers.
     unsafe {
         for handle in [clone, second, third] {
+            check("closing a clone", sys::handle_close(handle))?;
+        }
+    }
+    Ok(())
+}
+
+/// A clone leaves the pages that its paged origin has not got absent, with
+/// no request to the pager: the first use of one asks the pager for it and
+/// shows what the origin has then, committing one asks for it, and
+/// decommitting one makes it read as zero without a request.
+fn cloning_absent_pages(s: &Own) -> Result {
+    const WRITE: u32 = 1 << 1;
+    let (pager, mem) = paged_object(s, 4, 2)?;
+    let before = REQUESTS.load(Ordering::Acquire);
+    let clone_with = |what: &'static str| -> Result<Handle> {
+        let mut clone = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check(what, unsafe {
+            sys::mem_clone(mem, WRITE, 0, 4 * PAGE_SIZE, &mut clone)
+        })?;
+        Ok(clone)
+    };
+    let clone = clone_with("cloning")?;
+    let other = clone_with("cloning again")?;
+    ensure(
+        "requesting no page for a clone",
+        REQUESTS.load(Ordering::Acquire) == before,
+    )?;
+    // The first use asks for the page.
+    ensure(
+        "taking a page from the origin on first use",
+        mem_read_at::<6>(clone, PAGE_SIZE)? == *b"page 1",
+    )?;
+    let after = REQUESTS.load(Ordering::Acquire);
+    ensure("requesting that page once", after == before + 1)?;
+    ensure(
+        "sharing the page with the origin",
+        mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1"
+            && REQUESTS.load(Ordering::Acquire) == after,
+    )?;
+    // The page that the origin gets before the first use is the one the
+    // clone shows.
+    mem_write_at(mem, 2 * PAGE_SIZE, b"Z")?;
+    ensure(
+        "showing what the origin has at the first use",
+        mem_read_at::<6>(clone, 2 * PAGE_SIZE)? == *b"Zage 2",
+    )?;
+    // A write to the clone stays out of the origin.
+    mem_write_at(clone, PAGE_SIZE, b"C")?;
+    ensure(
+        "keeping the origin's page against a write to the clone",
+        mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1"
+            && mem_read_at::<6>(clone, PAGE_SIZE)? == *b"Cage 1",
+    )?;
+    // Decommitting a page that was never used makes it read as zero and
+    // asks for nothing.
+    let before_decommit = REQUESTS.load(Ordering::Acquire);
+    // SAFETY: the call takes no pointers.
+    check("decommitting", unsafe {
+        sys::mem_op(other, 2, 3 * PAGE_SIZE, PAGE_SIZE)
+    })?;
+    ensure(
+        "reading a decommitted pending page as zero",
+        mem_read_at::<6>(other, 3 * PAGE_SIZE)? == [0; 6]
+            && REQUESTS.load(Ordering::Acquire) == before_decommit,
+    )?;
+    // Committing a page that was never used asks for it.
+    // SAFETY: the call takes no pointers.
+    check("committing", unsafe { sys::mem_op(other, 1, 0, PAGE_SIZE) })?;
+    ensure(
+        "committing a pending page takes it from the origin",
+        mem_read_at::<6>(other, 0)? == *b"page 0",
+    )?;
+    // A revoked origin gives the clone no page that it has not taken:
+    // the page that the clone used before keeps reading, and one that it
+    // did not fails.
+    // SAFETY: the call takes no pointers.
+    check("revoking", unsafe { sys::pager_revoke(pager, mem) })?;
+    ensure(
+        "keeping a page that was taken before the revocation",
+        mem_read_at::<6>(clone, PAGE_SIZE)? == *b"Cage 1",
+    )?;
+    let mut lost = [0u8; 6];
+    // SAFETY: the pointer describes `lost`.
+    let status = unsafe { sys::mem_read(other, 2 * PAGE_SIZE, lost.as_mut_ptr(), 6) };
+    ensure("refusing a pending page of a revoked origin", status == -13)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        for handle in [clone, other] {
             check("closing a clone", sys::handle_close(handle))?;
         }
     }
