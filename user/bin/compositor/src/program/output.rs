@@ -38,12 +38,24 @@ struct CursorPlane {
     want: Option<(usize, (i32, i32))>,
 }
 
-/// A cursor image on the display, mapped for writing.
+/// A cursor image on the display, mapped for writing. The mapping goes
+/// with the image.
 struct CursorImage {
     buffer: u32,
     pixels: *mut u32,
     /// Pixels per line.
     stride: usize,
+    /// The process that maps it, and the bytes it maps.
+    process: sys::Handle,
+    len: u64,
+}
+
+impl Drop for CursorImage {
+    fn drop(&mut self) {
+        // SAFETY: the mapping was made by `cursor_plane`, and nothing
+        // reads or writes the image once it is dropped.
+        unsafe { sys::vm_unmap(self.process, self.pixels as u64, self.len) };
+    }
 }
 
 /// The pointer image for the cursor plane: `size` pixels across and down
@@ -175,6 +187,19 @@ impl Output {
                 return None;
             };
             let buffer = r.buffer;
+            // The lines of the image must lie in the memory that maps it,
+            // which the display tells and this does not take on trust.
+            let wide = u64::from(buffer.stride) >= u64::from(limit) * 4;
+            let fits = u64::from(buffer.stride) * u64::from(limit) <= buffer.size;
+            if !wide || !fits {
+                mikros_rt::log!(
+                    Warning,
+                    "compositor: a cursor image of {limit} pixels does not fit its {} bytes at stride {}",
+                    buffer.size,
+                    buffer.stride
+                );
+                return None;
+            }
             let mut address = 0;
             // SAFETY: the out pointer is valid for the call.
             let status = unsafe {
@@ -196,6 +221,8 @@ impl Output {
                 buffer: buffer.buffer,
                 pixels: address as *mut u32,
                 stride: buffer.stride as usize / 4,
+                process,
+                len: buffer.size,
             });
         }
         let [first, second]: [CursorImage; 2] = images.try_into().ok()?;
