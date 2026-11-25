@@ -669,6 +669,9 @@ pub enum Fault {
     /// A write to a page of a lend group whose frame clones use waits for
     /// the group to move to a new frame, which is the frame `phys`'s.
     Group(u64),
+    /// A write to a page of a lend group whose frame another member's
+    /// writeback recorded waits for the writeback, which is of `phys`.
+    Recorded(u64),
 }
 
 /// Resolves a page fault of the running thread at the user address
@@ -687,9 +690,11 @@ pub fn resolve_fault(addr: u64, write: bool, fetch: bool) -> Fault {
         return Fault::Denied;
     };
     // An absent page of a paged object is waited for, outside the
-    // object's locks, and the access tried again.
+    // object's locks, and the access tried again. `checked` is the frame
+    // of a lend group whose recorded writebacks were waited for.
+    let mut checked = 0;
     loop {
-        match mem.fault(aspace, addr & !(PAGE_SIZE - 1), write, fetch) {
+        match mem.fault(aspace, addr & !(PAGE_SIZE - 1), write, fetch, checked) {
             Fault::Absent(index) => match mem.obtain(index) {
                 Ok(()) => {}
                 Err(Error::NoResources) => return Fault::OutOfMemory,
@@ -699,6 +704,11 @@ pub fn resolve_fault(addr: u64, write: bool, fetch: bool) -> Fault {
             Fault::Busy(index) => match mem.wait_settled(index) {
                 Ok(()) => {}
                 Err(Error::NoResources) => return Fault::OutOfMemory,
+                Err(_) => return Fault::Denied,
+            },
+            Fault::Recorded(phys) => match crate::memory_object::wait_recorded(phys, mem.koid()) {
+                Ok(_) => checked = phys,
+                Err(Error::NoResources | Error::NoMemory) => return Fault::OutOfMemory,
                 Err(_) => return Fault::Denied,
             },
             Fault::Group(phys) => match crate::memory_object::move_group(phys) {

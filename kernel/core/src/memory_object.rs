@@ -2104,7 +2104,14 @@ impl MemoryObject {
     /// written map the shared zero page read-only. Fails with `Denied`
     /// unless the region at `virt`, which maps this object, allows the
     /// access.
-    pub fn fault(&self, space: &AddressSpace, virt: u64, write: bool, fetch: bool) -> Fault {
+    pub fn fault(
+        &self,
+        space: &AddressSpace,
+        virt: u64,
+        write: bool,
+        fetch: bool,
+        checked: u64,
+    ) -> Fault {
         let mut pages = self.pages.lock();
         let mine = |r: Option<&aspace::RegionOf>| {
             r.filter(|r| core::ptr::eq(&*r.mem, self))
@@ -2132,6 +2139,9 @@ impl MemoryObject {
             }
             // A page whose frame clones share gets one of its own on a
             // store, and until then is mapped to be read only.
+            if write && checked != phys && self.may_be_recorded(&pages, index, phys) {
+                return Fault::Recorded(phys);
+            }
             let class = self.class(&pages, index, phys);
             let shared = class != Write::InPlace;
             if shared && write {
@@ -2168,6 +2178,11 @@ impl MemoryObject {
         }
         let (phys, writable) = match (self.physical, pages.frame(index)) {
             (Some((base, _)), _) => (base + index * PAGE_SIZE, perms & PERM_WRITE != 0),
+            (None, Some(phys))
+                if write && checked != phys && self.may_be_recorded(&pages, index, phys) =>
+            {
+                return Fault::Recorded(phys);
+            }
             (None, Some(phys)) if self.needs_copy(&pages, index, phys) => {
                 // A store gets a frame of its own, and a load maps the
                 // shared one so that the next store faults.
@@ -2240,6 +2255,8 @@ impl MemoryObject {
         virt: u64,
         write: bool,
     ) -> Result<Held, Error> {
+        // The frame that a writeback of another member was waited for.
+        let mut checked = 0;
         loop {
             let pages = self.pages.lock();
             let mine = |r: Option<&aspace::RegionOf>| {
@@ -2252,7 +2269,7 @@ impl MemoryObject {
             if !aspace::allows(perms, write, false) || index >= pages.count() {
                 return Err(Error::InvalidArgs);
             }
-            if let Some(held) = self.hold_page(pages, index, write)? {
+            if let Some(held) = self.hold_page(pages, index, write, &mut checked)? {
                 return Ok(held);
             }
         }
@@ -2267,13 +2284,14 @@ impl MemoryObject {
         if self.is_physical() {
             return Err(Error::NotSupported);
         }
+        let mut checked = 0;
         loop {
             let pages = self.pages.lock();
             self.check_writable()?;
             if index >= pages.count() {
                 return Err(Error::OutOfRange);
             }
-            if let Some(held) = self.hold_page(pages, index, true)? {
+            if let Some(held) = self.hold_page(pages, index, true, &mut checked)? {
                 return Ok(held);
             }
         }
@@ -2288,6 +2306,7 @@ impl MemoryObject {
         mut pages: crate::sync::Guard<'_, Pages>,
         index: u64,
         write: bool,
+        checked: &mut u64,
     ) -> Result<Option<Held>, Error> {
         if let Some((base, policy)) = self.physical {
             drop(pages);
@@ -2320,6 +2339,13 @@ impl MemoryObject {
                 drop(state);
                 drop(pages);
                 self.wait_stable(index)?;
+                return Ok(None);
+            }
+            if write && *checked != phys && self.may_be_recorded(&pages, index, phys) {
+                drop(state);
+                drop(pages);
+                wait_recorded(phys, self.header.koid())?;
+                *checked = phys;
                 return Ok(None);
             }
             if write && self.needs_copy(&pages, index, phys) {
@@ -2377,6 +2403,12 @@ impl MemoryObject {
             self.settle(index, index + 1);
             return Ok(None);
         };
+        if write && *checked != phys && self.may_be_recorded(&pages, index, phys) {
+            drop(pages);
+            wait_recorded(phys, self.header.koid())?;
+            *checked = phys;
+            return Ok(None);
+        }
         if write && self.needs_copy(&pages, index, phys) {
             if self.class(&pages, index, phys) == Write::Group {
                 drop(pages);
@@ -2741,6 +2773,7 @@ impl MemoryObject {
             source(&mut buf[..n])?;
             // The chunk is read from the source once; a page of a paged
             // object that went meanwhile is obtained again.
+            let mut checked = 0;
             loop {
                 self.obtain(index)?;
                 let mut pages = self.pages.lock();
@@ -2765,6 +2798,13 @@ impl MemoryObject {
                             self.wait_stable(index)?;
                             continue;
                         }
+                        if checked != phys && self.may_be_recorded(&pages, index, phys) {
+                            drop(state);
+                            drop(pages);
+                            wait_recorded(phys, self.header.koid())?;
+                            checked = phys;
+                            continue;
+                        }
                         if self.needs_copy(&pages, index, phys) {
                             drop(state);
                             if self.class(&pages, index, phys) == Write::Group {
@@ -2779,6 +2819,14 @@ impl MemoryObject {
                         }
                         state.written(index)?;
                         phys
+                    }
+                    (None, Some(phys))
+                        if checked != phys && self.may_be_recorded(&pages, index, phys) =>
+                    {
+                        drop(pages);
+                        wait_recorded(phys, self.header.koid())?;
+                        checked = phys;
+                        continue;
                     }
                     (None, Some(phys)) if self.needs_copy(&pages, index, phys) => {
                         if self.class(&pages, index, phys) == Write::Group {
@@ -3370,6 +3418,42 @@ fn unmap_group_members(frames: &[u64]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Waits until no `STABLE` member of the lend group of the lent frame
+/// `phys`, other than the object `me`, has a writeback outstanding that
+/// recorded the frame, so that a write through another member does not
+/// change what the writeback reads. A member that is revoked, whose pager
+/// is gone or that left the group does not hold the write. Returns whether
+/// it waited, and the caller looks again. No lock may be held.
+pub(crate) fn wait_recorded(phys: u64, me: u64) -> Result<bool, Error> {
+    let mut waited = false;
+    for (mem, index) in crate::share::members(phys)? {
+        if mem.koid() == me {
+            continue;
+        }
+        let Some(paged) = &mem.paged else {
+            continue;
+        };
+        let recorded = {
+            let pages = mem.pages.lock();
+            mem.member_kind(&pages, index, phys) == Some(true)
+                && paged.state.lock().write_waits(index)
+        };
+        if recorded {
+            match mem.wait_stable(index) {
+                // The write that follows changes the recorded page, which
+                // is dirty from now on, so that a later end of a writeback
+                // does not make it clean.
+                Ok(()) => paged.state.lock().written(index)?,
+                Err(Error::NoResources) => return Err(Error::NoResources),
+                // Revoked, or its pager is gone: the write goes on.
+                Err(_) => {}
+            }
+            waited = true;
+        }
+    }
+    Ok(waited)
+}
+
 /// What `move_group` joins to a move: a page of a member, whether it is
 /// one lent to a paged object, and the room to record that.
 struct Joined {
@@ -3585,6 +3669,13 @@ fn move_members(phys: u64, charge: &Option<Arc<Budget>>) -> Result<bool, Error> 
 }
 
 impl MemoryObject {
+    /// Whether a write to page `index`, which has the frame `phys`, first
+    /// looks for a writeback of another member that recorded the frame: the
+    /// slot is the group's, and the frame is lent. The pages are locked.
+    fn may_be_recorded(&self, pages: &Pages, index: u64, phys: u64) -> bool {
+        pages.is_shared(index) && !pages.is_copy(index) && crate::share::is_lent(phys)
+    }
+
     /// Whether page `index` is a member of the lend group of `phys`: its
     /// frame is that one, not as a clone's, and, for a paged object, lent
     /// to it. Returns whether it is lent. The pages are locked.
