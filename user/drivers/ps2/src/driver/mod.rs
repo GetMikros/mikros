@@ -32,6 +32,7 @@ use mikros_rt::interfaces::mikros::driver::{
 };
 use mikros_rt::interfaces::mikros::input::{Bus, DeviceInfo};
 use mikros_rt::interfaces::mikros::process::HandleRole;
+use mikros_rt::objects::now;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
@@ -297,6 +298,11 @@ async fn keep(_manager: DeviceManagerAsyncClient) {
     core::future::pending::<()>().await
 }
 
+/// How many times in a row the controller's buffer is read again before
+/// the driver lets the other tasks run for `REDRAIN_PAUSE` nanoseconds.
+const REDRAIN_ROUNDS: u32 = 64;
+const REDRAIN_PAUSE: i64 = 1_000_000;
+
 /// Reads what the devices send each time interrupt `at` fires.
 async fn watch(hub: Rc<Hub>, interrupts: Rc<Vec<OwnedHandle>>, at: usize, reactor: Reactor) {
     let raw = interrupts[at].raw();
@@ -307,11 +313,18 @@ async fn watch(hub: Rc<Hub>, interrupts: Rc<Vec<OwnedHandle>>, at: usize, reacto
         // buffer full, and it takes in no other byte until that is read,
         // so the buffer is looked at again once the line is open, and
         // read, until it is empty with the line open.
+        let mut rounds = 0u32;
         loop {
             hub.drain();
             let _ = mikros_rt::hardware::interrupt_ack(raw);
             if !hub.pending() {
                 break;
+            }
+            // A controller that always has a byte, and a line that opens
+            // and fills again, must not keep the other tasks from running.
+            rounds += 1;
+            if rounds.is_multiple_of(REDRAIN_ROUNDS) {
+                let _ = reactor.sleep_until(now() + REDRAIN_PAUSE).await;
             }
         }
     }
