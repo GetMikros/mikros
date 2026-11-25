@@ -1190,10 +1190,10 @@ impl MemoryObject {
     /// the source has the `WRITE` seal or this object is revoked, as for
     /// `supply`, whose seal and revocation checks this shares.
     pub fn lend(
-        &self,
+        self: &Arc<Self>,
         offset: u64,
         len: u64,
-        source: &MemoryObject,
+        source: &Arc<MemoryObject>,
         source_offset: u64,
     ) -> Result<(), Error> {
         let Some(paged) = &self.paged else {
@@ -1269,7 +1269,9 @@ impl MemoryObject {
                     continue;
                 };
                 for (index, phys) in (source_first + from..).zip(found) {
-                    if let Err(e) = crate::share::lend(phys, source.budget.as_ref()) {
+                    if let Err(e) =
+                        crate::share::lend(phys, source.budget.as_ref(), Some((source, index)))
+                    {
                         drop(pages);
                         frames
                             .into_iter()
@@ -1310,6 +1312,11 @@ impl MemoryObject {
                         unused.push(phys);
                         continue;
                     };
+                    // The page joins the frame's lend group.
+                    if crate::share::landing(phys, self, index).is_err() {
+                        unused.push(phys);
+                        continue;
+                    }
                     match charges.get_mut(&phys) {
                         Some(Charge::Lent(n)) => *n += 1,
                         _ => {
@@ -1860,6 +1867,11 @@ impl MemoryObject {
             );
         }
         Ok(copy)
+    }
+
+    /// The object's koid.
+    pub(crate) fn koid(&self) -> u64 {
+        self.header.koid()
     }
 
     /// Whether page `index` is marked changing. The pages are locked.
@@ -2525,12 +2537,18 @@ impl MemoryObject {
                 if let Some(paged) = &self.paged {
                     let mut charges = paged.charges.lock();
                     if let Some(Charge::Lent(n)) = charges.get_mut(&phys) {
-                        if *n > 1 {
+                        let last = *n <= 1;
+                        if !last {
                             *n -= 1;
                         } else {
                             charges.remove(&phys);
                         }
                         drop(charges);
+                        // None of this object's pages uses the frame as
+                        // lent any more.
+                        if last {
+                            crate::share::forget_members(phys, self.header.koid());
+                        }
                         give[i] = match crate::share::release(phys, crate::share::Kind::Lent) {
                             Released::Last(page) => Give::Last { page, entry: None },
                             _ => Give::Nothing,
@@ -3575,7 +3593,7 @@ mod tests {
         fill(&object, 0, 2 * PAGE_SIZE, 0x5a);
         let phys = object.pages.lock().frame(0).unwrap();
         // One page was lent to a paged object, which holds a use.
-        crate::share::lend(phys, Some(&budget)).unwrap();
+        crate::share::lend(phys, Some(&budget), None).unwrap();
         assert_eq!(arena.free(), start - 2);
         let (kernel, pages) = budget.usage();
         assert_eq!(pages, 2);
@@ -3600,7 +3618,7 @@ mod tests {
         let object = MemoryObject::new(Some(&budget), PAGE_SIZE, 0).unwrap();
         fill(&object, 0, PAGE_SIZE, 1);
         let phys = object.pages.lock().frame(0).unwrap();
-        crate::share::lend(phys, Some(&budget)).unwrap();
+        crate::share::lend(phys, Some(&budget), None).unwrap();
         crate::share::end(phys, crate::share::Kind::Lent);
         assert_eq!(arena.free(), start - 1);
         drop(object);
@@ -3691,7 +3709,7 @@ mod tests {
         fill(&object, 0, PAGE_SIZE, 0x3c);
         let mut pages = object.pages.lock();
         let phys = pages.frame(0).unwrap();
-        crate::share::lend(phys, Some(budget)).unwrap();
+        crate::share::lend(phys, Some(budget), None).unwrap();
         pages.mark_shared(0);
         drop(pages);
         (object, phys)
@@ -4422,6 +4440,49 @@ mod tests {
         assert_eq!(lender.pages.lock().frame(0), Some(lent));
         assert_eq!(frame_head(lent, 4), alloc::vec![0x3c; 4]);
         drop((lender, clone, port));
+        assert_eq!(arena.free(), start);
+        assert_eq!((owner_budget.usage(), user.usage().1), ((0, 0), 0));
+    }
+
+    fn member_pages(phys: u64) -> Vec<(u64, u64)> {
+        let mut found: Vec<(u64, u64)> = crate::share::members(phys)
+            .into_iter()
+            .map(|(mem, index)| (mem.koid(), index))
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    #[test]
+    fn a_lend_records_the_source_and_the_lender_as_the_members_of_the_frame() {
+        let _lock = mock::lock();
+        let arena = mock::Arena::new(16);
+        let (owner_budget, user) = (Budget::root(), Budget::root());
+        let start = arena.free();
+        let owner = MemoryObject::new(Some(&owner_budget), 2 * PAGE_SIZE, 0).unwrap();
+        fill(&owner, 0, 2 * PAGE_SIZE, 0x3c);
+        let phys = owner.pages.lock().frame(1).unwrap();
+        let (first, port) = paged(&user, 2);
+        let (second, port2) = paged(&user, 2);
+        first.lend(PAGE_SIZE, PAGE_SIZE, &owner, PAGE_SIZE).unwrap();
+        second.lend(0, PAGE_SIZE, &owner, PAGE_SIZE).unwrap();
+        let mut expected = alloc::vec![(owner.koid(), 1), (first.koid(), 1), (second.koid(), 0)];
+        expected.sort_unstable();
+        assert_eq!(member_pages(phys), expected);
+        // Lending it again to the same page adds nothing.
+        first.pager_op(OP_EVICT, PAGE_SIZE, PAGE_SIZE).unwrap();
+        first.lend(PAGE_SIZE, PAGE_SIZE, &owner, PAGE_SIZE).unwrap();
+        assert_eq!(member_pages(phys), expected);
+        // An object that uses the frame no more is forgotten by its pages.
+        first.pager_op(OP_EVICT, PAGE_SIZE, PAGE_SIZE).unwrap();
+        let mut left = alloc::vec![(owner.koid(), 1), (second.koid(), 0)];
+        left.sort_unstable();
+        assert_eq!(member_pages(phys), left);
+        // The last lender going leaves the source alone with its frame,
+        // which is not shared and has no group.
+        drop((second, port2));
+        assert!(member_pages(phys).is_empty());
+        drop((first, port, owner));
         assert_eq!(arena.free(), start);
         assert_eq!((owner_budget.usage(), user.usage().1), ((0, 0), 0));
     }

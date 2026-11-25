@@ -3,12 +3,53 @@
 //! use each, so that none is freed or given to another object while one
 //! does.
 
+use crate::memory_object::MemoryObject;
 use crate::nodes::{self, Map};
 use crate::object::budget::Budget;
 use crate::status::Error;
 use crate::sync::SpinLock;
-use alloc::sync::Arc;
+use alloc::boxed::Box;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+/// A page that uses a lent frame as part of its lend group: the source's
+/// slot, or the slot of a paged object that the frame was lent to. A
+/// member is a hint that is checked when it is used: the slot may have
+/// let go of the frame since.
+struct Member {
+    koid: u64,
+    index: u64,
+    mem: Weak<MemoryObject>,
+}
+
+/// The objects that use one frame because it was lent, which count as
+/// one object.
+struct Group {
+    members: Vec<Member>,
+}
+
+impl Group {
+    /// Adds the page `index` of `mem`, unless it is a member already.
+    /// Fails with `NoMemory`, changing nothing, without room.
+    fn add(&mut self, mem: &Arc<MemoryObject>, index: u64) -> Result<(), Error> {
+        let koid = mem.koid();
+        if self
+            .members
+            .iter()
+            .any(|m| m.koid == koid && m.index == index)
+        {
+            return Ok(());
+        }
+        self.members.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        self.members.push(Member {
+            koid,
+            index,
+            mem: Arc::downgrade(mem),
+        });
+        Ok(())
+    }
+}
 
 /// A shared frame.
 struct Share {
@@ -30,6 +71,8 @@ struct Share {
     /// it back when the last use ends, `None` for a frame charged to
     /// nothing. It stays alive as long as the frame is used.
     charge: Option<Arc<Budget>>,
+    /// The pages that use the frame as lent, once it was.
+    group: Option<Box<Group>>,
 }
 
 /// The kind of a use of a frame.
@@ -70,17 +113,44 @@ static SHARES: SpinLock<Map<u64, Share>> =
 static SHARED: AtomicU64 = AtomicU64::new(0);
 
 /// Records one more page of a paged object that uses the frame `phys` as a
-/// lent frame, which its owner's slot, charged to `owner`, holds. The first
-/// time, the owner's use is recorded too, with its charge. Fails with
-/// `NoMemory`, changing nothing, without room to record it.
-pub fn lend(phys: u64, owner: Option<&Arc<Budget>>) -> Result<(), Error> {
+/// lent frame, which its owner's slot, charged to `owner`, holds: page
+/// `index` of `source`, the anchor of the lend group, when it is given. The
+/// first time, the owner's use is recorded too, with its charge. Fails
+/// with `NoMemory`, changing nothing, without room to record it.
+pub fn lend(
+    phys: u64,
+    owner: Option<&Arc<Budget>>,
+    anchor: Option<(&Arc<MemoryObject>, u64)>,
+) -> Result<(), Error> {
     let mut shares = SHARES.lock();
     if let Some(share) = shares.get_mut(&phys) {
+        if let Some((source, index)) = anchor {
+            match &mut share.group {
+                Some(group) => group.add(source, index)?,
+                None => {
+                    let mut group = crate::fallible::try_box(Group {
+                        members: Vec::new(),
+                    })?;
+                    group.add(source, index)?;
+                    share.group = Some(group);
+                }
+            }
+        }
         share.uses += 1;
         share.lent += 1;
         return Ok(());
     }
     let _claim = nodes::claim_insert()?;
+    let group = match anchor {
+        Some((source, index)) => {
+            let mut group = crate::fallible::try_box(Group {
+                members: Vec::new(),
+            })?;
+            group.add(source, index)?;
+            Some(group)
+        }
+        None => None,
+    };
     shares.insert(
         phys,
         Share {
@@ -89,10 +159,55 @@ pub fn lend(phys: u64, owner: Option<&Arc<Budget>>) -> Result<(), Error> {
             copies: 0,
             bookkeeping: None,
             charge: owner.cloned(),
+            group,
         },
     );
     SHARED.fetch_add(1, Ordering::Release);
     Ok(())
+}
+
+/// Records that page `index` of `mem` uses the frame `phys`, which a lend
+/// of it counted, as a lent frame: a member of the frame's lend group.
+/// Fails with `NoMemory`, changing nothing, without room.
+pub fn landing(phys: u64, mem: &Arc<MemoryObject>, index: u64) -> Result<(), Error> {
+    let mut shares = SHARES.lock();
+    match shares.get_mut(&phys).and_then(|share| share.group.as_mut()) {
+        Some(group) => group.add(mem, index),
+        None => Ok(()),
+    }
+}
+
+/// Forgets the pages of the object `koid` as members of the lend group
+/// of the frame `phys`, once none of its pages uses the frame.
+pub fn forget_members(phys: u64, koid: u64) {
+    if SHARED.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let mut shares = SHARES.lock();
+    if let Some(group) = shares.get_mut(&phys).and_then(|s| s.group.as_mut()) {
+        group.members.retain(|m| m.koid != koid);
+    }
+}
+
+/// The pages that may use the frame `phys` as one lent to a paged object
+/// or as the source that lent it, as `(object, page)` pairs to check.
+/// Empty for a frame that was not lent.
+pub fn members(phys: u64) -> Vec<(Arc<MemoryObject>, u64)> {
+    let snapshot: Vec<(Weak<MemoryObject>, u64)> = {
+        let shares = SHARES.lock();
+        match shares.get(&phys).and_then(|share| share.group.as_ref()) {
+            Some(group) => group
+                .members
+                .iter()
+                .map(|m| (m.mem.clone(), m.index))
+                .collect(),
+            None => Vec::new(),
+        }
+    };
+    snapshot
+        .into_iter()
+        .filter_map(|(mem, index)| mem.upgrade().map(|mem| (mem, index)))
+        .collect()
 }
 
 /// Records one more slot of an object made by `mem_clone` that uses the
@@ -124,6 +239,7 @@ pub fn copy(
             copies: 1,
             bookkeeping: caller.cloned(),
             charge: owner.cloned(),
+            group: None,
         },
     );
     SHARED.fetch_add(1, Ordering::Release);
@@ -222,8 +338,8 @@ mod tests {
         let _lock = crate::arch::mock::lock();
         assert!(!is_lent(A) && matches!(release(A, Kind::Owner), Released::Alone));
         // Two lends of a frame its owner holds: three uses.
-        lend(A, None).unwrap();
-        lend(A, None).unwrap();
+        lend(A, None, None).unwrap();
+        lend(A, None, None).unwrap();
         assert!(is_lent(A));
         assert!(matches!(release(A, Kind::Lent), Released::Used));
         assert!(matches!(release(A, Kind::Owner), Released::Used));
@@ -235,7 +351,7 @@ mod tests {
     #[test]
     fn is_lent_only_while_a_page_uses_the_frame_as_lent() {
         let _lock = crate::arch::mock::lock();
-        lend(A, None).unwrap();
+        lend(A, None, None).unwrap();
         assert!(matches!(release(A, Kind::Lent), Released::Used));
         // The owner still holds the frame, which is shared no longer, so
         // it has no entry.
@@ -247,10 +363,10 @@ mod tests {
     fn hands_the_charge_to_the_last_use() {
         let _lock = crate::arch::mock::lock();
         let budget = Budget::root();
-        lend(A, Some(&budget)).unwrap();
+        lend(A, Some(&budget), None).unwrap();
         // A later lend does not change who is charged.
         let other = Budget::root();
-        lend(A, Some(&other)).unwrap();
+        lend(A, Some(&other), None).unwrap();
         assert!(matches!(release(A, Kind::Owner), Released::Used));
         assert!(matches!(release(A, Kind::Lent), Released::Used));
         let Released::Last(Some(charge)) = release(A, Kind::Lent) else {
@@ -263,7 +379,7 @@ mod tests {
     fn counts_the_slots_of_clones_apart_from_lends() {
         let _lock = crate::arch::mock::lock();
         assert!(!has_copies(A));
-        lend(A, None).unwrap();
+        lend(A, None, None).unwrap();
         // Lends alone are no copies: the owner and they are one object.
         assert!(is_lent(A) && !has_copies(A));
         copy(A, None, None).unwrap();
@@ -283,8 +399,8 @@ mod tests {
     #[test]
     fn keeps_the_frames_of_other_addresses_apart() {
         let _lock = crate::arch::mock::lock();
-        lend(A, None).unwrap();
-        lend(B, None).unwrap();
+        lend(A, None, None).unwrap();
+        lend(B, None, None).unwrap();
         assert!(matches!(release(A, Kind::Lent), Released::Used));
         assert!(matches!(release(A, Kind::Owner), Released::Alone));
         assert!(!is_lent(A) && is_lent(B));
@@ -300,7 +416,7 @@ mod tests {
         budget.charge_pages(1).unwrap();
         let phys = crate::frames::alloc_frame().unwrap();
         let free = arena.free();
-        lend(phys, Some(&budget)).unwrap();
+        lend(phys, Some(&budget), None).unwrap();
         // The owner lets go first: the frame and its page stay.
         assert!(matches!(release(phys, Kind::Owner), Released::Used));
         assert_eq!((arena.free(), budget.usage().1), (free, 1));
