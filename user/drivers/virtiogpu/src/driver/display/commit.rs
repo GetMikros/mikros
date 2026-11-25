@@ -22,6 +22,19 @@ use mikros_rt::objects::now;
 /// How long, in nanoseconds, a commit may take before it is logged.
 const WATCH: i64 = 2_000_000_000;
 
+/// What a commit is doing, which the watch says when it is not done in
+/// time.
+#[derive(Clone, Copy)]
+enum Phase {
+    /// Waiting for the sync objects that its planes name.
+    Acquire,
+    /// Waiting for the device to answer command `at` of `of`, of the
+    /// kind `kind`.
+    Command { at: usize, of: usize, kind: u32 },
+    /// Showing the cursors.
+    Cursor,
+}
+
 fn rect(r: &gpu::Rect) -> Rect {
     Rect::new(
         i64::from(r.x),
@@ -165,9 +178,15 @@ impl Display {
             showing.extend(c.cursor.map(|s| s.buffer));
         }
         self.showing.borrow_mut().insert(id, showing);
-        let presented = self
-            .clone()
-            .present(id, changes, waits, Rc::downgrade(owner));
+        // What the commit was made under, so that the owner closing its
+        // connection while it waits ends it, and the watch that says so
+        // when it takes too long, from the start.
+        let epoch = self.epoch.get();
+        let phase = Rc::new(Cell::new(Phase::Acquire));
+        self.watch(id, phase.clone());
+        let presented =
+            self.clone()
+                .present(id, epoch, phase, changes, waits, Rc::downgrade(owner));
         self.spawner.spawn(presented);
         Ok(id)
     }
@@ -180,6 +199,8 @@ impl Display {
     async fn present(
         self: Rc<Self>,
         id: u64,
+        epoch: u64,
+        phase: Rc<Cell<Phase>>,
         changes: Vec<Change>,
         waits: Vec<(Rc<OwnedHandle>, u64)>,
         owner: Weak<DisplayAsyncServer>,
@@ -192,9 +213,12 @@ impl Display {
                 );
             }
         }
-        let epoch = self.epoch.get();
         let mut commands = Vec::new();
         for change in &changes {
+            // The owner closed its connection meanwhile: nothing is shown.
+            if self.epoch.get() != epoch {
+                break;
+            }
             match self.scanout_commands(change) {
                 Ok(more) => commands.extend(more),
                 Err(status) => {
@@ -205,28 +229,16 @@ impl Display {
         if let Some(last) = commands.pop() {
             commands.push(protocol::fenced(last, self.gpu.fence()));
         }
-        // Says so when the device does not answer a command in time, which
-        // leaves the commit, and whoever waits for it, waiting for good.
-        let stage = Rc::new(Cell::new(0usize));
         let kinds: Vec<u32> = commands
             .iter()
             .map(|c| protocol::response_type(c).unwrap_or(0))
             .collect();
-        let (display, watched) = (self.clone(), stage.clone());
-        self.spawner.spawn(async move {
-            let _ = display.reactor.sleep_until(now() + WATCH).await;
-            if display.showing.borrow().contains_key(&id) {
-                let at = watched.get();
-                mikros_rt::log!(
-                    Error,
-                    "virtiogpu: commit {id} was not presented after 2 s; at command {at} of {}, kind {:#x}",
-                    kinds.len(),
-                    kinds.get(at).copied().unwrap_or(0)
-                );
-            }
-        });
         for (at, command) in commands.iter().enumerate() {
-            stage.set(at);
+            phase.set(Phase::Command {
+                at,
+                of: commands.len(),
+                kind: kinds[at],
+            });
             // The owner closed its connection, and the scanouts are off.
             if self.epoch.get() != epoch {
                 break;
@@ -235,6 +247,7 @@ impl Display {
                 mikros_rt::log!(Error, "virtiogpu: presenting commit {id}: {status:?}");
             }
         }
+        phase.set(Phase::Cursor);
         for change in &changes {
             if self.epoch.get() != epoch {
                 break;
@@ -263,6 +276,33 @@ impl Display {
         if let Some(owner) = owner.upgrade() {
             let _ = owner.server().send_on_commit_complete(id, now());
         }
+    }
+
+    /// Says so when the device, or a sync object, does not let commit
+    /// `id` finish in time, which leaves the commit, and whoever waits
+    /// for it, waiting for good, and in which phase it is.
+    fn watch(self: &Rc<Self>, id: u64, phase: Rc<Cell<Phase>>) {
+        let display = self.clone();
+        self.spawner.spawn(async move {
+            let _ = display.reactor.sleep_until(now() + WATCH).await;
+            if !display.showing.borrow().contains_key(&id) {
+                return;
+            }
+            match phase.get() {
+                Phase::Acquire => mikros_rt::log!(
+                    Error,
+                    "virtiogpu: commit {id} was not presented after 2 s; waiting for a sync object"
+                ),
+                Phase::Command { at, of, kind } => mikros_rt::log!(
+                    Error,
+                    "virtiogpu: commit {id} was not presented after 2 s; at command {at} of {of}, kind {kind:#x}"
+                ),
+                Phase::Cursor => mikros_rt::log!(
+                    Error,
+                    "virtiogpu: commit {id} was not presented after 2 s; showing the cursor"
+                ),
+            }
+        });
     }
 
     /// The commands that show `change` on its scanout, in the order that
