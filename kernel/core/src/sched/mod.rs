@@ -484,6 +484,9 @@ pub struct CpuSched {
     /// and reseeding the random number generator, or `INFINITE`.
     clock_due: i64,
     reseed_due: i64,
+    /// The deadline the processor's timer was last set to, or `INFINITE`
+    /// when it was stopped.
+    armed: core::cell::Cell<i64>,
 }
 
 // SAFETY: queued pointers are references to threads, which are Sync; the
@@ -511,6 +514,7 @@ impl CpuSched {
             timers: Deadlines::new(),
             clock_due: INFINITE,
             reseed_due: INFINITE,
+            armed: core::cell::Cell::new(INFINITE),
         }
     }
 
@@ -967,11 +971,21 @@ fn arm(cpu: &CpuSched) {
     // The watchdog needs every processor's timer to interrupt it.
     #[cfg(feature = "diag")]
     let at = at.min(watchdog::heartbeat(crate::arch::monotonic_now()));
+    // A timer set to a deadline that is still ahead and not later than
+    // the one wanted (`INFINITE` stops it) interrupts early enough: the interrupt finds nothing
+    // due and arms the timer again. Setting it takes a write to a
+    // register that exits to the host in a virtual machine, which a
+    // switch to another thread would pay for each time.
+    let armed = cpu.armed.get();
+    if at != INFINITE && armed <= at && armed > crate::arch::monotonic_now() {
+        return;
+    }
     if at == INFINITE {
         crate::arch::timer_disarm();
     } else {
         crate::arch::timer_arm(at);
     }
+    cpu.armed.set(at);
 }
 
 /// Blocks the running thread until the monotonic clock reaches
@@ -1349,6 +1363,8 @@ fn maintain(now: i64) {
 /// running thread's slice has ended.
 pub fn timer_interrupt() {
     let now = crate::arch::monotonic_now();
+    // The timer has fired: nothing is armed until `arm` sets it again.
+    this_cpu().lock().armed.set(INFINITE);
     maintain(now);
     let me = crate::arch::cpu_index() as usize;
     let mut cpu = this_cpu().lock();
@@ -1556,5 +1572,39 @@ mod tests {
         let before = crate::arch::mock::interrupt_windows();
         take_interrupts_and_switch();
         assert!(crate::arch::mock::interrupt_windows() > before);
+    }
+
+    /// A timer that is set to a deadline still ahead and not later than
+    /// the one wanted is not set again, and is set once that is not so.
+    #[test]
+    fn the_timer_is_set_again_only_when_its_deadline_is_too_late_or_gone() {
+        let _mock = crate::arch::mock::lock();
+        reschedule().store(false, Ordering::Relaxed);
+        crate::arch::mock::set_now(1_000);
+        let mut cpu = CpuSched::new();
+        cpu.clock_due = 5_000;
+        arm(&cpu);
+        assert_eq!(crate::arch::mock::timer_deadline(), Some(5_000));
+        // A later wanted deadline leaves the earlier one set.
+        cpu.clock_due = 9_000;
+        crate::arch::mock::set_now(2_000);
+        arm(&cpu);
+        assert_eq!(crate::arch::mock::timer_deadline(), Some(5_000));
+        // An earlier one replaces it.
+        cpu.clock_due = 3_000;
+        arm(&cpu);
+        assert_eq!(crate::arch::mock::timer_deadline(), Some(3_000));
+        // One that has passed is set again, also when it is early enough.
+        cpu.clock_due = 9_000;
+        crate::arch::mock::set_now(3_500);
+        arm(&cpu);
+        assert_eq!(crate::arch::mock::timer_deadline(), Some(9_000));
+        // Nothing wanted stops it, and the next wish sets it again.
+        cpu.clock_due = INFINITE;
+        arm(&cpu);
+        assert_eq!(crate::arch::mock::timer_deadline(), None);
+        cpu.clock_due = 7_000;
+        arm(&cpu);
+        assert_eq!(crate::arch::mock::timer_deadline(), Some(7_000));
     }
 }
