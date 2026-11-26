@@ -38,10 +38,9 @@ pub struct XdgState {
     /// Whether the pointer resizes the window, the size that a resize
     /// asks of the client, the serial of the configure with a size that the
     /// client has not answered with a commit yet and whether it
-    /// acknowledged it, and the latest size asked since (MIKSPEC-0074.R16).
+    /// acknowledged it, and the latest size asked since (MIKSPEC-0074.R30).
     pub resizing: bool,
     pub(super) outstanding: Option<u32>,
-    pub(super) outstanding_at: u64,
     pub(super) acked: bool,
     pub(super) latest: Option<(i32, i32)>,
 }
@@ -321,7 +320,7 @@ impl Server {
             xdg_toplevel::Request::ShowWindowMenu { .. } => {}
         }
         if changed && xdg.initialized {
-            self.configure(request.client, id);
+            self.configure_now(id, None);
         }
         Ok(())
     }
@@ -581,10 +580,49 @@ mod tests {
     }
 
     #[test]
-    fn a_client_that_does_not_answer_is_not_waited_for_after_a_second() {
+    fn a_configure_sent_at_once_replaces_the_outstanding_one() {
         let mut server = Server::new();
         server.screen = Some((1280, 800));
-        server.set_clock(1_000);
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 4, 6, vec![]);
+        let first = configures(&events(&client, &mut server));
+        client.send(&mut server, 6, 4, vec![Arg::Uint(first[0].1)]);
+        let surface = *server.surfaces().next().unwrap().0;
+        server.surfaces.get_mut(&surface).unwrap().current.buffer = Some(99);
+        let outstanding =
+            |server: &Server| server.surfaces[&surface].xdg.as_ref().unwrap().outstanding;
+        server.ask_size(surface, (300, 200));
+        let older = configures(&events(&client, &mut server));
+        assert_eq!(older.len(), 1);
+        server.ask_size(surface, (310, 210));
+        assert!(events(&client, &mut server).is_empty());
+        // The final size goes out although the client has not answered, and
+        // the size that waited is dropped.
+        server.configure_now(surface, Some((320, 220)));
+        let last = configures(&events(&client, &mut server));
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].0, (320, 220));
+        assert_eq!(outstanding(&server), Some(last[0].1));
+        // The answer to the older configure is not one to the last.
+        client.send(&mut server, 6, 4, vec![Arg::Uint(older[0].1)]);
+        client.send(&mut server, 4, 6, vec![]);
+        assert!(configures(&events(&client, &mut server)).is_empty());
+        assert_eq!(outstanding(&server), Some(last[0].1));
+        // The answer to the last one ends the wait, and nothing else is sent.
+        client.send(&mut server, 6, 4, vec![Arg::Uint(last[0].1)]);
+        client.send(&mut server, 4, 6, vec![]);
+        assert!(configures(&events(&client, &mut server)).is_empty());
+        assert_eq!(outstanding(&server), None);
+        server.ask_size(surface, (330, 230));
+        let next = configures(&events(&client, &mut server));
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].0, (330, 230));
+    }
+
+    #[test]
+    fn a_client_that_does_not_answer_is_waited_for_without_a_limit() {
+        let mut server = Server::new();
+        server.screen = Some((1280, 800));
         let client = with_toplevel(&mut server);
         client.send(&mut server, 4, 6, vec![]);
         let first = configures(&events(&client, &mut server));
@@ -593,14 +631,80 @@ mod tests {
         server.surfaces.get_mut(&surface).unwrap().current.buffer = Some(99);
         server.ask_size(surface, (300, 200));
         assert_eq!(configures(&events(&client, &mut server)).len(), 1);
-        server.set_clock(1_500);
         server.ask_size(surface, (310, 210));
         assert!(events(&client, &mut server).is_empty());
-        server.set_clock(2_000);
+        // Nothing is sent again, however long the client takes.
         server.ask_size(surface, (320, 220));
-        let later = configures(&events(&client, &mut server));
-        assert_eq!(later.len(), 1);
-        assert_eq!(later[0].0, (320, 220));
+        assert!(events(&client, &mut server).is_empty());
+    }
+
+    #[test]
+    fn maximizing_sends_its_configure_at_once_over_an_outstanding_one() {
+        let mut server = Server::new();
+        server.screen = Some((1280, 800));
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 4, 6, vec![]);
+        let first = configures(&events(&client, &mut server));
+        client.send(&mut server, 6, 4, vec![Arg::Uint(first[0].1)]);
+        let surface = *server.surfaces().next().unwrap().0;
+        server.surfaces.get_mut(&surface).unwrap().current.buffer = Some(99);
+        server.ask_size(surface, (300, 200));
+        let older = configures(&events(&client, &mut server));
+        assert_eq!(older.len(), 1);
+        server.maximize_window(surface);
+        let sent = configures(&events(&client, &mut server));
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1 > older[0].1);
+        let xdg = server.surfaces[&surface].xdg.as_ref().unwrap();
+        assert_eq!(xdg.outstanding, Some(sent[0].1));
+    }
+
+    #[test]
+    fn the_end_of_a_resize_sends_the_final_size_without_the_resizing_state() {
+        use super::super::resize::Resize;
+        let mut server = Server::new();
+        server.screen = Some((1280, 800));
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 4, 6, vec![]);
+        let first = configures(&events(&client, &mut server));
+        client.send(&mut server, 6, 4, vec![Arg::Uint(first[0].1)]);
+        let surface = *server.surfaces().next().unwrap().0;
+        server.surfaces.get_mut(&surface).unwrap().current.buffer = Some(99);
+        server.buffer_sizes.insert(99, (100, 50));
+        server.move_window(surface, 100, 100);
+        let frame = server.windows().into_iter().next().unwrap().frame;
+        server.pointer.resizing = Some(Resize {
+            surface,
+            edges: 8,
+            frame,
+            pointer: (200, 125),
+            button: 0x110,
+            asked: (frame.width, frame.height),
+        });
+        server
+            .surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .xdg
+            .as_mut()
+            .unwrap()
+            .resizing = true;
+        // A size that the client does not answer is outstanding.
+        server.ask_size(surface, (300, 200));
+        assert_eq!(configures(&events(&client, &mut server)).len(), 1);
+        assert!(server.end_resize(0x110));
+        let all = events(&client, &mut server);
+        let sent = configures(&all);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, (frame.width, frame.height));
+        let Some((_, _, args)) = all.iter().find(|e| (e.0, e.1) == (7, 0)) else {
+            panic!("a configure: {all:?}");
+        };
+        let Arg::Array(states) = &args[2] else {
+            panic!("states");
+        };
+        let resizing = xdg_toplevel::state::RESIZING.to_ne_bytes();
+        assert!(!states.chunks(4).any(|s| s == resizing));
     }
 
     #[test]

@@ -92,8 +92,9 @@ impl Server {
         let Some(before) = self.take_restore(surface) else {
             return;
         };
+        let mut maximized = false;
         if let Some(xdg) = self.surfaces.get_mut(&surface).and_then(|s| s.xdg.as_mut()) {
-            xdg.maximized = false;
+            maximized = std::mem::replace(&mut xdg.maximized, false);
         }
         self.with_window(surface, |w| w.snapped = None);
         let from = window.frame;
@@ -107,20 +108,31 @@ impl Server {
             height: before.height,
         };
         self.set_frame(surface, frame);
-        self.ask_size(surface, (frame.width, frame.height));
+        // The configure that drops the maximized state goes out at once
+        // (MIKSPEC-0074.R30).
+        if maximized {
+            self.configure_now(surface, Some((frame.width, frame.height)));
+        } else {
+            self.ask_size(surface, (frame.width, frame.height));
+        }
     }
 
-    /// Ends the move or the resize that goes on, if one does.
+    /// Ends the move or the resize that goes on, if one does. The client of
+    /// a window that was resized is told its final size at once
+    /// (MIKSPEC-0074.R30).
     pub(super) fn end_grabs(&mut self) {
         self.pointer.moving = None;
-        if let Some(resize) = self.pointer.resizing.take()
-            && let Some(xdg) = self
-                .surfaces
-                .get_mut(&resize.surface)
-                .and_then(|s| s.xdg.as_mut())
+        let Some(resize) = self.pointer.resizing.take() else {
+            return;
+        };
+        if let Some(xdg) = self
+            .surfaces
+            .get_mut(&resize.surface)
+            .and_then(|s| s.xdg.as_mut())
         {
             xdg.resizing = false;
         }
+        self.send_final_size(resize.surface);
     }
 
     /// Whether a window is moved or resized.

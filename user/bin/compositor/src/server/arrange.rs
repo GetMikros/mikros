@@ -35,9 +35,6 @@ impl Server {
     /// area's size, and the frame it had is kept to restore. A fullscreen
     /// window stays so.
     pub fn maximize_window(&mut self, surface: SurfaceId) {
-        let Some(client) = self.surfaces.get(&surface).map(|s| s.client) else {
-            return;
-        };
         let Some(xdg) = self.surfaces.get_mut(&surface).and_then(|s| s.xdg.as_mut()) else {
             return;
         };
@@ -49,7 +46,7 @@ impl Server {
         // the window was not snapped, the one that the window layer keeps
         // when it sees the window maximized.
         self.with_window(surface, |w| w.snapped = None);
-        self.configure(client, surface);
+        self.configure_now(surface, None);
     }
 
     /// Gives a maximized or snapped window the frame it had before, and
@@ -74,7 +71,13 @@ impl Server {
         }
         self.with_window(surface, |w| w.snapped = None);
         self.set_frame(surface, before);
-        self.ask_size(surface, (before.width, before.height));
+        // The configure drops the maximized state: it goes out at once
+        // (MIKSPEC-0074.R30).
+        if maximized {
+            self.configure_now(surface, Some((before.width, before.height)));
+        } else {
+            self.ask_size(surface, (before.width, before.height));
+        }
         true
     }
 
@@ -121,7 +124,13 @@ impl Server {
             w.snapped = Some(side);
         });
         self.set_frame(surface, frame);
-        self.ask_size(surface, (frame.width, frame.height));
+        // A configure that drops the maximized state goes out at once
+        // (MIKSPEC-0074.R30).
+        if was_maximized {
+            self.configure_now(surface, Some((frame.width, frame.height)));
+        } else {
+            self.ask_size(surface, (frame.width, frame.height));
+        }
     }
 
     /// Minimizes the window of `surface`.

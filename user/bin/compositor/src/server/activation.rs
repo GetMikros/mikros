@@ -99,11 +99,6 @@ impl Activation {
 }
 
 impl Server {
-    /// The time of the monotonic clock in milliseconds, as last set.
-    pub(super) fn clock(&self) -> u64 {
-        self.activation.clock
-    }
-
     /// Sets the time of the monotonic clock, in milliseconds, which the
     /// tokens' lifetimes are measured by.
     pub fn set_clock(&mut self, milliseconds: u64) {

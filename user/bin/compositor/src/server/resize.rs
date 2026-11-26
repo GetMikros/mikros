@@ -4,7 +4,8 @@
 //! `xdg_toplevel.resize` (MIKSPEC-0074.R9). The frame follows the pointer at
 //! every motion, with the client's content stretched to it until a buffer of
 //! its size comes (MIKSPEC-0074.R15), and the client is asked for the size
-//! with at most one configure outstanding (MIKSPEC-0074.R16).
+//! with at most one configure outstanding, except that the end of a resize
+//! sends the final size at once (MIKSPEC-0074.R30).
 
 use super::grabs::{BTN_LEFT, band_edges, nearest_corner, resize_frame};
 use super::{ClientId, Rect, Role, Server, SurfaceId};
@@ -21,10 +22,6 @@ pub(super) struct Resize {
     /// The size that the client was last asked for.
     pub asked: (i32, i32),
 }
-
-/// How long a client has to answer a configure with a size, in
-/// milliseconds, before the next is sent anyway.
-const PATIENCE: u64 = 1000;
 
 /// The values of xdg_toplevel's resize edges.
 const EDGES: [u32; 9] = [0, 1, 2, 4, 5, 6, 8, 9, 10];
@@ -125,13 +122,7 @@ impl Server {
         {
             xdg.resizing = false;
         }
-        if let Some(window) = self
-            .windows()
-            .into_iter()
-            .find(|w| w.surface == resize.surface)
-        {
-            self.ask_size(resize.surface, (window.frame.width, window.frame.height));
-        }
+        self.send_final_size(resize.surface);
         true
     }
 
@@ -215,29 +206,39 @@ impl Server {
     /// Asks the client of the window `surface` for the size `size` with
     /// `configure`, or, while a configure with a size is outstanding, keeps
     /// the latest size asked to send when the client has answered with a
-    /// commit (MIKSPEC-0074.R16).
+    /// commit (MIKSPEC-0074.R30).
     pub(super) fn ask_size(&mut self, surface: SurfaceId, size: (i32, i32)) {
-        let now = self.clock();
-        let Some(s) = self.surfaces.get_mut(&surface) else {
+        let Some(xdg) = self.surfaces.get_mut(&surface).and_then(|s| s.xdg.as_mut()) else {
             return;
         };
-        let client = s.client;
-        let Some(xdg) = s.xdg.as_mut() else {
-            return;
-        };
-        // A client that has not answered within a second is not waited for.
-        if xdg.outstanding.is_some() && now.saturating_sub(xdg.outstanding_at) >= PATIENCE {
-            xdg.outstanding = None;
-        }
         if xdg.outstanding.is_some() {
             xdg.latest = Some(size);
             return;
         }
-        let serial = self.configure_with(client, surface, Some(size));
+        self.configure_now(surface, Some(size));
+    }
+
+    /// Sends the client of the window `surface` a configure with `size`
+    /// at once, even while an earlier configure is not answered, which then
+    /// no longer counts as outstanding (MIKSPEC-0074.R30).
+    pub(super) fn configure_now(&mut self, surface: SurfaceId, size: Option<(i32, i32)>) {
+        let Some(client) = self.surfaces.get(&surface).map(|s| s.client) else {
+            return;
+        };
+        let serial = self.configure_with(client, surface, size);
         if let Some(xdg) = self.surfaces.get_mut(&surface).and_then(|s| s.xdg.as_mut()) {
             xdg.outstanding = serial;
-            xdg.outstanding_at = now;
             xdg.acked = false;
+            xdg.latest = None;
+        }
+    }
+
+    /// Tells the client of the window `surface` the size of its frame, with
+    /// the resize over, at once (MIKSPEC-0074.R30).
+    pub(super) fn send_final_size(&mut self, surface: SurfaceId) {
+        if let Some(window) = self.windows().into_iter().find(|w| w.surface == surface) {
+            let size = (window.frame.width, window.frame.height);
+            self.configure_now(surface, Some(size));
         }
     }
 
