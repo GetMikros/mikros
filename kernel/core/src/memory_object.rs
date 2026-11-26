@@ -2653,10 +2653,17 @@ impl MemoryObject {
             }
             let mut batch = [0u64; BATCH];
             let mut copies = [false; BATCH];
+            let mut marked = [false; BATCH];
             let mut len = 0;
-            for ((slot, copy), frame) in batch.iter_mut().zip(&mut copies).zip(frames.by_ref()) {
+            for (((slot, copy), mark), frame) in batch
+                .iter_mut()
+                .zip(&mut copies)
+                .zip(&mut marked)
+                .zip(frames.by_ref())
+            {
                 *slot = frame.phys();
                 *copy = frame.is_copy();
+                *mark = frame.is_shared();
                 len += 1;
             }
             if len == 0 {
@@ -2705,7 +2712,8 @@ impl MemoryObject {
                 };
                 // An anonymous object's page that leaves the frame is no
                 // member of the frame's lend group any more.
-                if self.paged.is_none() && !copies[i] {
+                // (A slot that was never marked shared has no entry.)
+                if self.paged.is_none() && !copies[i] && marked[i] {
                     crate::share::forget_members(phys, self.header.koid());
                 }
                 give[i] = match (crate::share::release(phys, kind), supplied) {
