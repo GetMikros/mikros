@@ -71,13 +71,12 @@ impl Compositor {
         let pointer = relative || absolute.is_some();
         if pointer {
             mikros_rt::log!(Info, "compositor: reading the pointer {instance}");
+            self.server.borrow_mut().pointer_device_added(&instance);
         } else if keys.is_none() {
             return;
         }
         let mut report = Report::default();
         let mut time = 0;
-        // The buttons that this device holds, to let go of when it goes.
-        let mut held: Vec<u32> = Vec::new();
         while let Ok(DeviceEvent::OnEvents(batch)) = device.next_event().await {
             let mut keyed = false;
             for event in &batch.events {
@@ -99,12 +98,7 @@ impl Compositor {
                     }
                     (EV_KEY, code) if BUTTONS.contains(&code) => {
                         if pointer && event.value != 2 {
-                            let (button, pressed) = (u32::from(code), event.value == 1);
-                            report.buttons.push((button, pressed));
-                            held.retain(|&b| b != button);
-                            if pressed {
-                                held.push(button);
-                            }
+                            report.buttons.push((u32::from(code), event.value == 1));
                         }
                     }
                     (EV_KEY, code) => {
@@ -114,7 +108,7 @@ impl Compositor {
                         }
                     }
                     (EV_SYN, SYN_REPORT) if pointer => {
-                        self.apply(std::mem::take(&mut report), time);
+                        self.apply(&instance, std::mem::take(&mut report), time);
                     }
                     _ => {}
                 }
@@ -127,10 +121,12 @@ impl Compositor {
             keys.release_all(&self, time);
             self.flush_all();
         }
-        // A pointer that is gone ends the resize that one of its buttons
-        // holds (MIKSPEC-0074.R30).
-        if !held.is_empty() {
-            self.server.borrow_mut().pointer_gone(&held);
+        // The buttons that a pointer holds are released when it is gone
+        // (MIKSPEC-0066.R39).
+        if pointer {
+            self.server
+                .borrow_mut()
+                .pointer_device_gone(&instance, time);
             self.flush_all();
             self.changed.notify();
         }
@@ -138,7 +134,7 @@ impl Compositor {
 
     /// Moves the pointer, presses its buttons and turns its wheels as
     /// `report` says, at `time` in milliseconds.
-    fn apply(&self, report: Report, time: u32) {
+    fn apply(&self, device: &str, report: Report, time: u32) {
         {
             let mut server = self.server.borrow_mut();
             let (x, y) = (server.pointer.x, server.pointer.y);
@@ -150,7 +146,7 @@ impl Compositor {
                 server.pointer_motion(x, y, time);
             }
             for (button, pressed) in report.buttons {
-                server.pointer_button(button, pressed, time);
+                server.pointer_button_of(device, button, pressed, time);
             }
             // A wheel's notches up and left are positive; scrolling down
             // and right is.

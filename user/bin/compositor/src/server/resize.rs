@@ -126,24 +126,6 @@ impl Server {
         true
     }
 
-    /// A pointer device went away while it held `buttons`: the resize that
-    /// one of them holds ends, and its client is told the final size
-    /// (MIKSPEC-0074.R30). The button is not held any more, and nothing is
-    /// sent to a client for it: the client of the window had `leave` when
-    /// the resize began, and the release is the resize's end.
-    pub fn pointer_gone(&mut self, buttons: &[u32]) {
-        let Some(button) = self
-            .pointer
-            .resizing
-            .map(|r| r.button)
-            .filter(|b| buttons.contains(b))
-        else {
-            return;
-        };
-        self.pointer.pressed.retain(|&b| b != button);
-        self.end_resize(button);
-    }
-
     /// `xdg_toplevel.resize` of the toplevel `surface` of `client`, after
     /// the press with `serial`, by `edges`.
     pub(super) fn request_resize(

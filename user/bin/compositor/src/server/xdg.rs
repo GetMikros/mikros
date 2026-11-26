@@ -708,6 +708,31 @@ mod tests {
     }
 
     #[test]
+    fn a_move_ends_in_place_when_its_pointer_goes() {
+        let mut server = Server::new();
+        server.screen = Some((1280, 800));
+        let client = with_toplevel(&mut server);
+        client.send(&mut server, 4, 6, vec![]);
+        let first = configures(&events(&client, &mut server));
+        client.send(&mut server, 6, 4, vec![Arg::Uint(first[0].1)]);
+        let surface = *server.surfaces().next().unwrap().0;
+        server.surfaces.get_mut(&surface).unwrap().current.buffer = Some(99);
+        server.buffer_sizes.insert(99, (100, 50));
+        server.move_window(surface, 100, 100);
+        server.pointer_device_added("a");
+        server.pointer_motion(150.0, 0.0, 1);
+        server.pointer_button_of("a", 0x110, true, 2);
+        server.start_move(surface, 0x110);
+        assert!(server.pointer.moving.is_some());
+        // The pointer is at the top edge, where a release maximizes.
+        server.pointer_device_gone("a", 3);
+        assert!(server.pointer.moving.is_none());
+        let xdg = server.surfaces[&surface].xdg.as_ref().unwrap();
+        assert!(!xdg.maximized);
+        assert!(configures(&events(&client, &mut server)).is_empty());
+    }
+
+    #[test]
     fn a_resize_tells_the_client_it_is_resizing_and_the_end_clears_it() {
         let mut server = Server::new();
         server.screen = Some((1280, 800));

@@ -194,6 +194,19 @@ struct PlaneSurface {
 }
 
 impl Compositor {
+    /// Lets go of the pointer's buttons and surface when `status` says that
+    /// the connection to the display is closed (MIKSPEC-0066.R39).
+    fn display_lost(&self, status: &mikros_rt::interfaces::mikros::base::Status) {
+        if matches!(
+            status,
+            mikros_rt::interfaces::mikros::base::Status::PeerClosed
+        ) {
+            let time = milliseconds();
+            self.server.borrow_mut().pointer_seat_lost(time);
+            self.flush_all();
+        }
+    }
+
     /// Serves the `Seat` channel: the first display becomes the output,
     /// also when it is given again after it was taken away, and the
     /// keyboards are read for the keys that switch screens.
@@ -783,13 +796,17 @@ impl Compositor {
                 Some(_) if !drawn_ok => {}
                 Some(changed) => match output.show(changed.as_deref()).await {
                     Ok(()) => presented = true,
-                    Err(e) => mikros_rt::log!(Error, "compositor: showing a frame: {e:?}"),
+                    Err(e) => {
+                        mikros_rt::log!(Error, "compositor: showing a frame: {e:?}");
+                        self.display_lost(&e);
+                    }
                 },
                 // Only the pointer changed, which the cursor plane shows
                 // without a frame.
                 None => {
                     if let Err(e) = output.show_cursor().await {
                         mikros_rt::log!(Error, "compositor: showing the pointer: {e:?}");
+                        self.display_lost(&e);
                     }
                 }
             }

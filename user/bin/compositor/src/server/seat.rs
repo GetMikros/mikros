@@ -68,6 +68,12 @@ pub struct Pointer {
     pub y: f64,
     focus: Option<Focus>,
     pub(super) pressed: Vec<u32>,
+    /// The pointer devices that are connected, with the buttons that each
+    /// holds, and for each button that is held the one client that got
+    /// the press, or none when the compositor used the press itself
+    /// (MIKSPEC-0066.R39).
+    devices: std::collections::BTreeMap<String, Vec<u32>>,
+    press_client: std::collections::BTreeMap<u32, Option<ClientId>>,
     entered: std::collections::BTreeMap<ClientId, u32>,
     /// The clients that got events since the last frame.
     framed: Vec<ClientId>,
@@ -406,12 +412,106 @@ impl Server {
         self.pointer.framed.push(focus.client);
     }
 
+    /// A pointer device `device` is connected (MIKSPEC-0066.R39).
+    pub fn pointer_device_added(&mut self, device: &str) {
+        self.pointer.devices.entry(device.to_owned()).or_default();
+    }
+
+    /// Presses or releases the button `button`, an evdev code, at `time`,
+    /// as the pointer device `device` does.
+    pub fn pointer_button_of(&mut self, device: &str, button: u32, pressed: bool, time: u32) {
+        let holds = self.pointer.devices.entry(device.to_owned()).or_default();
+        holds.retain(|&b| b != button);
+        if pressed {
+            holds.push(button);
+        } else {
+            // The release is the client's at once, so no device holds the
+            // button for the seat any more: the end of another device's
+            // connection releases nothing of it again.
+            for holds in self.pointer.devices.values_mut() {
+                holds.retain(|&b| b != button);
+            }
+        }
+        self.pointer_button(button, pressed, time);
+    }
+
+    /// The connection of the pointer device `device` ended: each button
+    /// that it held, and no other device holds, is released, and when no
+    /// pointer device is left the pointer leaves its surface
+    /// (MIKSPEC-0066.R39).
+    pub fn pointer_device_gone(&mut self, device: &str, time: u32) {
+        let held = self.pointer.devices.remove(device).unwrap_or_default();
+        for button in held {
+            if !self.pointer.devices.values().any(|b| b.contains(&button)) {
+                self.release_gone(button, time);
+            }
+        }
+        if self.pointer.devices.is_empty() {
+            self.leave_pointer_focus();
+        } else if self.pointer.pressed.is_empty() {
+            self.refocus();
+        }
+        self.pointer_frame();
+    }
+
+    /// The compositor lost its display or its input devices: every button
+    /// of every pointer device is released, and the pointer leaves its
+    /// surface (MIKSPEC-0066.R39).
+    pub fn pointer_seat_lost(&mut self, time: u32) {
+        let devices: Vec<String> = self.pointer.devices.keys().cloned().collect();
+        for device in devices {
+            let held = std::mem::take(self.pointer.devices.get_mut(&device).unwrap());
+            for button in held {
+                self.release_gone(button, time);
+            }
+        }
+        let rest = self.pointer.pressed.clone();
+        for button in rest {
+            self.release_gone(button, time);
+        }
+        self.leave_pointer_focus();
+        self.pointer_frame();
+    }
+
+    /// Treats the button `button` as released because the pointer that held
+    /// it is gone: the move or the resize that it holds ends, a move
+    /// without a snap and a resize with its final size (MIKSPEC-0074.R31),
+    /// and the client that got the press gets the release, if it is still
+    /// there, and nobody when the compositor used the press itself.
+    fn release_gone(&mut self, button: u32, time: u32) {
+        if !self.pointer.pressed.contains(&button) {
+            return;
+        }
+        self.pointer.pressed.retain(|&b| b != button);
+        let to = self.pointer.press_client.remove(&button).flatten();
+        if self.pointer.moving.is_some_and(|m| m.button == button) {
+            self.pointer.moving = None;
+        }
+        self.end_resize(button);
+        if let Some(client) = to.filter(|c| self.clients.contains_key(c)) {
+            let serial = self.next_serial();
+            for (pointer, _) in self.pointers_of(client) {
+                if let Some(c) = self.clients.get_mut(&client) {
+                    let state = wl_pointer::button_state::RELEASED;
+                    wl_pointer::send_button(&mut c.out, pointer, serial, time, button, state);
+                }
+            }
+            self.pointer.framed.push(client);
+        }
+    }
+
     /// Presses or releases the button `button`, an evdev code, at `time`.
     pub fn pointer_button(&mut self, button: u32, pressed: bool, time: u32) {
         let held = self.pointer.pressed.contains(&button);
         match (pressed, held) {
-            (true, false) => self.pointer.pressed.push(button),
-            (false, true) => self.pointer.pressed.retain(|&b| b != button),
+            (true, false) => {
+                self.pointer.pressed.push(button);
+                self.pointer.press_client.insert(button, None);
+            }
+            (false, true) => {
+                self.pointer.pressed.retain(|&b| b != button);
+                self.pointer.press_client.remove(&button);
+            }
             _ => return,
         }
         // A Super key before a button was not alone.
@@ -460,6 +560,7 @@ impl Server {
         let serial = self.next_serial();
         if pressed {
             self.record_press(focus.client, serial);
+            self.pointer.press_client.insert(button, Some(focus.client));
         }
         let state = match pressed {
             true => wl_pointer::button_state::PRESSED,
@@ -929,23 +1030,113 @@ mod tests {
         assert_eq!(frame(&server), (650, 50, 100, 50));
     }
 
+    /// The states, in the order of the button events in `events`.
+    fn button_states(events: &[(u32, u16, Vec<Arg>)]) -> Vec<Arg> {
+        events
+            .iter()
+            .filter(|e| e.1 == BUTTON)
+            .map(|e| match e.2[3] {
+                Arg::Uint(state) => Arg::Uint(state),
+                _ => panic!("a state"),
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_resize_ends_when_the_pointer_that_holds_it_is_gone() {
+    fn a_pointer_that_goes_releases_its_button_to_the_client_that_got_the_press() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        server.pointer_device_added("a");
+        server.pointer_motion(10.0, 10.0, 1);
+        server.pointer_button_of("a", 0x110, true, 2);
+        server.pointer_frame();
+        let pressed = button_states(&pointer_events(&mut server, &client));
+        assert_eq!(pressed, [Arg::Uint(wl_pointer::button_state::PRESSED)]);
+        server.pointer_device_gone("a", 3);
+        let events = pointer_events(&mut server, &client);
+        // One release, and, as no pointer is left, the pointer leaves,
+        // and the group of events ends with a frame.
+        let released = button_states(&events);
+        assert_eq!(released, [Arg::Uint(wl_pointer::button_state::RELEASED)]);
+        assert!(events.iter().any(|e| e.1 == LEAVE));
+        assert_eq!(events.last().map(|e| e.1), Some(FRAME));
+        assert!(server.pointer.pressed.is_empty());
+        // The button is new for the next pointer.
+        server.pointer_device_added("b");
+        server.pointer_motion(11.0, 10.0, 4);
+        pointer_events(&mut server, &client);
+        server.pointer_button_of("b", 0x110, true, 5);
+        assert_eq!(button_events(&mut server, &client), 1);
+    }
+
+    #[test]
+    fn a_button_that_another_pointer_holds_is_not_released() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        server.pointer_device_added("a");
+        server.pointer_device_added("b");
+        server.pointer_motion(10.0, 10.0, 1);
+        server.pointer_button_of("a", 0x110, true, 2);
+        server.pointer_button_of("b", 0x110, true, 3);
+        pointer_events(&mut server, &client);
+        server.pointer_device_gone("a", 4);
+        assert_eq!(button_events(&mut server, &client), 0);
+        assert!(server.pointer.pressed.contains(&0x110));
+        server.pointer_device_gone("b", 5);
+        let released = button_states(&pointer_events(&mut server, &client));
+        assert_eq!(released, [Arg::Uint(wl_pointer::button_state::RELEASED)]);
+    }
+
+    #[test]
+    fn a_release_on_one_pointer_is_not_released_again_when_another_goes() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        server.pointer_device_added("a");
+        server.pointer_device_added("b");
+        server.pointer_motion(10.0, 10.0, 1);
+        server.pointer_button_of("a", 0x110, true, 2);
+        server.pointer_button_of("b", 0x110, true, 3);
+        server.pointer_button_of("a", 0x110, false, 4);
+        let events = pointer_events(&mut server, &client);
+        assert_eq!(button_states(&events).len(), 2);
+        server.pointer_device_gone("b", 5);
+        assert_eq!(button_events(&mut server, &client), 0);
+    }
+
+    #[test]
+    fn a_resize_that_the_compositor_started_ends_with_its_pointer_and_tells_no_client() {
         let mut server = Server::new();
         let client = with_window(&mut server);
         let surface = *server.surfaces.keys().next().unwrap();
         server.move_window(surface, 100, 100);
+        server.pointer_device_added("a");
         pointer_events(&mut server, &client);
         server.pointer_motion(95.0, 125.0, 1);
-        server.pointer_button(0x110, true, 2);
+        server.pointer_button_of("a", 0x110, true, 2);
         assert!(server.pointer.resizing.is_some());
-        // Another button's device going away changes nothing.
-        server.pointer_gone(&[0x111]);
-        assert!(server.pointer.resizing.is_some());
-        server.pointer_gone(&[0x110]);
+        server.pointer_device_gone("a", 3);
         assert!(server.pointer.resizing.is_none());
         assert!(server.pointer.pressed.is_empty());
         assert_eq!(button_events(&mut server, &client), 0);
+    }
+
+    #[test]
+    fn losing_the_seat_releases_every_button_and_the_pointer_leaves() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        server.pointer_device_added("a");
+        server.pointer_device_added("b");
+        server.pointer_motion(10.0, 10.0, 1);
+        server.pointer_button_of("a", 0x110, true, 2);
+        server.pointer_button_of("b", 0x111, true, 3);
+        pointer_events(&mut server, &client);
+        server.pointer_seat_lost(4);
+        let events = pointer_events(&mut server, &client);
+        assert_eq!(button_states(&events).len(), 2);
+        assert!(events.iter().any(|e| e.1 == LEAVE));
+        assert_eq!(events.last().map(|e| e.1), Some(FRAME));
+        assert!(server.pointer.pressed.is_empty());
+        assert!(server.pointer.focus.is_none());
     }
 
     #[test]
