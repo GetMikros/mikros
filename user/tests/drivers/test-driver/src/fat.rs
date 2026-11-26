@@ -43,6 +43,51 @@ pub fn ok<T>(reply: Reply<T>) -> Option<T> {
     value
 }
 
+/// A result as an option, which says where it was lost when it is an error.
+pub trait Kept<T> {
+    fn kept(self) -> Option<T>;
+}
+
+impl<T, E: core::fmt::Debug> Kept<T> for Result<T, E> {
+    #[track_caller]
+    fn kept(self) -> Option<T> {
+        match self {
+            Ok(value) => Some(value),
+            Err(e) => {
+                let at = core::panic::Location::caller();
+                mikros_rt::log!(
+                    Error,
+                    "test-driver: a call failed at {}:{}: {e:?}",
+                    at.file(),
+                    at.line()
+                );
+                None
+            }
+        }
+    }
+}
+
+/// A step that came back with nothing, which says which step.
+pub trait Must<T> {
+    fn must(self) -> Option<T>;
+}
+
+impl<T> Must<T> for Option<T> {
+    #[track_caller]
+    fn must(self) -> Option<T> {
+        if self.is_none() {
+            let at = core::panic::Location::caller();
+            mikros_rt::log!(
+                Error,
+                "test-driver: a step did not finish at {}:{}",
+                at.file(),
+                at.line()
+            );
+        }
+        self
+    }
+}
+
 pub fn failed<T>(reply: Reply<T>) -> Option<Error> {
     reply.ok()?.err()
 }

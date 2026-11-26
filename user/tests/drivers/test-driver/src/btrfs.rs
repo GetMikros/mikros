@@ -3,7 +3,7 @@
 //! through its `filesystem` service as it should.
 
 use crate::fat::{
-    PERM_READ, PERM_WRITE, bytes, expect, failed, locks, logged, map, named, ok, open,
+    Kept, Must, PERM_READ, PERM_WRITE, bytes, expect, failed, locks, logged, map, named, ok, open,
 };
 use alloc::format;
 use alloc::string::String;
@@ -59,14 +59,14 @@ async fn check(
     reactor: &Reactor,
     process: sys::Handle,
 ) -> Option<()> {
-    let root = named(directory, reactor, "root").await?;
+    let root = named(directory, reactor, "root").await.must()?;
     let info = ok(root.query_filesystem().await)?.info;
     expect(!info.read_only && info.free_bytes > 0 && info.block_size == 4096)?;
     // Its ID is its partition's GUID.
     expect(crate::is_guid(&info.id))?;
     let attributes = ok(root.get_attributes().await)?.attributes;
     expect(attributes.r#type == NodeType::Directory)?;
-    let top = names(&root).await?;
+    let top = names(&root).await.must()?;
     for dir in [
         "system",
         "@system",
@@ -90,15 +90,17 @@ async fn check(
         expect(entry.attributes.is_some_and(|a| a.r#type == entry.r#type))?;
     }
 
-    system(&root, reactor).await?;
-    booted(&root, reactor).await?;
+    system(&root, reactor).await.must()?;
+    booted(&root, reactor).await.must()?;
     // The log service keeps the boot's log on the root file system.
     let published = b" I 0 kernel device-manager: published device.filesystem root for device";
-    logged(&root, "logs/boot-1.log", published, reactor).await?;
+    logged(&root, "logs/boot-1.log", published, reactor)
+        .await
+        .must()?;
 
     let (config, _) = open(&root, "config", OpenFlags::DIRECTORY, reactor)
         .await
-        .ok()?;
+        .kept()?;
     let up = open(&config, "../state", OpenFlags(0), reactor).await;
     expect(matches!(up, Err(Some(Error::AccessDenied))))?;
     let missing = open(&config, "missing", OpenFlags(0), reactor).await;
@@ -107,10 +109,12 @@ async fn check(
     expect(matches!(deeper, Err(Some(Error::NotFound))))?;
 
     let create_dir = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0);
-    let (dir, kind) = open(&root, "btrfs-test", create_dir, reactor).await.ok()?;
+    let (dir, kind) = open(&root, "btrfs-test", create_dir, reactor)
+        .await
+        .kept()?;
     expect(kind == NodeType::Directory)?;
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
-    let (file, _) = open(&dir, "file", create, reactor).await.ok()?;
+    let (file, _) = open(&dir, "file", create, reactor).await.kept()?;
     expect(ok(file.write(0, b"hello btrfs".to_vec()).await)?.written == 11)?;
     expect(ok(file.append(b"!".to_vec()).await)?.offset == 11)?;
     let attributes = ok(file.get_attributes().await)?.attributes;
@@ -124,23 +128,23 @@ async fn check(
     let attributes = ok(file.get_attributes().await)?.attributes;
     expect(attributes.owner == 1234 && attributes.mode == 0o644)?;
     ok(file.sync().await)?;
-    memory(&file, process).await?;
-    running(&root, &file, reactor).await?;
+    memory(&file, process).await.must()?;
+    running(&root, &file, reactor).await.must()?;
 
-    watches(&dir, reactor).await?;
-    links(&dir, reactor).await?;
-    locks(&file, reactor).await?;
-    clones(&dir, &file, reactor).await?;
-    case_insensitive(&root, &dir, reactor).await?;
-    subvolumes(directory, reactor).await?;
+    watches(&dir, reactor).await.must()?;
+    links(&dir, reactor).await.must()?;
+    locks(&file, reactor).await.must()?;
+    clones(&dir, &file, reactor).await.must()?;
+    case_insensitive(&root, &dir, reactor).await.must()?;
+    subvolumes(directory, reactor).await.must()?;
 
-    let (many, _) = open(&dir, "many", create_dir, reactor).await.ok()?;
+    let (many, _) = open(&dir, "many", create_dir, reactor).await.kept()?;
     for i in 0..MANY {
         open(&many, &format!("f{i:02}"), create, reactor)
             .await
-            .ok()?;
+            .kept()?;
     }
-    let listed = names(&many).await?;
+    let listed = names(&many).await.must()?;
     expect(listed.len() == MANY)?;
     for i in 0..MANY {
         expect(listed.iter().any(|(n, _)| *n == format!("f{i:02}")))?;
@@ -182,15 +186,15 @@ const VERSION_DIRS: [&str; 9] = [
 async fn system(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     let (current, kind) = open(root, "@system/current", OpenFlags::NO_FOLLOW, reactor)
         .await
-        .ok()?;
+        .kept()?;
     expect(kind == NodeType::Symlink)?;
     let version = ok(current.read_link().await)?.target;
     expect(!version.is_empty() && !version.contains('/'))?;
     let (system, kind) = open(root, "@system/current", OpenFlags(0), reactor)
         .await
-        .ok()?;
+        .kept()?;
     expect(kind == NodeType::Directory)?;
-    let listed = names(&system).await?;
+    let listed = names(&system).await.must()?;
     for dir in VERSION_DIRS {
         expect(
             listed
@@ -200,7 +204,7 @@ async fn system(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     }
     let (_, kind) = open(root, "@system/current/drivers", OpenFlags(0), reactor)
         .await
-        .ok()?;
+        .kept()?;
     expect(kind == NodeType::Directory)?;
     Some(())
 }
@@ -209,9 +213,9 @@ async fn system(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
 /// version, with the directories of a system image, which cannot be
 /// written, and it cannot be created, removed or renamed.
 async fn booted(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
-    let (system, kind) = open(root, "system", OpenFlags(0), reactor).await.ok()?;
+    let (system, kind) = open(root, "system", OpenFlags(0), reactor).await.kept()?;
     expect(kind == NodeType::Directory)?;
-    let listed = names(&system).await?;
+    let listed = names(&system).await.must()?;
     for dir in VERSION_DIRS {
         expect(
             listed
@@ -221,12 +225,12 @@ async fn booted(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     }
     let (_, kind) = open(root, "system/drivers", OpenFlags(0), reactor)
         .await
-        .ok()?;
+        .kept()?;
     expect(kind == NodeType::Directory)?;
     // The system image holds the boot image's system.
     let (manager, kind) = open(root, "system/processmgr", OpenFlags(0), reactor)
         .await
-        .ok()?;
+        .kept()?;
     expect(kind == NodeType::File)?;
     expect(ok(manager.get_attributes().await)?.attributes.size > 0)?;
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
@@ -262,12 +266,12 @@ async fn names(dir: &NodeAsyncClient) -> Option<Vec<(String, NodeType)>> {
 /// Whether a watch of `dir` hears of a file made, written, renamed and
 /// removed, a change to a message, in order.
 async fn watches(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
-    let (client, server) = endpoints::<Watcher>().ok()?;
+    let (client, server) = endpoints::<Watcher>().kept()?;
     let mask =
         WatchMask::CREATED.0 | WatchMask::REMOVED.0 | WatchMask::MODIFIED.0 | WatchMask::MOVED.0;
     ok(dir.watch(WatchMask(mask), 7, client).await)?;
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
-    let (x, _) = open(dir, "x", create, reactor).await.ok()?;
+    let (x, _) = open(dir, "x", create, reactor).await.kept()?;
     ok(x.write(0, b"1".to_vec()).await)?;
     let token = ok(dir.get_token().await)?.token;
     ok(dir.rename("x".into(), token, "y".into()).await)?;
@@ -307,16 +311,16 @@ async fn watches(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
 async fn links(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     ok(dir.create_symlink("near".into(), "file".into()).await)?;
     ok(dir.create_symlink("far".into(), "../etc".into()).await)?;
-    let (near, kind) = open(dir, "near", OpenFlags(0), reactor).await.ok()?;
+    let (near, kind) = open(dir, "near", OpenFlags(0), reactor).await.kept()?;
     expect(kind == NodeType::File)?;
     expect(ok(near.read(0, 100).await)?.data == b"hello btrfs!")?;
     let (link, kind) = open(dir, "near", OpenFlags::NO_FOLLOW, reactor)
         .await
-        .ok()?;
+        .kept()?;
     expect(kind == NodeType::Symlink && ok(link.read_link().await)?.target == "file")?;
     // A link that leads out of the directory comes back for the client
     // to follow, with the rest of the path.
-    let (endpoint, server) = endpoints::<mikros_rt::interfaces::mikros::fs::Node>().ok()?;
+    let (endpoint, server) = endpoints::<mikros_rt::interfaces::mikros::fs::Node>().kept()?;
     drop(endpoint);
     let rights = mikros_rt::interfaces::mikros::fs::Rights::READ;
     let far = ok(dir
@@ -326,14 +330,14 @@ async fn links(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
 
     let token = ok(dir.get_token().await)?.token;
     ok(dir.link("file".into(), token, "hard".into()).await)?;
-    let (hard, _) = open(dir, "hard", OpenFlags(0), reactor).await.ok()?;
+    let (hard, _) = open(dir, "hard", OpenFlags(0), reactor).await.kept()?;
     let a = ok(hard.get_attributes().await)?.attributes;
     expect(a.links == 2 && ok(hard.read(0, 100).await)?.data == b"hello btrfs!")?;
     let token = ok(dir.get_token().await)?.token;
     ok(dir.rename("hard".into(), token, "moved".into()).await)?;
     let old = open(dir, "hard", OpenFlags(0), reactor).await;
     expect(matches!(old, Err(Some(Error::NotFound))))?;
-    let (moved, _) = open(dir, "moved", OpenFlags(0), reactor).await.ok()?;
+    let (moved, _) = open(dir, "moved", OpenFlags(0), reactor).await.kept()?;
     expect(ok(moved.read(0, 100).await)?.data == b"hello btrfs!")?;
     for name in ["near", "far", "moved"] {
         ok(dir.unlink(name.into(), false).await)?;
@@ -348,16 +352,16 @@ async fn links(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
 /// connection of the server's.
 async fn clones(dir: &NodeAsyncClient, file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
-    let (copy, _) = open(dir, "copy", create, reactor).await.ok()?;
+    let (copy, _) = open(dir, "copy", create, reactor).await.kept()?;
     ok(copy.clone_range(reader(file).await?, 0, 0, 12).await)?;
     expect(ok(copy.read(0, 100).await)?.data == b"hello btrfs!")?;
-    let (whole, _) = open(dir, "whole", create, reactor).await.ok()?;
+    let (whole, _) = open(dir, "whole", create, reactor).await.kept()?;
     ok(whole.clone_range(reader(file).await?, 0, 0, 0).await)?;
     expect(ok(whole.read(0, 100).await)?.data == b"hello btrfs!")?;
     let unaligned = whole.clone_range(reader(file).await?, 0, 100, 12).await;
     expect(failed(unaligned) == Some(Error::Invalid))?;
     ok(dir.unlink("whole".into(), false).await)?;
-    let (stranger, _server) = endpoints::<Node>().ok()?;
+    let (stranger, _server) = endpoints::<Node>().kept()?;
     let refused = copy.clone_range(stranger, 0, 0, 12).await;
     expect(failed(refused) == Some(Error::CrossDevice))?;
     ok(dir.unlink("copy".into(), false).await)?;
@@ -403,7 +407,7 @@ async fn memory(file: &NodeAsyncClient, process: sys::Handle) -> Option<()> {
 /// that a writable object, given with `WRITE`, keeps an object to run
 /// from from being given. `file` holds "hello btrfs!".
 async fn running(root: &NodeAsyncClient, file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
-    let runner = open_runner(root, reactor).await?;
+    let runner = open_runner(root, reactor).await.must()?;
     let object = got(
         "an object to run from",
         ok(runner.get_memory_object(MemoryFlags::EXECUTE).await),
@@ -430,7 +434,7 @@ async fn running(root: &NodeAsyncClient, file: &NodeAsyncClient, reactor: &React
     )?;
     drop(object);
     drop(runner);
-    changeable(file, reactor).await?;
+    changeable(file, reactor).await.must()?;
     // A writable object keeps an object to run from from being given
     // until it is unreferenced and has no dirty page.
     let writable = got(
@@ -438,7 +442,7 @@ async fn running(root: &NodeAsyncClient, file: &NodeAsyncClient, reactor: &React
         ok(file.get_memory_object(MemoryFlags::WRITE).await),
     )?
     .memory;
-    let runner = open_runner(root, reactor).await?;
+    let runner = open_runner(root, reactor).await.must()?;
     let busy = runner.get_memory_object(MemoryFlags::EXECUTE).await;
     step("busy running", failed(busy) == Some(Error::Busy))?;
     drop(writable);
@@ -475,7 +479,7 @@ fn got<T>(what: &str, value: Option<T>) -> Option<T> {
 
 /// A connection to the file `btrfs-test/file` that may read and run it.
 async fn open_runner(root: &NodeAsyncClient, reactor: &Reactor) -> Option<NodeAsyncClient> {
-    let (node, server) = endpoints::<Node>().ok()?;
+    let (node, server) = endpoints::<Node>().kept()?;
     let rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
     ok(root
         .open(
@@ -497,7 +501,8 @@ const SETTLE_STEP: i64 = 20_000_000;
 /// Waits until `file` can be written again, and writes "hello" to it.
 async fn changeable(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     for _ in 0..SETTLES {
-        if file.write(0, b"hello".to_vec()).await.is_ok() {
+        // The call went through and the server wrote: not `Busy`.
+        if matches!(file.write(0, b"hello".to_vec()).await, Ok(Ok(_))) {
             return Some(());
         }
         let _ = reactor.sleep_until(crate::now() + SETTLE_STEP).await;
@@ -509,7 +514,7 @@ async fn changeable(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
 /// A new connection to `file` that only reads, as the source of a
 /// `CloneRange`.
 async fn reader(file: &NodeAsyncClient) -> Option<ClientEnd<Node>> {
-    let (source, server) = endpoints::<Node>().ok()?;
+    let (source, server) = endpoints::<Node>().kept()?;
     ok(file.clone(server, Rights::READ).await)?;
     Some(source)
 }
@@ -527,8 +532,8 @@ async fn case_insensitive(
 ) -> Option<()> {
     let folded = OpenFlags::CASE_INSENSITIVE;
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
-    open(dir, "Straße", create, reactor).await.ok()?;
-    let (found, kind) = open(dir, "STRAẞE", folded, reactor).await.ok()?;
+    open(dir, "Straße", create, reactor).await.kept()?;
+    let (found, kind) = open(dir, "STRAẞE", folded, reactor).await.kept()?;
     expect(kind == NodeType::File && ok(found.get_attributes().await)?.attributes.size == 0)?;
     let exact = open(dir, "STRAẞE", OpenFlags(0), reactor).await;
     expect(matches!(exact, Err(Some(Error::NotFound))))?;
@@ -545,18 +550,20 @@ async fn case_insensitive(
     expect(matches!(taken, Err(Some(Error::Exists))))?;
     let (_, kind) = open(root, "BTRFS-TEST/STRAßE", folded, reactor)
         .await
-        .ok()?;
+        .kept()?;
     expect(kind == NodeType::File)?;
-    let (_, kind) = open(root, "SYSTEM/LIBRARIES", folded, reactor).await.ok()?;
+    let (_, kind) = open(root, "SYSTEM/LIBRARIES", folded, reactor)
+        .await
+        .kept()?;
     expect(kind == NodeType::Directory)?;
 
     for name in ["dup", "DUP"] {
-        open(dir, name, create, reactor).await.ok()?;
+        open(dir, name, create, reactor).await.kept()?;
     }
-    let listed = names(dir).await?;
+    let listed = names(dir).await.must()?;
     let (first, _) = listed.iter().find(|(n, _)| n == "dup" || n == "DUP")?;
-    let (want, _) = open(dir, first, OpenFlags(0), reactor).await.ok()?;
-    let (got, _) = open(dir, "Dup", folded, reactor).await.ok()?;
+    let (want, _) = open(dir, first, OpenFlags(0), reactor).await.kept()?;
+    let (got, _) = open(dir, "Dup", folded, reactor).await.kept()?;
     let inode =
         async |node: &NodeAsyncClient| Some(ok(node.get_attributes().await)?.attributes.inode);
     expect(inode(&got).await? == inode(&want).await?)?;
@@ -567,7 +574,7 @@ async fn case_insensitive(
     // A connection opened with the flag, and its clones, stay
     // case-insensitive for the names of its other requests.
     let directory = OpenFlags(OpenFlags::DIRECTORY.0 | folded.0);
-    let (ci, _) = open(root, "BTRFS-TEST", directory, reactor).await.ok()?;
+    let (ci, _) = open(root, "BTRFS-TEST", directory, reactor).await.kept()?;
     let symlink = ci.create_symlink("STRAẞE".into(), "x".into()).await;
     expect(failed(symlink) == Some(Error::Exists))?;
     let token = ok(ci.get_token().await)?.token;
@@ -583,23 +590,23 @@ async fn case_insensitive(
     // Renaming to another case of its own name changes the case; onto an
     // entry that differs in case, it replaces that entry, under the name
     // given.
-    open(dir, "one", create, reactor).await.ok()?;
+    open(dir, "one", create, reactor).await.kept()?;
     let token = ok(ci.get_token().await)?.token;
     ok(ci.rename("ONE".into(), token, "One".into()).await)?;
-    let (two, _) = open(dir, "two", create, reactor).await.ok()?;
-    let moved = inode(&two).await?;
+    let (two, _) = open(dir, "two", create, reactor).await.kept()?;
+    let moved = inode(&two).await.must()?;
     let token = ok(ci.get_token().await)?.token;
     ok(ci.rename("TWO".into(), token, "one".into()).await)?;
-    let listed = names(dir).await?;
+    let listed = names(dir).await.must()?;
     expect(
         listed.iter().any(|(n, _)| n == "one")
             && !listed
                 .iter()
                 .any(|(n, _)| n == "One" || n == "two" || n == "ONE"),
     )?;
-    let (one, _) = open(dir, "one", OpenFlags(0), reactor).await.ok()?;
+    let (one, _) = open(dir, "one", OpenFlags(0), reactor).await.kept()?;
     expect(inode(&one).await? == moved)?;
-    let (clone, server) = endpoints::<Node>().ok()?;
+    let (clone, server) = endpoints::<Node>().kept()?;
     ok(ci
         .clone(server, Rights(Rights::READ.0 | Rights::WRITE.0))
         .await)?;
@@ -624,7 +631,7 @@ async fn connect_subvolumes(
     loop {
         if let Ok(Ok(listed)) = directory.list(FILESYSTEM.into()).await {
             for instance in listed.instances {
-                let (client, server) = endpoints::<Subvolumes>().ok()?;
+                let (client, server) = endpoints::<Subvolumes>().kept()?;
                 let connected = directory
                     .connect(SUBVOLUMES.into(), Some(instance), server.into_handle())
                     .await;
@@ -663,12 +670,12 @@ async fn list_all(subvolumes: &SubvolumesAsyncClient) -> Option<Vec<SubvolumeInf
 /// and a read-only snapshot of it, which can be made writable; both can
 /// be removed; and bad paths are refused.
 async fn subvolumes(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()> {
-    let subvolumes = connect_subvolumes(directory, reactor).await?;
+    let subvolumes = connect_subvolumes(directory, reactor).await.must()?;
     let has = |all: &[SubvolumeInfo], path: &str, read_only: bool| {
         all.iter()
             .any(|s| s.path == path && s.read_only == read_only)
     };
-    let listed = list_all(&subvolumes).await?;
+    let listed = list_all(&subvolumes).await.must()?;
     for path in [
         "@system",
         "config",
@@ -691,7 +698,7 @@ async fn subvolumes(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Opti
     ok(subvolumes.create("btrfs-subvol".into()).await)?;
     let snapshot = subvolumes.snapshot("btrfs-subvol".into(), "btrfs-snap".into(), true);
     ok(snapshot.await)?;
-    let listed = list_all(&subvolumes).await?;
+    let listed = list_all(&subvolumes).await.must()?;
     expect(has(&listed, "btrfs-subvol", false) && has(&listed, "btrfs-snap", true))?;
     ok(subvolumes.set_read_only("btrfs-snap".into(), false).await)?;
     expect(has(&list_all(&subvolumes).await?, "btrfs-snap", false))?;
@@ -700,7 +707,7 @@ async fn subvolumes(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Opti
     for path in ["btrfs-snap", "btrfs-subvol"] {
         ok(subvolumes.delete(path.into()).await)?;
     }
-    let listed = list_all(&subvolumes).await?;
+    let listed = list_all(&subvolumes).await.must()?;
     expect(!listed.iter().any(|s| s.path.starts_with("btrfs-")))?;
     Some(())
 }

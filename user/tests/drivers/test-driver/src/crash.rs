@@ -5,6 +5,7 @@
 //! their requests until the restarted driver gives the disk again.
 
 use crate::fat::{named, ok, open};
+use alloc::format;
 use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::mikros::fs::OpenFlags;
@@ -46,8 +47,9 @@ pub async fn root_survives(
         return failed("connecting to the root");
     };
     let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
-    let Ok((file, _)) = open(&root, FILE, flags, reactor).await else {
-        return failed("creating the file");
+    let (file, _) = match open(&root, FILE, flags, reactor).await {
+        Ok(opened) => opened,
+        Err(e) => return failed(&format!("creating the file ({e:?})")),
     };
     let write = async |i: u32| -> Option<()> {
         let at = u64::from(i) * PIECE as u64;
