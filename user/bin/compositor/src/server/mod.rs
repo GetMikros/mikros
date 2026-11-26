@@ -13,6 +13,8 @@ mod buffer;
 mod cursor_shape;
 mod damage;
 #[cfg(target_os = "mikros")]
+pub use damage::coalesce as coalesce_damage;
+#[cfg(target_os = "mikros")]
 pub use damage::join as join_damage;
 mod data;
 mod fractional;

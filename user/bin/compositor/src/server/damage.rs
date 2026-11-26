@@ -42,6 +42,35 @@ fn area(r: Rect) -> i64 {
     i64::from(r.width.max(0)) * i64::from(r.height.max(0))
 }
 
+/// `rects` with every pair joined that overlaps or whose joint rectangle
+/// adds at most `extra` pixels to the two: drawing an area costs about a
+/// draw for each layer over it however small it is, so a few more pixels
+/// in one area are cheaper than another area.
+pub fn coalesce(rects: &[Rect], extra: i64) -> Vec<Rect> {
+    let mut list: Vec<Rect> = rects.iter().copied().filter(|r| area(*r) > 0).collect();
+    // Past this many the pairs are too many to compare.
+    if list.len() > 128 {
+        return join(&list, 1);
+    }
+    loop {
+        let mut found = None;
+        'pairs: for i in 0..list.len() {
+            for j in i + 1..list.len() {
+                let added = area(union(list[i], list[j])) - area(list[i]) - area(list[j]);
+                if added <= extra {
+                    found = Some((i, j));
+                    break 'pairs;
+                }
+            }
+        }
+        let Some((i, j)) = found else {
+            return list;
+        };
+        list[i] = union(list[i], list[j]);
+        list.swap_remove(j);
+    }
+}
+
 /// `rects` as at most `most` rectangles that hold all of them, as the
 /// display takes no more in a commit: while there are more, the two whose
 /// common rectangle adds least are joined, and a list too long to
@@ -171,6 +200,31 @@ mod tests {
             width,
             height,
         }
+    }
+
+    #[test]
+    fn coalesces_rectangles_that_overlap_or_add_little() {
+        // The old and new place of a pointer, which overlap, are one area.
+        let pointer = [r(100, 100, 24, 24), r(110, 105, 24, 24)];
+        assert_eq!(coalesce(&pointer, 0), vec![r(100, 100, 34, 29)]);
+        // Two frames of that make one.
+        let frames = [
+            r(100, 100, 24, 24),
+            r(110, 105, 24, 24),
+            r(120, 110, 24, 24),
+            r(130, 115, 24, 24),
+        ];
+        assert_eq!(coalesce(&frames, 100), vec![r(100, 100, 54, 39)]);
+        // Two windows' places far apart stay two areas.
+        let far = [r(0, 0, 300, 200), r(600, 400, 300, 200)];
+        assert_eq!(coalesce(&far, 65_536).len(), 2);
+        // Near each other they are one when the joint rectangle adds
+        // little.
+        let near = [r(0, 0, 100, 100), r(110, 0, 100, 100)];
+        assert_eq!(coalesce(&near, 65_536), vec![r(0, 0, 210, 100)]);
+        assert_eq!(coalesce(&near, 0).len(), 2);
+        // Empty rectangles go.
+        assert!(coalesce(&[r(5, 5, 0, 10)], 0).is_empty());
     }
 
     #[test]

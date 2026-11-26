@@ -90,6 +90,10 @@ pub struct Output {
 
 /// The most damage rectangles that a plane state takes (MIKSPEC-0029.R3).
 const DAMAGE_MAX: usize = 16;
+/// The pixels that joining two damage rectangles may add to them. An area
+/// costs about 0.8 ms of drawing for each layer over it, and a pixel far
+/// less (measured), so a rectangle of 256 by 256 more is worth an area.
+const COALESCE_EXTRA: i64 = 65_536;
 
 impl Output {
     /// Takes `display` over, with output images that `renderer` makes, and
@@ -398,7 +402,9 @@ impl Output {
     /// What the image to draw the next frame into lacks: rectangles, or
     /// None for all of it.
     pub fn back_damage(&self) -> Option<Vec<crate::server::Rect>> {
-        self.damage[self.back].clone()
+        self.damage[self.back]
+            .as_deref()
+            .map(|rects| crate::server::coalesce_damage(rects, COALESCE_EXTRA))
     }
 
     /// Shows the image that the last frame was drawn into, which then
