@@ -22,6 +22,57 @@ fn on_output(rect: Rect, origin: (i32, i32), size: (i32, i32)) -> Option<Rect> {
     })
 }
 
+/// The rectangle that holds `a` and `b`.
+fn union(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = a.x.saturating_add(a.width).max(b.x.saturating_add(b.width));
+    let y1 =
+        a.y.saturating_add(a.height)
+            .max(b.y.saturating_add(b.height));
+    Rect {
+        x: x0,
+        y: y0,
+        width: x1.saturating_sub(x0),
+        height: y1.saturating_sub(y0),
+    }
+}
+
+fn area(r: Rect) -> i64 {
+    i64::from(r.width.max(0)) * i64::from(r.height.max(0))
+}
+
+/// `rects` as at most `most` rectangles that hold all of them, as the
+/// display takes no more in a commit: while there are more, the two whose
+/// common rectangle adds least are joined, and a list too long to
+/// compare is the one rectangle that holds it.
+pub fn join(rects: &[Rect], most: usize) -> Vec<Rect> {
+    let mut list = rects.to_vec();
+    let most = most.max(1);
+    if list.len() <= most {
+        return list;
+    }
+    if list.len() > 128 {
+        let all = list.iter().copied().reduce(union);
+        return all.into_iter().collect();
+    }
+    while list.len() > most {
+        let mut best = (0, 1, i64::MAX);
+        for i in 0..list.len() {
+            for j in i + 1..list.len() {
+                let added = area(union(list[i], list[j])) - area(list[i]) - area(list[j]);
+                if added < best.2 {
+                    best = (i, j, added);
+                }
+            }
+        }
+        let joined = union(list[best.0], list[best.1]);
+        list.swap_remove(best.1);
+        list[best.0] = joined;
+    }
+    list
+}
+
 impl Server {
     /// Records the damage of a commit of `surface`, in its own
     /// coordinates: what its client damaged, or all of it for a new
@@ -112,6 +163,41 @@ mod tests {
     use super::*;
     use crate::wayland::protocols::wl_compositor;
     use crate::wayland::wire::{Arg, NewId};
+
+    fn r(x: i32, y: i32, width: i32, height: i32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn joins_a_list_that_is_too_long_into_rectangles_that_hold_all_of_it() {
+        let few = [r(0, 0, 10, 10), r(50, 50, 10, 10)];
+        assert_eq!(join(&few, 16), few.to_vec());
+        // Twenty small rectangles, two near each other: at most 16 remain,
+        // and each original lies within one of them.
+        let many: Vec<Rect> = (0..20).map(|i| r(i * 100, 0, 10, 10)).collect();
+        let joined = join(&many, 16);
+        assert_eq!(joined.len(), 16);
+        for m in &many {
+            assert!(joined.iter().any(|j| {
+                j.x <= m.x
+                    && j.y <= m.y
+                    && j.x + j.width >= m.x + m.width
+                    && j.y + j.height >= m.y + m.height
+            }));
+        }
+        // The pair that adds least is joined: the two nearest.
+        let near = [r(0, 0, 10, 10), r(10, 0, 10, 10), r(500, 500, 10, 10)];
+        let joined = join(&near, 2);
+        assert!(joined.contains(&r(0, 0, 20, 10)) && joined.contains(&r(500, 500, 10, 10)));
+        // A list too long to compare is the one rectangle that holds it.
+        let huge: Vec<Rect> = (0..200).map(|i| r(i, i, 1, 1)).collect();
+        assert_eq!(join(&huge, 16), vec![r(0, 0, 200, 200)]);
+    }
 
     fn rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
         Rect {

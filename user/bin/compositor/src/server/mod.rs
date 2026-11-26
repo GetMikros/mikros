@@ -12,6 +12,8 @@ mod arrange;
 mod buffer;
 mod cursor_shape;
 mod damage;
+#[cfg(target_os = "mikros")]
+pub use damage::join as join_damage;
 mod data;
 mod fractional;
 mod grabs;

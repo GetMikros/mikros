@@ -83,7 +83,13 @@ pub struct Output {
     damage: Vec<Option<Vec<crate::server::Rect>>>,
     /// The cursor plane, when the display has one.
     cursor: Option<CursorPlane>,
+    /// Whether the display may lack what a commit meant to show, so that
+    /// the next one names all of the output as damaged.
+    lost: bool,
 }
+
+/// The most damage rectangles that a plane state takes (MIKSPEC-0029.R3).
+const DAMAGE_MAX: usize = 16;
 
 impl Output {
     /// Takes `display` over, with output images that `renderer` makes, and
@@ -160,6 +166,7 @@ impl Output {
             targets,
             back: 0,
             cursor,
+            lost: false,
         })
     }
 
@@ -370,6 +377,14 @@ impl Output {
 
     /// Adds a frame's damage, `rects` or all of the output when `whole`,
     /// to that of each image.
+    /// The image that the last frame was drawn into does not hold it all
+    /// (the drawing failed): the next frame draws all of it and names all
+    /// of the output as damaged.
+    pub fn invalidate(&mut self) {
+        self.damage[self.back] = None;
+        self.lost = true;
+    }
+
     pub fn add_damage(&mut self, rects: &[crate::server::Rect], whole: bool) {
         for damage in &mut self.damage {
             match (damage, whole) {
@@ -399,7 +414,9 @@ impl Output {
         };
         let damage = match changed {
             None => vec![Rect { ..whole }],
-            Some(rects) => rects
+            // Everything, when the display may lack an earlier commit.
+            Some(_) if self.lost => vec![Rect { ..whole }],
+            Some(rects) => crate::server::join_damage(rects, DAMAGE_MAX)
                 .iter()
                 .filter_map(|r| {
                     let (x0, y0) = (r.x.max(0) as u32, r.y.max(0) as u32);
@@ -440,7 +457,12 @@ impl Output {
             }],
             planes,
         };
-        self.commit(commit).await?;
+        if let Err(status) = self.commit(commit).await {
+            // What the commit meant to show may not be there.
+            self.lost = true;
+            return Err(status);
+        }
+        self.lost = false;
         if let Some(cursor) = &mut self.cursor {
             cursor.shown = cursor.want;
         }

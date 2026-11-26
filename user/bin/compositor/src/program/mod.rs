@@ -762,8 +762,13 @@ impl Compositor {
                 };
                 (drawn, fading, next_cursor, changed)
             };
+            let drawn_ok = drawn.is_ok();
             if let Err(e) = drawn {
                 mikros_rt::log!(Error, "compositor: drawing a frame: {e:?}");
+                // Nothing is shown of a frame that was not drawn: the next
+                // draws all of it.
+                output.invalidate();
+                self.changed.notify();
             }
             if !fading {
                 self.store.borrow_mut().faded_in(&self.renderer);
@@ -775,6 +780,7 @@ impl Compositor {
             }
             let mut presented = false;
             match &changed {
+                Some(_) if !drawn_ok => {}
                 Some(changed) => match output.show(changed.as_deref()).await {
                     Ok(()) => presented = true,
                     Err(e) => mikros_rt::log!(Error, "compositor: showing a frame: {e:?}"),
