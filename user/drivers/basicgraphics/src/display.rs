@@ -80,6 +80,10 @@ pub struct Display {
     /// The commit being presented, and what it will show.
     pending: Cell<Option<(u64, Option<Shown>)>>,
     last_present: Cell<i64>,
+    /// Whether the framebuffer holds what the plane showed last: not the
+    /// log, which draws on it while nobody owns the display, and not
+    /// nothing.
+    content: Cell<bool>,
 }
 
 fn rect(r: &gpu::Rect) -> Rect {
@@ -111,6 +115,7 @@ impl Display {
             shown: Cell::new(None),
             pending: Cell::new(None),
             last_present: Cell::new(i64::MIN / 2),
+            content: Cell::new(false),
         }
     }
 
@@ -392,21 +397,33 @@ impl Display {
         if now() < earliest {
             let _ = self.reactor.sleep_until(earliest).await;
         }
-        let changed = shown != self.shown.get();
+        // The damage is what may differ from what the plane showed before,
+        // whichever buffer that was (MIKSPEC-0029.R28), so only a first
+        // commit, one after the log drew on the screen, and one that
+        // changes the part or the place copies the whole plane
+        // (MIKSPEC-0030.R17).
+        let earlier = self.content.get()
+            && self
+                .shown
+                .get()
+                .zip(shown)
+                .is_some_and(|(before, now)| before.src == now.src && before.dst == now.dst);
         // Once the owner closed its connection, the screen shows the log.
         let owner = owner.upgrade();
+        let mut copied = false;
         if let Some(fb) = self.framebuffer.borrow().as_ref()
             && owner.is_some()
         {
             match shown {
                 Some(s) => {
-                    // A new buffer or place is copied whole.
-                    let damage = if changed { &[][..] } else { &damage[..] };
+                    let damage = if earlier { &damage[..] } else { &[][..] };
                     self.copy(fb, &s, damage);
+                    copied = true;
                 }
                 None => clear(fb),
             }
         }
+        self.content.set(copied);
         let done = now();
         self.last_present.set(done);
         self.shown.set(shown);
@@ -449,6 +466,8 @@ impl Backend for Display {
 
     /// Destroys every buffer and sync object of the closed connection.
     fn closed(&self) {
+        // The screen shows the log from now on.
+        self.content.set(false);
         for b in self.buffers.borrow_mut().values_mut() {
             b.destroyed = true;
         }
@@ -467,6 +486,8 @@ impl Backend for Display {
 
     fn with_screen(&self, draw: &mut dyn FnMut(&dyn Screen)) {
         if let Some(fb) = self.framebuffer.borrow().as_ref() {
+            // What is drawn on it is not what the plane showed.
+            self.content.set(false);
             draw(fb);
         }
     }
