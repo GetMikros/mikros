@@ -138,3 +138,73 @@ fn a_commit_copies_the_whole_buffer_when_the_scanout_changes() {
     let p = presented(&whole, &src, &[Rect::new(90, 0, 5, 5)], false);
     assert_eq!((p.copies, p.flush), (vec![], src));
 }
+
+#[test]
+fn two_buffers_that_alternate_copy_what_changed_since_each_was_last_copied() {
+    let whole = Rect::new(0, 0, 100, 100);
+    let mut lacking = Lacking::default();
+    let a = Rect::new(10, 10, 5, 5);
+    let b = Rect::new(60, 60, 5, 5);
+    let c = Rect::new(30, 0, 5, 5);
+    // The first presentation of each buffer copies all of it.
+    let p = lacking.present(1, &whole, &whole, &[a], false);
+    assert_eq!(p.copies, vec![whole]);
+    let p = lacking.present(2, &whole, &whole, &[b], true);
+    assert_eq!(p.copies, vec![whole]);
+    // Buffer 1 again: the damage of this commit and of the commit that
+    // presented buffer 2, since buffer 1 was last copied.
+    let p = lacking.present(1, &whole, &whole, &[c], true);
+    assert_eq!(p.copies, vec![b, c]);
+    assert_eq!(p.flush, Rect::new(30, 0, 35, 65));
+    // And buffer 2: this commit's damage and that of the last.
+    let p = lacking.present(2, &whole, &whole, &[a], true);
+    assert_eq!(p.copies, vec![c, a]);
+    // A commit with no damage names the whole plane, which a buffer that
+    // alternates copies whole the next time too.
+    let p = lacking.present(1, &whole, &whole, &[], true);
+    assert_eq!(p.copies, vec![whole]);
+    let p = lacking.present(2, &whole, &whole, &[a], true);
+    assert_eq!(p.copies, vec![whole]);
+}
+
+#[test]
+fn a_buffer_whose_copy_failed_or_that_was_released_is_copied_whole_again() {
+    let whole = Rect::new(0, 0, 100, 100);
+    let a = Rect::new(10, 10, 5, 5);
+    let mut lacking = Lacking::default();
+    lacking.present(1, &whole, &whole, &[a], false);
+    lacking.present(2, &whole, &whole, &[a], true);
+    lacking.forget(1);
+    assert_eq!(
+        lacking.present(1, &whole, &whole, &[a], true).copies,
+        vec![whole]
+    );
+    // Without earlier content on the plane all is copied and the others
+    // are forgotten.
+    let p = lacking.present(2, &whole, &whole, &[a], false);
+    assert_eq!(p.copies, vec![whole]);
+    assert_eq!(
+        lacking.present(1, &whole, &whole, &[a], true).copies,
+        vec![whole]
+    );
+    lacking.reset();
+    assert_eq!(
+        lacking.present(2, &whole, &whole, &[a], true).copies,
+        vec![whole]
+    );
+}
+
+#[test]
+fn what_a_buffer_lacks_is_kept_as_all_of_it_when_it_grows_long() {
+    let whole = Rect::new(0, 0, 100, 100);
+    let mut lacking = Lacking::default();
+    lacking.present(1, &whole, &whole, &[Rect::new(0, 0, 1, 1)], false);
+    lacking.present(2, &whole, &whole, &[Rect::new(0, 0, 1, 1)], true);
+    // Buffer 1 is not shown again for a long time.
+    for i in 0..70 {
+        let r = Rect::new(i, 0, 1, 1);
+        lacking.present(2, &whole, &whole, &[r], true);
+    }
+    let p = lacking.present(1, &whole, &whole, &[Rect::new(0, 50, 1, 1)], true);
+    assert_eq!(p.copies, vec![whole]);
+}

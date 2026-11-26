@@ -10,7 +10,7 @@ use alloc::rc::{Rc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::Cell;
-use mikros_display::rects::{Rect, presented};
+use mikros_display::rects::Rect;
 use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -245,6 +245,12 @@ impl Display {
             }
             if let Err(status) = self.gpu.ok(command).await {
                 mikros_rt::log!(Error, "virtiogpu: presenting commit {id}: {status:?}");
+                // The host's copy of the buffer may lack what was meant.
+                for change in &changes {
+                    if let Some(shown) = change.shown {
+                        self.lacking.borrow_mut()[change.index].forget(shown.buffer);
+                    }
+                }
             }
         }
         phase.set(Phase::Cursor);
@@ -320,6 +326,8 @@ impl Display {
         let scanout = change.index as u32;
         let before = self.crtcs.borrow()[change.index];
         let Some(shown) = change.shown else {
+            // A disabled plane has no earlier content to be relative to.
+            self.lacking.borrow_mut()[change.index].reset();
             return Ok(vec![protocol::set_scanout(
                 scanout,
                 0,
@@ -331,7 +339,23 @@ impl Display {
         let resource = &buffer.resource;
         let whole = Rect::new(0, 0, u64::from(resource.width), u64::from(resource.height));
         let changed = before.shown != Some(shown) || before.mode != change.mode;
-        let plan = presented(&whole, &shown.src, &change.damage, changed);
+        // The damage is relative to what the plane showed before, whichever
+        // buffer that was, so only a first commit, one after the display
+        // was lost, and one that changes the part or the mode has no
+        // earlier content (MIKSPEC-0029.R28).
+        let earlier =
+            before.mode == change.mode && before.shown.is_some_and(|b| b.src == shown.src);
+        let mut plan = self.lacking.borrow_mut()[change.index].present(
+            shown.buffer,
+            &whole,
+            &shown.src,
+            &change.damage,
+            earlier,
+        );
+        // A scanout that was set shows all of the buffer.
+        if changed {
+            plan.flush = shown.src;
+        }
         if let Source::Imported {
             mapping,
             start,

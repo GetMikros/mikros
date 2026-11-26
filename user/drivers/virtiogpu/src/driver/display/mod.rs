@@ -12,7 +12,7 @@ use alloc::rc::{Rc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
-use mikros_display::rects::Rect;
+use mikros_display::rects::{Lacking, Rect};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::hardware::Mapping;
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -121,6 +121,9 @@ pub struct Display {
     epoch: Cell<u64>,
     /// The owner's connection, for `OnHotplug`.
     pub owner: RefCell<Weak<DisplayAsyncServer>>,
+    /// What the host's copy of each buffer that a CRTC's plane showed
+    /// lacks of what the plane showed last (MIKSPEC-0031.R19).
+    lacking: RefCell<Vec<Lacking>>,
 }
 
 /// The plane IDs of output `i`: its primary plane and its cursor plane.
@@ -135,6 +138,7 @@ fn cursor_plane(i: usize) -> u32 {
 impl Display {
     pub fn new(gpu: Rc<Gpu>, outputs: Vec<Output>, reactor: Reactor, spawner: Spawner) -> Display {
         let crtcs = vec![Crtc::default(); outputs.len()];
+        let crtcs_len = outputs.len();
         Display {
             gpu,
             reactor,
@@ -148,6 +152,7 @@ impl Display {
             showing: RefCell::new(BTreeMap::new()),
             epoch: Cell::new(0),
             owner: RefCell::new(Weak::new()),
+            lacking: RefCell::new((0..crtcs_len).map(|_| Lacking::default()).collect()),
         }
     }
 
@@ -301,7 +306,7 @@ impl Display {
     }
 
     fn release_unused(self: &Rc<Self>) {
-        let gone: Vec<Buffer> = {
+        let gone: Vec<(u32, Buffer)> = {
             let mut buffers = self.buffers.borrow_mut();
             let ids: Vec<u32> = buffers
                 .iter()
@@ -309,10 +314,14 @@ impl Display {
                 .map(|(id, _)| *id)
                 .collect();
             ids.into_iter()
-                .filter_map(|id| buffers.remove(&id))
+                .filter_map(|id| buffers.remove(&id).map(|b| (id, b)))
                 .collect()
         };
-        for buffer in gone {
+        for (id, buffer) in gone {
+            // A released resource counts as not presented.
+            for lacking in self.lacking.borrow_mut().iter_mut() {
+                lacking.forget(id);
+            }
             let gpu = self.gpu.clone();
             self.spawner.spawn(async move {
                 // Only the buffer held its resource.
@@ -343,6 +352,11 @@ impl Display {
             *crtc = Crtc::default();
         }
         self.epoch.set(self.epoch.get() + 1);
+        // Nothing of what the planes showed is there any more.
+        self.lacking
+            .borrow_mut()
+            .iter_mut()
+            .for_each(Lacking::reset);
         let display = self.clone();
         self.spawner.spawn(async move {
             for i in shown {
