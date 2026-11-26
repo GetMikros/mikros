@@ -76,6 +76,8 @@ impl Compositor {
         }
         let mut report = Report::default();
         let mut time = 0;
+        // The buttons that this device holds, to let go of when it goes.
+        let mut held: Vec<u32> = Vec::new();
         while let Ok(DeviceEvent::OnEvents(batch)) = device.next_event().await {
             let mut keyed = false;
             for event in &batch.events {
@@ -97,7 +99,12 @@ impl Compositor {
                     }
                     (EV_KEY, code) if BUTTONS.contains(&code) => {
                         if pointer && event.value != 2 {
-                            report.buttons.push((u32::from(code), event.value == 1));
+                            let (button, pressed) = (u32::from(code), event.value == 1);
+                            report.buttons.push((button, pressed));
+                            held.retain(|&b| b != button);
+                            if pressed {
+                                held.push(button);
+                            }
                         }
                     }
                     (EV_KEY, code) => {
@@ -119,6 +126,13 @@ impl Compositor {
         if let Some(keys) = &mut keys {
             keys.release_all(&self, time);
             self.flush_all();
+        }
+        // A pointer that is gone ends the resize that one of its buttons
+        // holds (MIKSPEC-0074.R30).
+        if !held.is_empty() {
+            self.server.borrow_mut().pointer_gone(&held);
+            self.flush_all();
+            self.changed.notify();
         }
     }
 

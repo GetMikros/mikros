@@ -67,7 +67,7 @@ pub struct Pointer {
     pub x: f64,
     pub y: f64,
     focus: Option<Focus>,
-    pressed: Vec<u32>,
+    pub(super) pressed: Vec<u32>,
     entered: std::collections::BTreeMap<ClientId, u32>,
     /// The clients that got events since the last frame.
     framed: Vec<ClientId>,
@@ -927,6 +927,25 @@ mod tests {
         assert_eq!(frame(&server), (590, 0, 100, 50));
         server.pointer_motion(700.0, 60.0, 4);
         assert_eq!(frame(&server), (650, 50, 100, 50));
+    }
+
+    #[test]
+    fn a_resize_ends_when_the_pointer_that_holds_it_is_gone() {
+        let mut server = Server::new();
+        let client = with_window(&mut server);
+        let surface = *server.surfaces.keys().next().unwrap();
+        server.move_window(surface, 100, 100);
+        pointer_events(&mut server, &client);
+        server.pointer_motion(95.0, 125.0, 1);
+        server.pointer_button(0x110, true, 2);
+        assert!(server.pointer.resizing.is_some());
+        // Another button's device going away changes nothing.
+        server.pointer_gone(&[0x111]);
+        assert!(server.pointer.resizing.is_some());
+        server.pointer_gone(&[0x110]);
+        assert!(server.pointer.resizing.is_none());
+        assert!(server.pointer.pressed.is_empty());
+        assert_eq!(button_events(&mut server, &client), 0);
     }
 
     #[test]
