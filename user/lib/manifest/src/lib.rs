@@ -28,7 +28,7 @@ pub use driver::{
 };
 pub use grants::{
     GRANTS_FILE, GrantList, MAX_GRANTS, Refused, Rejected, Source, check_grant, check_install,
-    parse_grant_list,
+    names_role, parse_grant_list,
 };
 pub use order::{Blocked, Order, order};
 pub use program::{NamespaceEntry, Program, ProgramManifest, parse_program};

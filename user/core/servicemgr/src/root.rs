@@ -53,6 +53,7 @@ pub async fn follow(supervisor: Rc<Supervisor>) {
         .chain(new.iter().map(|s| s.0.name.clone()))
         .collect();
     register_programs(&supervisor, &system, &names).await;
+    crate::grants::register(&supervisor, &system).await;
     give_drivers(&supervisor, &system, &drivers).await;
     start_services(&supervisor, new).await;
     // And those of the packages installed for every user.

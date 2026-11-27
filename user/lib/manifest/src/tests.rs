@@ -843,3 +843,15 @@ fn an_install_keeps_the_names_of_the_base_copy() {
         Ok(())
     );
 }
+
+#[test]
+fn an_app_manifest_names_the_roles_of_its_shell_parts() {
+    let text = "id: system.mikros.greeter\nkind: app\nshell_parts:\n  - roles: [greeter, other]\n    \
+                executable: greeter\n  - roles: [panel]\n    executable: panel\n";
+    assert!(names_role(text.as_bytes(), "greeter"));
+    assert!(names_role(text.as_bytes(), "panel"));
+    assert!(!names_role(text.as_bytes(), "shell"));
+    assert!(!names_role(b"id: x\n", "greeter"));
+    assert!(!names_role(b"shell_parts: 3\n", "greeter"));
+    assert!(!names_role(b"[", "greeter"));
+}

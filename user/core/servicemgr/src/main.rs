@@ -18,6 +18,7 @@ mod broker;
 mod control;
 mod directory;
 mod disabled;
+mod grants;
 mod launch;
 mod manage;
 mod packages;

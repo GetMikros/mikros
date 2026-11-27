@@ -172,3 +172,22 @@ pub fn check_install(new: Option<&[u8]>, base: Option<Option<&[u8]>>) -> Result<
         Some(_) => Err(Refused::Differs),
     }
 }
+
+/// Whether the app manifest `manifest` (`manifest.yaml`) names `role` in
+/// the `roles` of one of its `shell_parts`; a manifest that cannot be
+/// read names none.
+pub fn names_role(manifest: &[u8], role: &str) -> bool {
+    let Ok(root) = mikros_yaml::parse(manifest) else {
+        return false;
+    };
+    let named = || -> Result<bool, mikros_yaml::Error> {
+        let mut found = false;
+        for part in list(root.map()?, "shell_parts")? {
+            for item in list(part.map()?, "roles")? {
+                found |= item.string()? == role;
+            }
+        }
+        Ok(found)
+    };
+    named().unwrap_or(false)
+}
