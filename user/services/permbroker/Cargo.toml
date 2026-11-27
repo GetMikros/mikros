@@ -5,8 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
-[target.'cfg(target_os = "mikros")'.dependencies]
+[dependencies]
 mikros-manifest = { path = "../../lib/manifest" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-yaml = { path = "../../lib/yaml" }
 

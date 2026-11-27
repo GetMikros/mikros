@@ -8,6 +8,8 @@ Broker.Watch: permission:system.permissions.read
 Broker.SetGrant: data-dependent:permbroker::service::broker::set_grant
 Broker.ListGrants: data-dependent:permbroker::service::broker::list_grants
 Broker.GrantSystem: permission:system.permissions.set
+Broker.GrantList: permission:system.permissions.set
+Broker.RegistrationsDone: permission:system.permissions.set
 Broker.RegisterPrompter: data-dependent:permbroker::service::broker::serve
 Broker.WatchConfirmed: permission:system.permissions.read
 Broker.RevocationDone: public

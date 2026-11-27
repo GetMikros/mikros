@@ -12,6 +12,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 midl-tests = { path = "../midl-tests" }
 mikros-fat = { path = "../../user/lib/fat" }
+mikros-manifest = { path = "../../user/lib/manifest" }
 mikros-exfat = { path = "../../user/lib/exfat" }
 
 [build-dependencies]

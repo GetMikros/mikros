@@ -1,4 +1,4 @@
-// MIKSPEC-0037.R46, MIKSPEC-0037.R34, MIKSPEC-0037.R49
+// MIKSPEC-0037.R46, MIKSPEC-0037.R34, MIKSPEC-0037.R49, MIKSPEC-0037.R68
 
 library mikros.permissions;
 using mikros.base;
@@ -31,6 +31,9 @@ protocol Broker {
     @11 RevocationDone(sequence u64) -> ();
     @12 ListPermissions(after string<64>)
         -> (permissions vector<string<64>, 128>) error base.Status;
+    @13 GrantList(app_id string<128>,
+                  permissions vector<string<64>, 32>) -> () error base.Status;
+    @14 RegistrationsDone() -> () error base.Status;
 };
 
 protocol Prompter {

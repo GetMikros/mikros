@@ -111,7 +111,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-manifest"
+version = "0.0.0"
+dependencies = [
+ "mikros-yaml",
+]
+
+[[package]]
 name = "mikros-tz"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-yaml"
 version = "0.0.0"
 
 [[package]]
@@ -212,6 +223,7 @@ dependencies = [
  "midlc",
  "mikros-exfat",
  "mikros-fat",
+ "mikros-manifest",
 ]
 
 [[package]]

@@ -21,11 +21,12 @@ use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{
-    self as midl, BrokerAsyncServer, BrokerCheckResponse, BrokerGrantSystemResponse,
-    BrokerListGrantsRequest, BrokerListGrantsResponse, BrokerListPermissionsResponse,
-    BrokerRegisterPrompterResponse, BrokerRequest, BrokerRequestRequest, BrokerRequestResponse,
-    BrokerRevocationDoneResponse, BrokerSetGrantRequest, BrokerSetGrantResponse,
-    BrokerWatchConfirmedResponse, BrokerWatchResponse, PrompterAsyncClient,
+    self as midl, BrokerAsyncServer, BrokerCheckResponse, BrokerGrantListResponse,
+    BrokerGrantSystemResponse, BrokerListGrantsRequest, BrokerListGrantsResponse,
+    BrokerListPermissionsResponse, BrokerRegisterPrompterResponse, BrokerRegistrationsDoneResponse,
+    BrokerRequest, BrokerRequestRequest, BrokerRequestResponse, BrokerRevocationDoneResponse,
+    BrokerSetGrantRequest, BrokerSetGrantResponse, BrokerWatchConfirmedResponse,
+    BrokerWatchResponse, PrompterAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::{ClientIdentity, DirectoryAsyncClient};
@@ -266,6 +267,7 @@ fn status(failure: Failure) -> Status {
         Failure::AccessDenied => Status::AccessDenied,
         Failure::NotFound => Status::NotFound,
         Failure::InvalidArgs => Status::InvalidArgs,
+        Failure::BadState => Status::BadState,
     }
 }
 
@@ -557,6 +559,24 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
                 });
                 r.reply(s, result)
             }
+            R::GrantList(q, r) => {
+                let result = inner.authorize(&caller, Call::GrantList).and_then(|()| {
+                    let mut store = inner.store.borrow_mut();
+                    let granted = store.grant_list(&q.app_id, &q.permissions);
+                    granted.map(|()| BrokerGrantListResponse {}).map_err(status)
+                });
+                r.reply(s, result)
+            }
+            R::RegistrationsDone(_, r) => {
+                let result = inner
+                    .authorize(&caller, Call::RegistrationsDone)
+                    .and_then(|()| {
+                        let done = inner.store.borrow_mut().registrations_done();
+                        done.map(|()| BrokerRegistrationsDoneResponse {})
+                            .map_err(status)
+                    });
+                r.reply(s, result)
+            }
             R::RegisterPrompter(q, r) => {
                 // Only the session manager asks users (MIKSPEC-0037.R42).
                 let only = match caller.app_id == SESSION_MANAGER {
@@ -623,6 +643,14 @@ async fn set_grant(
         decision: from_midl(q.grant.decision)?,
     };
     Store::check_grant(&grant).map_err(status)?;
+    // Refused before anyone is asked (MIKSPEC-0037.R68).
+    if inner
+        .store
+        .borrow()
+        .is_registered(&grant.app_id, &grant.permission)
+    {
+        return Err(Status::InvalidArgs);
+    }
     if store::setting_needs_manage(identity(caller), &grant) {
         let verb = match grant.decision {
             Decision::Allowed => "allow",

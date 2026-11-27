@@ -181,6 +181,8 @@ fn each_call_needs_its_permission() {
         (Call::ListGrants, "system.grants.manage"),
         (Call::ListSystemGrants, "system.grants.manage"),
         (Call::GrantSystem, "system.permissions.set"),
+        (Call::GrantList, "system.permissions.set"),
+        (Call::RegistrationsDone, "system.permissions.set"),
         (Call::RegisterPrompter, "system.prompts.use"),
     ];
     for (call, needs) in calls {
@@ -861,6 +863,8 @@ fn taking_full_disk_away_revokes_the_folders_without_a_grant_of_their_own() {
 }
 
 const LISTED: &str = "user.power.control";
+/// An app with a grant list.
+const LIST_APP: &str = "system.mikros.listed";
 
 fn id_of<'a>(user: u32, app_id: &'a str, checksum: &'static str) -> Identity<'a> {
     Identity {
@@ -905,63 +909,83 @@ fn a_manifest_grants_a_user_permission_to_every_user() {
 fn a_grant_list_grants_every_scope_to_every_user_but_zero() {
     let mut s = store();
     let names = strings(&[LISTED, "admin.power.control", "system.prompts.use"]);
-    s.grant_list(APP, &names).unwrap();
+    s.grant_list(LIST_APP, &names).unwrap();
     for name in &names {
         for user in [1, 2, 1000] {
-            let c = id_of(user, APP, "");
+            let c = id_of(user, LIST_APP, "");
             assert_eq!(answer(&s, c, name), Decision::Allowed, "{name}");
             assert_eq!(
                 s.request(c, name),
                 Ok((Requested::Decided(Decision::Allowed), false))
             );
         }
-        assert_ne!(
-            answer(&s, id_of(0, APP, ""), name),
-            Decision::Allowed,
-            "{name}"
-        );
-        assert_ne!(
-            answer(&s, id_of(1, APP, "abc"), name),
-            Decision::Allowed,
-            "{name}"
-        );
-        assert_ne!(
-            answer(&s, id_of(1, APP, BUILD), name),
-            Decision::Allowed,
-            "{name}"
-        );
+        // Neither user ID 0, nor a portable app, nor a build gets it.
+        for client in [
+            id_of(0, LIST_APP, ""),
+            id_of(1, LIST_APP, "abc"),
+            id_of(1, LIST_APP, BUILD),
+        ] {
+            assert_ne!(answer(&s, client, name), Decision::Allowed, "{name}");
+        }
     }
-    // User ID 0 is asked as for any permission nothing grants.
+    // As for a permission that nothing grants: a user permission is asked,
+    // an admin one authorized, and a system one is denied without a prompt.
+    let zero = id_of(0, LIST_APP, "");
+    assert_eq!(s.request(zero, LISTED), Ok((Requested::Ask, false)));
     assert_eq!(
-        s.request(id_of(0, APP, ""), LISTED),
-        Ok((Requested::Ask, false))
+        s.request(zero, "admin.power.control"),
+        Ok((Requested::Authorize, false))
     );
     assert_eq!(
-        s.request(id_of(0, APP, ""), "admin.power.control"),
-        Ok((Requested::Authorize, false))
+        s.request(zero, "system.prompts.use"),
+        Ok((Requested::Decided(Decision::Denied), false))
+    );
+}
+
+#[test]
+fn a_manifest_does_not_undo_the_exclusion_of_a_list() {
+    let mut s = store();
+    s.grant_list(LIST_APP, &strings(&[LISTED])).unwrap();
+    s.grant_system(LIST_APP, &strings(&[LISTED])).unwrap();
+    assert_eq!(
+        answer(&s, id_of(1, LIST_APP, ""), LISTED),
+        Decision::Allowed
+    );
+    assert_eq!(
+        answer(&s, id_of(0, LIST_APP, ""), LISTED),
+        Decision::Undetermined
     );
 }
 
 #[test]
 fn a_grant_list_wins_over_a_stored_grant_and_leaves_it_alone() {
     let mut s = store();
-    s.set_grant(&grant(1, USER_PERMISSION, Decision::Denied))
+    let denied = Grant {
+        app_id: LIST_APP.into(),
+        ..grant(1, USER_PERMISSION, Decision::Denied)
+    };
+    s.set_grant(&denied).unwrap();
+    s.grant_list(LIST_APP, &strings(&[USER_PERMISSION]))
         .unwrap();
-    s.grant_list(APP, &strings(&[USER_PERMISSION])).unwrap();
-    assert_eq!(answer(&s, id(APP), USER_PERMISSION), Decision::Allowed);
-    // The stored grant is still there, and shows again without the list.
+    assert_eq!(
+        answer(&s, id_of(1, LIST_APP, ""), USER_PERMISSION),
+        Decision::Allowed
+    );
+    // The stored grant is still there, and applies to the excluded.
     assert_eq!(s.list(1).len(), 1);
-    let mut kept = Store::default();
-    kept.set_grant(&grant(1, USER_PERMISSION, Decision::Denied))
-        .unwrap();
-    assert_eq!(answer(&kept, id(APP), USER_PERMISSION), Decision::Denied);
+    assert_eq!(
+        answer(&s, id_of(0, LIST_APP, ""), USER_PERMISSION),
+        Decision::Undetermined
+    );
+    let again = Grant { user: 0, ..denied };
+    assert_eq!(s.set_grant(&again), Err(Failure::InvalidArgs));
 }
 
 #[test]
 fn set_grant_fails_for_what_a_manifest_or_a_list_grants() {
     let mut s = store();
     s.grant_system(APP, &strings(&[USER_PERMISSION])).unwrap();
-    s.grant_list("org.listed", &strings(&[LISTED])).unwrap();
+    s.grant_list(LIST_APP, &strings(&[LISTED])).unwrap();
     let set = |app: &str, permission: &str, decision| Grant {
         app_id: app.to_string(),
         ..grant(1, permission, decision)
@@ -972,10 +996,13 @@ fn set_grant_fails_for_what_a_manifest_or_a_list_grants() {
             Err(Failure::InvalidArgs)
         );
         assert_eq!(
-            s.set_grant_revoking(&set("org.listed", LISTED, decision)),
+            s.set_grant_revoking(&set(LIST_APP, LISTED, decision)),
             Err(Failure::InvalidArgs)
         );
     }
+    assert!(s.is_registered(APP, USER_PERMISSION));
+    assert!(s.is_registered(LIST_APP, LISTED));
+    assert!(!s.is_registered(APP, "user.shares.use"));
     // Other permissions of the same apps are still settable.
     assert!(
         s.set_grant(&set(APP, "user.shares.use", Decision::Allowed))
@@ -987,17 +1014,68 @@ fn set_grant_fails_for_what_a_manifest_or_a_list_grants() {
 #[test]
 fn grant_lists_are_not_written_to_the_grants_file() {
     let mut s = store();
-    s.grant_list(APP, &strings(&[LISTED])).unwrap();
+    s.grant_list(LIST_APP, &strings(&[LISTED])).unwrap();
     s.grant_system(APP, &strings(&[USER_PERMISSION])).unwrap();
     assert!(s.list(1).is_empty());
+}
+
+#[test]
+fn a_grant_list_is_checked_whole_and_replaces_the_earlier_one() {
+    let mut s = store();
+    let bad = |names: &[&str], app: &str| store().grant_list(app, &strings(names));
+    assert_eq!(bad(&[LISTED], APP), Err(Failure::InvalidArgs));
+    assert_eq!(bad(&["nope"], LIST_APP), Err(Failure::InvalidArgs));
     assert_eq!(
-        s.grant_list(APP, &strings(&["nope"])),
-        Err(Failure::NotFound)
-    );
-    assert_eq!(
-        s.grant_list(APP, &strings(&[DEFAULT_PERMISSION])),
+        bad(&[DEFAULT_PERMISSION], LIST_APP),
         Err(Failure::InvalidArgs)
     );
+    assert_eq!(
+        bad(&["user.full_disk.access"], LIST_APP),
+        Err(Failure::InvalidArgs)
+    );
+    assert_eq!(
+        bad(&["admin.grants.manage"], LIST_APP),
+        Err(Failure::InvalidArgs)
+    );
+    assert_eq!(
+        bad(&["system.devices.manage"], LIST_APP),
+        Err(Failure::InvalidArgs)
+    );
+    assert_eq!(bad(&[LISTED, "nope"], LIST_APP), Err(Failure::InvalidArgs));
+    let listed = |s: &Store| {
+        let all = s.system_grants(("system.mikros.", ""));
+        all.iter().filter(|(a, _)| a == LIST_APP).count()
+    };
+    assert_eq!(listed(&s), 0);
+    s.grant_list(LIST_APP, &strings(&[LISTED, "admin.power.control"]))
+        .unwrap();
+    s.grant_list(LIST_APP, &strings(&[LISTED])).unwrap();
+    assert_eq!(
+        answer(&s, id_of(1, LIST_APP, ""), "admin.power.control"),
+        Decision::Undetermined
+    );
+    assert_eq!(
+        answer(&s, id_of(1, LIST_APP, ""), LISTED),
+        Decision::Allowed
+    );
+}
+
+#[test]
+fn registrations_end_once() {
+    let mut s = store();
+    s.grant_list(LIST_APP, &strings(&[LISTED])).unwrap();
+    assert_eq!(s.registrations_done(), Ok(()));
+    assert_eq!(s.registrations_done(), Err(Failure::BadState));
+    assert_eq!(
+        s.grant_list(LIST_APP, &strings(&[])),
+        Err(Failure::BadState)
+    );
+    // The list stays, and manifests are still registered.
+    assert_eq!(
+        answer(&s, id_of(1, LIST_APP, ""), LISTED),
+        Decision::Allowed
+    );
+    s.grant_system(APP, &strings(&["admin.time.set"])).unwrap();
 }
 
 #[test]
@@ -1005,24 +1083,27 @@ fn system_grants_list_every_scope_in_order_and_by_page() {
     let mut s = store();
     s.grant_system("org.b", &strings(&["user.shares.use", "admin.time.set"]))
         .unwrap();
-    s.grant_list("org.a", &strings(&[LISTED, "system.prompts.use"]))
+    s.grant_list("system.mikros.a", &strings(&[LISTED, "system.prompts.use"]))
         .unwrap();
     s.grant_system("org.a", &strings(&["admin.time.set", LISTED]))
+        .unwrap();
+    s.grant_system("system.mikros.a", &strings(&[LISTED]))
         .unwrap();
     let all = s.system_grants(("", ""));
     let pairs: Vec<(&str, &str)> = all.iter().map(|(a, p)| (a.as_str(), p.as_str())).collect();
     let ours: Vec<_> = pairs
         .iter()
-        .filter(|(a, _)| a.starts_with("org."))
+        .filter(|(a, _)| a.starts_with("org.") || a.starts_with("system.mikros."))
         .collect();
     assert_eq!(
         ours,
         [
             &("org.a", "admin.time.set"),
-            &("org.a", "system.prompts.use"),
             &("org.a", LISTED),
             &("org.b", "admin.time.set"),
             &("org.b", "user.shares.use"),
+            &("system.mikros.a", "system.prompts.use"),
+            &("system.mikros.a", LISTED),
         ]
     );
     assert!(pairs.windows(2).all(|w| w[0] < w[1]));

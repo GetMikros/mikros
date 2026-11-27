@@ -29,6 +29,7 @@ pub use table::names_after;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
+use mikros_manifest::Source;
 
 /// What a question for a client names as the service that asks for it:
 /// the caller's app ID when its kernel object ID is not the client's,
@@ -67,6 +68,8 @@ pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
     "system.devices.manage",
     "admin.power.control",
 ];
+/// The start of the app IDs of system apps, the only ones with grant lists.
+const SYSTEM_APPS: &str = "system.mikros.";
 /// The most grants one `SystemGrants.List` reply holds.
 pub const SYSTEM_LIST_MAX: usize = 128;
 /// The most grants one `ListGrants` reply holds.
@@ -91,6 +94,8 @@ pub enum Failure {
     NotFound,
     /// The permission has the wrong scope for the call.
     InvalidArgs,
+    /// The call is not allowed in the broker's state.
+    BadState,
 }
 
 /// Who a call is for: a user and an app.
@@ -144,6 +149,8 @@ pub enum Call {
     SetGrant,
     ListGrants,
     GrantSystem,
+    GrantList,
+    RegistrationsDone,
     ListSystemGrants,
     RegisterPrompter,
 }
@@ -165,7 +172,9 @@ impl Call {
             Call::Check | Call::Watch => "system.permissions.read",
             Call::Request => "system.permissions.request",
             Call::SetGrant | Call::ListGrants | Call::ListSystemGrants => "system.grants.manage",
-            Call::GrantSystem => "system.permissions.set",
+            Call::GrantSystem | Call::GrantList | Call::RegistrationsDone => {
+                "system.permissions.set"
+            }
             Call::RegisterPrompter => "system.prompts.use",
         }
     }
@@ -195,6 +204,8 @@ pub struct Store {
     /// app ID, for every user but user ID 0 (MIKSPEC-0037.R68). Neither
     /// this nor `system` is written to the grants file.
     lists: BTreeMap<String, BTreeSet<String>>,
+    /// Whether `RegistrationsDone` has succeeded.
+    done: bool,
     /// The grants, by user, app ID, the checksum of a portable app's
     /// package or nothing for an installed app (MIKSPEC-0101.R46), and
     /// permission. None is `Undetermined`.
@@ -397,8 +408,16 @@ impl Store {
     /// never has, and a list grants to no client of user ID 0.
     fn system_of(&self, client: Identity<'_>, permission: &str) -> bool {
         client.checksum.is_empty()
-            && (self.has_system(client.app_id, permission)
-                || (client.user != 0 && self.in_list(client.app_id, permission)))
+            && match self.in_list(client.app_id, permission) {
+                true => client.user != 0,
+                false => self.has_system(client.app_id, permission),
+            }
+    }
+
+    /// Whether `permission` is in the grant list of the client's app ID,
+    /// which grants it to this client not (MIKSPEC-0037.R68).
+    fn excluded(&self, client: Identity<'_>, permission: &str) -> bool {
+        self.in_list(client.app_id, permission) && (client.user == 0 || !client.checksum.is_empty())
     }
 
     fn in_list(&self, app_id: &str, permission: &str) -> bool {
@@ -426,6 +445,7 @@ impl Store {
             Scope::System | Scope::Admin | Scope::User if self.system_of(client, permission) => {
                 Decision::Allowed
             }
+            Scope::System if self.excluded(client, permission) => Decision::Denied,
             Scope::Admin if self.holds(client, permission) => Decision::Allowed,
             Scope::System | Scope::Admin => Decision::Undetermined,
             Scope::User if FOLDERS.contains(&permission) && self.full_disk(client) => {
@@ -497,6 +517,12 @@ impl Store {
         Ok(())
     }
 
+    /// Whether a manifest or a grant list grants `permission` to `app_id`,
+    /// so that `set_grant` refuses it (MIKSPEC-0037.R68).
+    pub fn is_registered(&self, app_id: &str, permission: &str) -> bool {
+        self.has_system(app_id, permission) || self.in_list(app_id, permission)
+    }
+
     /// Records the prompter's answer to a request, and returns the
     /// decision it makes. A build's is kept only as held by its process
     /// when it allows, and not at all when it denies (MIKSPEC-0037.R35).
@@ -531,9 +557,7 @@ impl Store {
     pub fn set_grant(&mut self, grant: &Grant) -> Result<Option<Revoked>, Failure> {
         Store::check_grant(grant)?;
         let scope = scope(&grant.permission).ok_or(Failure::NotFound)?;
-        if self.has_system(&grant.app_id, &grant.permission)
-            || self.in_list(&grant.app_id, &grant.permission)
-        {
+        if self.is_registered(&grant.app_id, &grant.permission) {
             return Err(Failure::InvalidArgs);
         }
         let before = self.put(grant.user, &grant.app_id, &grant.permission, grant.decision);
@@ -624,16 +648,34 @@ impl Store {
             .collect()
     }
 
-    /// Adds `permissions` to the grant list of `app_id`, as
-    /// `grant_system` does for a manifest. Nothing on the wire calls it yet.
-    #[allow(dead_code)]
+    /// Registers `permissions` as the grant list of `app_id`, which
+    /// replaces its earlier list. Fails, registering none, after
+    /// `registrations_done`, for an app ID that is not a system app's, and
+    /// for a name that is unknown or that a list may not hold
+    /// (MIKSPEC-0037.R68).
     pub fn grant_list(&mut self, app_id: &str, permissions: &[String]) -> Result<(), Failure> {
-        Store::check_names(permissions, true)?;
+        if self.done {
+            return Err(Failure::BadState);
+        }
+        let source = Source::List { greeter: false };
+        if !app_id.starts_with(SYSTEM_APPS)
+            || permissions
+                .iter()
+                .any(|p| scope(p).is_none() || mikros_manifest::check_grant(p, source).is_err())
+        {
+            return Err(Failure::InvalidArgs);
+        }
         self.lists
-            .entry(app_id.into())
-            .or_default()
-            .extend(permissions.iter().cloned());
+            .insert(app_id.into(), permissions.iter().cloned().collect());
         Ok(())
+    }
+
+    /// Ends the registrations of lists. Fails when it succeeded before.
+    pub fn registrations_done(&mut self) -> Result<(), Failure> {
+        match core::mem::replace(&mut self.done, true) {
+            true => Err(Failure::BadState),
+            false => Ok(()),
+        }
     }
 
     fn check_names(permissions: &[String], user: bool) -> Result<(), Failure> {
