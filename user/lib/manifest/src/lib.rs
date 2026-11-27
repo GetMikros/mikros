@@ -244,8 +244,25 @@ pub fn parse(folder: &str, bytes: &[u8]) -> Result<Manifest, Error> {
 /// The service manifest `bytes` of the service `key` of the package `id`
 /// (MIKSPEC-0101.R55): its `name` is `key`, it runs as `<id>.<key>` with
 /// the app ID `id` and a binary in `/apps/<id>/`, and it has no boot
-/// handles and no `system` or `admin` permission.
+/// handles and no `system`, `admin` or `user` permission
+/// (MIKSPEC-0101.R88).
 pub fn parse_package_service(id: &str, key: &str, bytes: &[u8]) -> Result<Manifest, Error> {
+    package_service(id, key, bytes, true)
+}
+
+/// The service manifest of a package that is installed, read as
+/// `parse_package_service` does, except that it may ask for `system`,
+/// `admin` and `user` permissions, which the caller is to leave out and
+/// log (MIKSPEC-0101.R88).
+pub fn parse_installed_package_service(
+    id: &str,
+    key: &str,
+    bytes: &[u8],
+) -> Result<Manifest, Error> {
+    package_service(id, key, bytes, false)
+}
+
+fn package_service(id: &str, key: &str, bytes: &[u8], strict: bool) -> Result<Manifest, Error> {
     let root = mikros_yaml::parse(bytes)?;
     let map = root.map()?;
     let name_node = map
@@ -285,8 +302,12 @@ pub fn parse_package_service(id: &str, key: &str, bytes: &[u8]) -> Result<Manife
     if let Some(node) = map.get("boot_handles") {
         return Err(error(node, ErrorKind::BadBootHandle));
     }
-    let reserved = |p: &String| p.starts_with("system.") || p.starts_with("admin.");
-    if manifest.service.permissions.iter().any(reserved) {
+    let reserved = |p: &String| {
+        ["system.", "admin.", "user."]
+            .iter()
+            .any(|scope| p.starts_with(scope))
+    };
+    if strict && manifest.service.permissions.iter().any(reserved) {
         let node = map.get("permissions").unwrap_or(&root);
         return Err(error(node, ErrorKind::ReservedPermission));
     }

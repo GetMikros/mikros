@@ -84,8 +84,23 @@ async fn read(supervisor: &Supervisor) -> Result<Vec<(Service, Vec<u8>)>, Status
             let Some(key) = listed.name.strip_prefix(prefix.as_str()) else {
                 continue;
             };
-            match mikros_manifest::parse_package_service(&listed.app_id, key, &manifest) {
-                Ok(m) => found.push((m.service, manifest)),
+            match mikros_manifest::parse_installed_package_service(&listed.app_id, key, &manifest) {
+                Ok(mut m) => {
+                    // Whatever app ID the package runs with, none of its
+                    // service's system, admin or user permissions are
+                    // registered, and they are logged (MIKSPEC-0101.R88).
+                    let name = m.service.name.clone();
+                    m.service.permissions.retain(|p| {
+                        let scoped = ["system.", "admin.", "user."]
+                            .iter()
+                            .any(|scope| p.starts_with(scope));
+                        if scoped {
+                            mikros_rt::log!(Error, "service {name}: {p} is ignored");
+                        }
+                        !scoped
+                    });
+                    found.push((m.service, manifest));
+                }
                 Err(e) => mikros_rt::log!(
                     Error,
                     "service {}: {}:{}: {:?}",

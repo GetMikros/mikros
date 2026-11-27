@@ -511,7 +511,7 @@ impl Namespaces {
             let Ok(bytes) = files::read(root, reactor, &path, SYSTEM_FILE_MAX).await else {
                 continue;
             };
-            let parsed = mikros_manifest::parse_package_service(app_id, key, &bytes);
+            let parsed = mikros_manifest::parse_installed_package_service(app_id, key, &bytes);
             if parsed.is_ok_and(|m| m.service.binary == program) {
                 return true;
             }

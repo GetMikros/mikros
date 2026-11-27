@@ -642,7 +642,7 @@ fn prefers_system_drivers_and_keeps_installed_ones_off_protected_classes() {
 #[test]
 fn reads_services_of_packages() {
     let text = b"name: index\nbinary: /apps/org.example.editor/bin/index\nstart: on-demand\n\
-                 permissions: [user.documents.access]\n";
+                 permissions: [default.network.use]\n";
     let m = parse_package_service("org.example.editor", "index", text).unwrap();
     assert_eq!(m.service.name, "org.example.editor.index");
     assert_eq!(m.service.app_id, "org.example.editor");
@@ -868,4 +868,27 @@ fn service_and_driver_manifests_list_no_user_permissions() {
     assert!(e.is_err());
     let ok = format!("{MINIMAL}permissions:\n  - admin.time.set\n");
     assert!(parse("system.log", ok.as_bytes()).is_ok());
+}
+
+#[test]
+fn a_package_service_asks_for_no_scoped_permission_but_the_installed_one_is_read() {
+    for permission in ["user.camera.use", "admin.time.set", "system.log.read"] {
+        let text = format!(
+            "name: sync\nbinary: /apps/org.example.editor/sync\nstart: on-demand\npermissions:\n  - {permission}\n"
+        );
+        let strict = parse_package_service("org.example.editor", "sync", text.as_bytes());
+        assert_eq!(
+            strict.unwrap_err().kind,
+            ErrorKind::ReservedPermission,
+            "{permission}"
+        );
+        let read = parse_installed_package_service("org.example.editor", "sync", text.as_bytes());
+        assert_eq!(
+            read.unwrap().service.permissions,
+            [permission],
+            "{permission}"
+        );
+    }
+    let ok = "name: sync\nbinary: /apps/org.example.editor/sync\nstart: on-demand\npermissions:\n  - default.network.use\n";
+    assert!(parse_package_service("org.example.editor", "sync", ok.as_bytes()).is_ok());
 }
