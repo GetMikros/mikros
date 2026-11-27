@@ -42,6 +42,7 @@ mod port;
 mod port_tests;
 mod ports;
 mod power;
+mod prebuilt;
 mod qemu;
 mod root_disk;
 mod run;

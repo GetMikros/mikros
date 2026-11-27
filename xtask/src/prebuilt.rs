@@ -1,0 +1,442 @@
+//! The archives of prebuilt libraries (MIKSPEC-0062.R18): their entries are
+//! checked, and the archive is unpacked and its files are checked against
+//! the sysroot and the system, all before a file of it is used
+//! (MIKSPEC-0062.R19, MIKSPEC-0062.R20).
+
+use crate::elf;
+use crate::ports::Port;
+use anyhow::{Context, Result, bail};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+
+/// The folders that an archive holds files in, laid out as `/system`.
+const FOLDERS: [&str; 3] = ["include", "libraries", "share"];
+
+/// Fails, naming `port`, unless every entry of `archive` is a folder or a
+/// file below `include/`, `libraries/` or `share/`, with no name that
+/// leaves them, and returns the names of the files.
+pub fn entries(port: &Port, archive: &Path) -> Result<Vec<String>> {
+    let output = Command::new("tar")
+        .arg("-tvf")
+        .arg(archive)
+        .output()
+        .context("running tar")?;
+    if !output.status.success() {
+        bail!(
+            "{}: listing {} failed: {}",
+            port.name,
+            archive.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    check_entries(port, &String::from_utf8_lossy(&output.stdout))
+}
+
+/// The files of the verbose listing `listing` of an archive, checked as
+/// `entries` says.
+fn check_entries(port: &Port, listing: &str) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    for line in listing.lines() {
+        // `-rw-r--r-- 0/0 1234 1970-01-01 00:00 libraries/libx.dlib`
+        let kind = line.chars().next().unwrap_or(' ');
+        let mut rest = line;
+        for _ in 0..5 {
+            rest = rest
+                .trim_start()
+                .split_once(char::is_whitespace)
+                .map(|(_, rest)| rest)
+                .with_context(|| {
+                    format!("{}: cannot read the archive entry {line:?}", port.name)
+                })?;
+        }
+        let name = rest.trim().to_owned();
+        // The root folder of an archive made from inside its tree.
+        if kind == 'd' && name.trim_end_matches('/') == "." {
+            continue;
+        }
+        let path = Path::new(&name);
+        let plain = path
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+        let first = path
+            .components()
+            .find_map(|c| match c {
+                Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .unwrap_or("");
+        if !plain || !FOLDERS.contains(&first) {
+            bail!(
+                "{}: the entry {name} is outside include/, libraries/ and share/",
+                port.name
+            );
+        }
+        match kind {
+            'd' => {}
+            '-' => files.push(name.trim_start_matches("./").to_owned()),
+            _ => bail!(
+                "{}: the entry {name} is neither a file nor a folder",
+                port.name
+            ),
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Unpacks `archive`, whose entries `entries` accepted, into the new folder
+/// `dest`, which is not a part of the sysroot or of an image.
+pub fn unpack(port: &Port, archive: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        fs::remove_dir_all(dest).with_context(|| format!("removing {}", dest.display()))?;
+    }
+    fs::create_dir_all(dest)?;
+    let status = Command::new("tar")
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .context("running tar")?;
+    if !status.success() {
+        bail!("{}: unpacking {} failed", port.name, archive.display());
+    }
+    Ok(())
+}
+
+/// The shared libraries of the folder `libraries` of `root`, by `DT_SONAME`,
+/// with the path of each.
+fn libraries_in(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
+    let mut found = BTreeMap::new();
+    let dir = root.join("libraries");
+    let Ok(read) = fs::read_dir(&dir) else {
+        return Ok(found);
+    };
+    for entry in read {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("dlib") || !path.is_file() {
+            continue;
+        }
+        if let Some(name) = elf::soname(&path)? {
+            found.insert(name, path);
+        }
+    }
+    Ok(found)
+}
+
+/// The ABI level that the C library `libc.dlib` of the sysroot gives, which
+/// is the target level of its ABI note.
+fn sysroot_level(sysroot: &Path) -> Result<u32> {
+    let path = sysroot.join("libraries/libc.dlib");
+    let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(elf::abi_levels(&data)
+        .with_context(|| path.display().to_string())?
+        .1)
+}
+
+/// Fails, naming `port`, when the unpacked archive `tree` of a prebuilt
+/// library does not fit the sysroot `sysroot` and the files `taken` of the
+/// system and of other ports, given as paths in `/system`: a file that would
+/// replace one of them, a shared library whose soname is not its file name,
+/// one without an ABI note or with a minimum level above that of the C
+/// library of the sysroot, a needed library that is neither in the sysroot
+/// nor in the archive, and a symbol that is undefined and not weak and that
+/// none of the libraries that it needs defines (MIKSPEC-0062.R19).
+pub fn check_tree(
+    port: &Port,
+    files: &[String],
+    tree: &Path,
+    sysroot: &Path,
+    taken: &BTreeSet<String>,
+) -> Result<()> {
+    let name = &port.name;
+    for file in files {
+        if taken.contains(file) {
+            bail!("{name}: the file {file} would replace a file of the system or of another port");
+        }
+    }
+    let level = sysroot_level(sysroot).with_context(|| name.clone())?;
+    let own = libraries_in(tree)?;
+    for file in files.iter().filter(|f| f.starts_with("libraries/")) {
+        let Some(base) = file.strip_prefix("libraries/") else {
+            continue;
+        };
+        if !base.ends_with(".dlib") {
+            continue;
+        }
+        let found = elf::soname(&tree.join(file)).with_context(|| format!("{name}: {file}"))?;
+        if found.as_deref() != Some(base) {
+            bail!("{name}: the soname of {file} is {found:?}, not {base}");
+        }
+        let data = fs::read(tree.join(file))?;
+        let (minimum, _) = elf::abi_levels(&data).with_context(|| format!("{name}: {file}"))?;
+        if minimum > level {
+            bail!(
+                "{name}: {file} needs the ABI level {minimum}, and the C library of the \
+                 sysroot gives {level}"
+            );
+        }
+    }
+    let system = libraries_in(sysroot)?;
+    let library = |soname: &str| own.get(soname).or_else(|| system.get(soname));
+    for (soname, path) in &own {
+        // The libraries that this one needs, directly and through the
+        // libraries that those need.
+        let mut closure: BTreeMap<String, &Path> = BTreeMap::new();
+        let mut queue = VecDeque::from([(soname.clone(), path.as_path())]);
+        while let Some((current, at)) = queue.pop_front() {
+            if closure.insert(current.clone(), at).is_some() {
+                continue;
+            }
+            let data = fs::read(at)?;
+            for needed in elf::dynamic(&data)
+                .with_context(|| format!("{name}: {current}"))?
+                .needed
+            {
+                let Some(next) = library(&needed) else {
+                    bail!(
+                        "{name}: {current} needs {needed}, which is in neither the sysroot nor the archive"
+                    );
+                };
+                queue.push_back((needed, next.as_path()));
+            }
+        }
+        let mut defined = BTreeSet::new();
+        for at in closure.values() {
+            let data = fs::read(at)?;
+            defined.extend(elf::dynamic_symbols(&data)?.defined);
+        }
+        let data = fs::read(path)?;
+        for symbol in elf::dynamic_symbols(&data)?.undefined {
+            if !defined.contains(&symbol) {
+                bail!(
+                    "{name}: {soname} needs the symbol {symbol}, which none of its libraries defines"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elf::fixtures::{Symbol, dynamic_elf};
+
+    fn port() -> Port {
+        let text = "[prebuilt]\nurl = \"u\"\nsha256 = \"s\"\nrepository = \"r\"\n\
+                    commit = \"0123456789abcdef0123456789abcdef01234567\"\n\
+                    workflow = \"w\"\nsysroot = \"s\"\ntoolchain = \"t\"\n";
+        crate::ports::parse_for_tests("elegance", text)
+    }
+
+    /// A temporary folder with the files `(path, content)`.
+    fn make(files: &[(&str, Vec<u8>)]) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "xtask-prebuilt-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (path, data) in files {
+            let at = dir.join(path);
+            fs::create_dir_all(at.parent().unwrap()).unwrap();
+            fs::write(at, data).unwrap();
+        }
+        dir
+    }
+
+    /// The sysroot of the tests: a C library with the ABI level 2 and one
+    /// symbol, `puts`.
+    fn sysroot() -> PathBuf {
+        make(&[(
+            "libraries/libc.dlib",
+            dynamic_elf(
+                Some("libc.dlib"),
+                &[],
+                &[Symbol("puts", true, false)],
+                Some((1, 2)),
+            ),
+        )])
+    }
+
+    fn reason(
+        files: &[(&str, Vec<u8>)],
+        sysroot: &Path,
+        taken: &[&str],
+    ) -> std::result::Result<(), String> {
+        let tree = make(files);
+        let names: Vec<String> = files.iter().map(|(p, _)| (*p).to_owned()).collect();
+        let taken = taken.iter().map(|s| (*s).to_owned()).collect();
+        check_tree(&port(), &names, &tree, sysroot, &taken).map_err(|e| format!("{e:#}"))
+    }
+
+    #[test]
+    fn accepts_a_library_that_fits() {
+        let lib = dynamic_elf(
+            Some("libx.dlib"),
+            &["libc.dlib"],
+            &[
+                Symbol("x", true, false),
+                Symbol("puts", false, false),
+                Symbol("maybe", false, true),
+            ],
+            Some((1, 2)),
+        );
+        let files = [
+            ("libraries/libx.dlib", lib),
+            ("include/x.h", b"#define X".to_vec()),
+        ];
+        assert_eq!(reason(&files, &sysroot(), &[]), Ok(()));
+    }
+
+    #[test]
+    fn refuses_a_file_that_would_replace_another() {
+        let files = [("share/x/data", b"1".to_vec())];
+        let error = reason(&files, &sysroot(), &["share/x/data"]).unwrap_err();
+        assert!(
+            error.contains("elegance") && error.contains("would replace"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_soname_that_is_not_the_file_name() {
+        let lib = dynamic_elf(Some("liby.dlib"), &[], &[], Some((1, 1)));
+        let error = reason(&[("libraries/libx.dlib", lib)], &sysroot(), &[]).unwrap_err();
+        assert!(error.contains("soname"), "{error}");
+        let none = dynamic_elf(None, &[], &[], Some((1, 1)));
+        assert!(reason(&[("libraries/libx.dlib", none)], &sysroot(), &[]).is_err());
+    }
+
+    #[test]
+    fn refuses_a_library_without_an_abi_note_or_above_the_level_of_the_c_library() {
+        let plain = dynamic_elf(Some("libx.dlib"), &[], &[], None);
+        let error = reason(&[("libraries/libx.dlib", plain)], &sysroot(), &[]).unwrap_err();
+        assert!(error.contains("no ABI note"), "{error}");
+        let high = dynamic_elf(Some("libx.dlib"), &[], &[], Some((3, 3)));
+        let error = reason(&[("libraries/libx.dlib", high)], &sysroot(), &[]).unwrap_err();
+        assert!(
+            error.contains("ABI level 3") && error.contains("gives 2"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_needed_library_that_is_nowhere() {
+        let lib = dynamic_elf(Some("libx.dlib"), &["libgone.dlib"], &[], Some((1, 1)));
+        let error = reason(&[("libraries/libx.dlib", lib)], &sysroot(), &[]).unwrap_err();
+        assert!(error.contains("libgone.dlib"), "{error}");
+        // One that the archive holds, and one that the other needs in turn.
+        let x = dynamic_elf(Some("libx.dlib"), &["liby.dlib"], &[], Some((1, 1)));
+        let y = dynamic_elf(Some("liby.dlib"), &["libc.dlib"], &[], Some((1, 1)));
+        let both = [("libraries/libx.dlib", x), ("libraries/liby.dlib", y)];
+        assert_eq!(reason(&both, &sysroot(), &[]), Ok(()));
+        let z = dynamic_elf(Some("liby.dlib"), &["libmissing.dlib"], &[], Some((1, 1)));
+        let x = dynamic_elf(Some("libx.dlib"), &["liby.dlib"], &[], Some((1, 1)));
+        let error = reason(
+            &[("libraries/libx.dlib", x), ("libraries/liby.dlib", z)],
+            &sysroot(),
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.contains("libmissing.dlib"), "{error}");
+    }
+
+    #[test]
+    fn refuses_an_undefined_symbol_that_no_needed_library_defines() {
+        let lib = dynamic_elf(
+            Some("libx.dlib"),
+            &["libc.dlib"],
+            &[Symbol("nowhere", false, false)],
+            Some((1, 1)),
+        );
+        let error = reason(&[("libraries/libx.dlib", lib)], &sysroot(), &[]).unwrap_err();
+        assert!(error.contains("nowhere"), "{error}");
+        // A library that it does not need does not count.
+        let other = dynamic_elf(
+            Some("liby.dlib"),
+            &[],
+            &[Symbol("def", true, false)],
+            Some((1, 1)),
+        );
+        let x = dynamic_elf(
+            Some("libx.dlib"),
+            &["libc.dlib"],
+            &[Symbol("def", false, false)],
+            Some((1, 1)),
+        );
+        let error = reason(
+            &[("libraries/libx.dlib", x), ("libraries/liby.dlib", other)],
+            &sysroot(),
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.contains("def"), "{error}");
+    }
+
+    #[test]
+    fn reads_and_unpacks_an_archive() {
+        let tree = make(&[
+            ("libraries/libx.dlib", b"x".to_vec()),
+            ("include/x.h", b"h".to_vec()),
+        ]);
+        let archive = tree.with_extension("tar.gz");
+        let made = Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&tree)
+            .args(["include", "libraries"])
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let files = entries(&port(), &archive).unwrap();
+        assert_eq!(files, ["include/x.h", "libraries/libx.dlib"]);
+        let dest = tree.with_extension("out");
+        unpack(&port(), &archive, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("include/x.h")).unwrap(), b"h");
+        // An archive with a loose file is refused.
+        let loose = tree.with_extension("loose.tar.gz");
+        fs::write(tree.join("loose"), b"1").unwrap();
+        let made = Command::new("tar")
+            .arg("-czf")
+            .arg(&loose)
+            .arg("-C")
+            .arg(&tree)
+            .args(["include", "loose"])
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(entries(&port(), &loose).is_err());
+        for path in [&tree, &dest] {
+            let _ = fs::remove_dir_all(path);
+        }
+        let _ = fs::remove_file(&archive);
+        let _ = fs::remove_file(&loose);
+    }
+
+    #[test]
+    fn accepts_the_entries_of_the_three_folders_only() {
+        let listing = "drwxr-xr-x 0/0 0 1970-01-01 00:00 libraries/\n\
+                       -rwxr-xr-x 0/0 5 1970-01-01 00:00 libraries/libx.dlib\n\
+                       -rw-r--r-- 0/0 5 1970-01-01 00:00 ./include/x.h\n";
+        let files = check_entries(&port(), listing).unwrap();
+        assert_eq!(files, ["include/x.h", "libraries/libx.dlib"]);
+        let root = format!("drwxr-xr-x 0/0 0 1970-01-01 00:00 ./\n{listing}");
+        assert_eq!(check_entries(&port(), &root).unwrap(), files);
+        for bad in [
+            "-rw-r--r-- 0/0 5 1970-01-01 00:00 bin/x\n",
+            "-rw-r--r-- 0/0 5 1970-01-01 00:00 /libraries/x\n",
+            "-rw-r--r-- 0/0 5 1970-01-01 00:00 libraries/../etc/x\n",
+            "lrwxrwxrwx 0/0 0 1970-01-01 00:00 libraries/x -> /etc/passwd\n",
+        ] {
+            assert!(check_entries(&port(), bad).is_err(), "{bad}");
+        }
+    }
+}

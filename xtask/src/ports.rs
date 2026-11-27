@@ -284,6 +284,13 @@ pub fn test_programs(port: &Port) -> String {
     format!("/system/libexec/{}-tests", port.name)
 }
 
+/// The port `name` of the file text `text`, for the tests of other
+/// modules.
+#[cfg(test)]
+pub fn parse_for_tests(name: &str, text: &str) -> Port {
+    parse(name, PathBuf::new(), text).expect("a port.toml that reads")
+}
+
 /// The prebuilt libraries among the ports in the folder `dir`, by name.
 fn prebuilt_in(dir: &std::path::Path) -> Result<Vec<Port>> {
     let mut names: Vec<String> = fs::read_dir(dir)
