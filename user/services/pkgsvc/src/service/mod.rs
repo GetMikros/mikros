@@ -7,6 +7,7 @@ mod commands;
 mod components;
 mod drivers;
 mod files;
+mod grants;
 mod install;
 mod kept;
 mod list;

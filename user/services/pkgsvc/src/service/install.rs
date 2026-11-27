@@ -303,6 +303,7 @@ pub(super) fn check_one<S: format::Source + ?Sized>(
         super::drivers::check(package, one.source, manifest)?;
     }
     super::services::check(package, one.source, manifest)?;
+    super::grants::check(root, package, one.source, manifest, one.owner_of.is_some())?;
     if !manifest.installable {
         return Err(Status::InvalidArgs);
     }

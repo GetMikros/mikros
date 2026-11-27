@@ -27,7 +27,8 @@ pub use driver::{
     is_hardware_id, parse_driver,
 };
 pub use grants::{
-    GRANTS_FILE, GrantList, MAX_GRANTS, Rejected, Source, check_grant, parse_grant_list,
+    GRANTS_FILE, GrantList, MAX_GRANTS, Refused, Rejected, Source, check_grant, check_install,
+    parse_grant_list,
 };
 pub use order::{Blocked, Order, order};
 pub use program::{NamespaceEntry, Program, ProgramManifest, parse_program};

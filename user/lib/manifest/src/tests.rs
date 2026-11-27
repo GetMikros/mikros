@@ -808,3 +808,38 @@ fn a_program_manifest_has_at_most_32_permissions_of_three_scopes() {
     let mixed = "  - system.a.use\n  - admin.a.use\n  - user.a.use\n";
     assert_eq!(kind(&text(mixed)), Ok(3));
 }
+
+#[test]
+fn an_install_keeps_the_names_of_the_base_copy() {
+    let list = |names: &str| format!("permissions:\n{names}");
+    let a = list("  - user.power.control\n  - admin.power.control\n");
+    let same = list("  - admin.power.control\n  - user.power.control\n");
+    let fewer = list("  - user.power.control\n");
+    let (a, same, fewer) = (a.as_bytes(), same.as_bytes(), fewer.as_bytes());
+    // Not a system app: no file is fine, a file is not.
+    assert_eq!(check_install(None, None), Ok(()));
+    assert_eq!(check_install(Some(a), None), Err(Refused::NotSystemApp));
+    // An update of a system app has the base copy's set, in any order.
+    assert_eq!(check_install(Some(same), Some(Some(a))), Ok(()));
+    assert_eq!(
+        check_install(Some(fewer), Some(Some(a))),
+        Err(Refused::Differs)
+    );
+    assert_eq!(check_install(None, Some(Some(a))), Err(Refused::Differs));
+    assert_eq!(check_install(Some(a), Some(None)), Err(Refused::Differs));
+    assert_eq!(check_install(None, Some(None)), Ok(()));
+    assert_eq!(
+        check_install(Some(b"permissions: []\n"), Some(None)),
+        Ok(())
+    );
+    assert_eq!(
+        check_install(Some(b"permissions: [\n"), Some(None)),
+        Err(Refused::Invalid)
+    );
+    // Entries that no one may register still count as names.
+    let reserved = list("  - user.full_disk.access\n");
+    assert_eq!(
+        check_install(Some(reserved.as_bytes()), Some(Some(reserved.as_bytes()))),
+        Ok(())
+    );
+}

@@ -3,6 +3,7 @@
 //! entries of program manifests obey.
 
 use crate::{Error, ErrorKind, error, list};
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -130,4 +131,44 @@ pub fn parse_grant_list(bytes: &[u8], source: Source) -> Result<GrantList, Error
         }
     }
     Ok(grants)
+}
+
+/// Why the install service refuses a package for its grant list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// The file is not a valid grant list.
+    Invalid,
+    /// The package has the file, and is not a system app or an update of
+    /// one.
+    NotSystemApp,
+    /// The package is an update of a system app, and its set of names is
+    /// not that of the base copy.
+    Differs,
+}
+
+/// Every name of the list in `bytes`, those that may not be registered
+/// too.
+fn all_names(bytes: Option<&[u8]>) -> Result<BTreeSet<String>, Refused> {
+    let Some(bytes) = bytes else {
+        return Ok(BTreeSet::new());
+    };
+    let list =
+        parse_grant_list(bytes, Source::List { greeter: false }).map_err(|_| Refused::Invalid)?;
+    let rejected = list.rejected.into_iter().map(|(name, _)| name);
+    Ok(list.names.into_iter().chain(rejected).collect())
+}
+
+/// Whether the install service may install a package whose grant list is
+/// `new`, the bytes of its `permissions.yaml` or none. `base` is `None`
+/// when the package is not a system app or an update of one, and
+/// otherwise the base copy's list, or `Some(None)` when it has none
+/// (MIKSPEC-0101.R87).
+pub fn check_install(new: Option<&[u8]>, base: Option<Option<&[u8]>>) -> Result<(), Refused> {
+    let names = all_names(new)?;
+    match base {
+        None if new.is_some() => Err(Refused::NotSystemApp),
+        None => Ok(()),
+        Some(base) if all_names(base)? == names => Ok(()),
+        Some(_) => Err(Refused::Differs),
+    }
 }
