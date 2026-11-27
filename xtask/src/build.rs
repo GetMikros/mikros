@@ -2424,6 +2424,9 @@ fn ported_members(
             }
         }
     }
+    // The prebuilt libraries that the ports pin (MIKSPEC-0062.R19).
+    let prebuilt = crate::prebuilt::image_members(edition, &members)?;
+    members.extend(prebuilt);
     Ok(members)
 }
 

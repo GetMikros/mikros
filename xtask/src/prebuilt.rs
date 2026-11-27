@@ -75,7 +75,13 @@ fn check_entries(port: &Port, listing: &str) -> Result<Vec<String>> {
         }
         match kind {
             'd' => {}
-            '-' => files.push(name.trim_start_matches("./").to_owned()),
+            '-' => {
+                let file = name.trim_start_matches("./").to_owned();
+                if files.contains(&file) {
+                    bail!("{}: the entry {file} is in the archive twice", port.name);
+                }
+                files.push(file);
+            }
             _ => bail!(
                 "{}: the entry {name} is neither a file nor a folder",
                 port.name
@@ -218,6 +224,200 @@ pub fn check_tree(
         }
     }
     Ok(())
+}
+
+/// A prebuilt library whose archive was fetched, listed and unpacked.
+pub struct Prepared {
+    pub port: Port,
+    /// The folder that the archive is unpacked into.
+    pub tree: PathBuf,
+    /// The files of the archive, by path in `/system`.
+    pub files: Vec<String>,
+}
+
+/// Fetches, lists and unpacks the archive of `port`, unless it is
+/// unpacked already, below `target/prebuilt/<name>/tree`.
+pub fn prepare(port: Port) -> Result<Prepared> {
+    let archive = crate::ports::fetch_prebuilt(&port)?;
+    let files = entries(&port, &archive)?;
+    let base = crate::workspace_root()
+        .join("target/prebuilt")
+        .join(&port.name);
+    let tree = base.join("tree");
+    let marker = base.join("unpacked");
+    if fs::read_to_string(&marker).ok().as_deref() != Some(port.sha256.as_str()) {
+        unpack(&port, &archive, &tree)?;
+        fs::write(&marker, &port.sha256)?;
+    }
+    Ok(Prepared { port, tree, files })
+}
+
+/// Every prebuilt library that `user/ports` pins, prepared.
+pub fn prepare_all() -> Result<Vec<Prepared>> {
+    crate::ports::prebuilt_ports()?
+        .into_iter()
+        .map(prepare)
+        .collect()
+}
+
+/// Whether a file of an archive, by its path in `/system`, goes into the
+/// sysroot: `include/`, `libraries/` and `share/cmake/`
+/// (MIKSPEC-0062.R19).
+fn for_sysroot(file: &str) -> bool {
+    file.starts_with("include/")
+        || file.starts_with("libraries/")
+        || file.starts_with("share/cmake/")
+}
+
+/// Whether a file of an archive, by its path in `/system`, goes into the
+/// system version of an image: `libraries/` and `share/`.
+fn for_images(file: &str) -> bool {
+    file.starts_with("libraries/") || file.starts_with("share/")
+}
+
+/// The files that `record` says an earlier run installed for the port
+/// `name`, one path to a line.
+fn recorded(record: &Path, name: &str) -> BTreeSet<String> {
+    fs::read_to_string(record.join(format!("{name}.files")))
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Whether the files `a` and `b` hold the same bytes.
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    matches!((fs::read(a), fs::read(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// Installs the files of the prebuilt libraries `prepared` in `sysroot`,
+/// after every check of MIKSPEC-0062.R19 passed for all of them: nothing
+/// is written before that, so that a library that fails leaves the sysroot
+/// as it was (MIKSPEC-0062.R20). What an earlier run installed for the same
+/// port is not a replacement; `record` keeps the names of those files.
+pub fn install_in(sysroot: &Path, record: &Path, prepared: &[Prepared]) -> Result<()> {
+    let mut owner: BTreeMap<&str, &str> = BTreeMap::new();
+    for item in prepared {
+        for file in &item.files {
+            if let Some(other) = owner.insert(file, &item.port.name) {
+                bail!(
+                    "{}: the file {file} would replace a file of the port {other}",
+                    item.port.name
+                );
+            }
+        }
+    }
+    for item in prepared {
+        let own = recorded(record, &item.port.name);
+        let mut taken = BTreeSet::new();
+        for file in item.files.iter().filter(|f| for_sysroot(f)) {
+            let at = sysroot.join(file);
+            // A file with the archive's own bytes is no replacement, so a
+            // sysroot restored from a cache that does not hold `record`
+            // installs again.
+            if at.exists() && !own.contains(file) && !same_bytes(&at, &item.tree.join(file)) {
+                taken.insert(file.clone());
+            }
+        }
+        check_tree(&item.port, &item.files, &item.tree, sysroot, &taken)?;
+    }
+    fs::create_dir_all(record)?;
+    for item in prepared {
+        let mut installed = String::new();
+        for file in item.files.iter().filter(|f| for_sysroot(f)) {
+            let data = fs::read(item.tree.join(file))
+                .with_context(|| format!("{}: reading {file}", item.port.name))?;
+            crate::system_libraries::write_if_changed(&sysroot.join(file), &data)?;
+            installed.push_str(file);
+            installed.push('\n');
+        }
+        fs::write(record.join(format!("{}.files", item.port.name)), installed)?;
+    }
+    Ok(())
+}
+
+/// Installs the prebuilt libraries that `user/ports` pins in the sysroot.
+pub fn install_all() -> Result<()> {
+    let prepared = prepare_all()?;
+    if prepared.is_empty() {
+        return Ok(());
+    }
+    // The record is kept in the sysroot, so that a cache that restores the
+    // sysroot restores it as well.
+    let sysroot = crate::sysroot::dir();
+    install_in(&sysroot, &sysroot.join(".prebuilt"), &prepared)
+}
+
+/// The members that install the prebuilt libraries in the system version
+/// of an image of the edition `edition`, each by its name in the image:
+/// the files of `libraries/` and `share/` that the `[editions]` of the port
+/// give to that edition. Fails, naming the port, for an archive that does
+/// not fit the sysroot as `check_tree` says, for a table that names a file
+/// that the archive does not hold and for a member of `existing` that a file
+/// would replace.
+pub fn image_members(
+    edition: crate::build::Edition,
+    existing: &[(String, PathBuf)],
+) -> Result<Vec<(String, PathBuf)>> {
+    image_members_in(&prepare_all()?, edition, existing, &crate::sysroot::dir())
+}
+
+/// `image_members` for the libraries `prepared` and the sysroot `sysroot`.
+fn image_members_in(
+    prepared: &[Prepared],
+    edition: crate::build::Edition,
+    existing: &[(String, PathBuf)],
+    sysroot: &Path,
+) -> Result<Vec<(String, PathBuf)>> {
+    let mut members: Vec<(String, PathBuf)> = Vec::new();
+    for item in prepared {
+        // The checks of the sysroot install apply to what an image holds
+        // as well (MIKSPEC-0062.R19, MIKSPEC-0062.R20).
+        check_tree(
+            &item.port,
+            &item.files,
+            &item.tree,
+            sysroot,
+            &BTreeSet::new(),
+        )?;
+        let files: Vec<&str> = item
+            .files
+            .iter()
+            .map(String::as_str)
+            .filter(|f| for_images(f))
+            .collect();
+        item.port.check_editions(&files)?;
+        for file in files {
+            if !item.port.installed_in(file, edition) {
+                continue;
+            }
+            let at = format!("system/{file}");
+            if existing.iter().chain(&members).any(|(have, _)| *have == at) {
+                bail!(
+                    "{}: the file {file} would replace a file of the system or of another port",
+                    item.port.name
+                );
+            }
+            members.push((at, item.tree.join(file)));
+        }
+    }
+    Ok(members)
+}
+
+/// The name and the `commit` of each prebuilt library that an image of the
+/// edition `edition` holds, for `cargo xtask image` to print
+/// (MIKSPEC-0062.R19).
+pub fn held(edition: crate::build::Edition) -> Result<Vec<(String, String)>> {
+    let mut held = Vec::new();
+    for item in prepare_all()? {
+        let holds = item
+            .files
+            .iter()
+            .filter(|f| for_images(f))
+            .any(|f| item.port.installed_in(f, edition));
+        if let (true, Some(prebuilt)) = (holds, &item.port.prebuilt) {
+            held.push((item.port.name.clone(), prebuilt.commit.clone()));
+        }
+    }
+    Ok(held)
 }
 
 #[cfg(test)]
@@ -435,8 +635,181 @@ mod tests {
             "-rw-r--r-- 0/0 5 1970-01-01 00:00 /libraries/x\n",
             "-rw-r--r-- 0/0 5 1970-01-01 00:00 libraries/../etc/x\n",
             "lrwxrwxrwx 0/0 0 1970-01-01 00:00 libraries/x -> /etc/passwd\n",
+            "hrwxr-xr-x 0/0 0 1970-01-01 00:00 libraries/x link to libraries/y\n",
+            "-rw-r--r-- 0/0 5 1970-01-01 00:00 include/x.h\n\
+             -rw-r--r-- 0/0 5 1970-01-01 00:00 ./include/x.h\n",
         ] {
             assert!(check_entries(&port(), bad).is_err(), "{bad}");
         }
+    }
+
+    /// A prepared prebuilt library of the tree `files`.
+    fn prepared(name: &str, extra: &str, files: &[(&str, Vec<u8>)]) -> Prepared {
+        let text = format!(
+            "[prebuilt]\nurl = \"u\"\nsha256 = \"s\"\nrepository = \"r\"\n\
+             commit = \"0123456789abcdef0123456789abcdef01234567\"\n\
+             workflow = \"w\"\nsysroot = \"s\"\ntoolchain = \"t\"\n{extra}"
+        );
+        let tree = make(files);
+        Prepared {
+            port: crate::ports::parse_for_tests(name, &text),
+            tree,
+            files: files.iter().map(|(p, _)| (*p).to_owned()).collect(),
+        }
+    }
+
+    fn lib() -> Vec<u8> {
+        dynamic_elf(
+            Some("libx.dlib"),
+            &["libc.dlib"],
+            &[Symbol("puts", false, false)],
+            Some((1, 1)),
+        )
+    }
+
+    #[test]
+    fn installs_include_libraries_and_the_cmake_files_in_the_sysroot_again_and_again() {
+        let sysroot = sysroot();
+        let record = make(&[]);
+        let one = prepared(
+            "elegance",
+            "",
+            &[
+                ("libraries/libx.dlib", lib()),
+                ("include/x.h", b"h".to_vec()),
+                ("share/cmake/X/XConfig.cmake", b"c".to_vec()),
+                ("share/x/data", b"d".to_vec()),
+            ],
+        );
+        install_in(&sysroot, &record, std::slice::from_ref(&one)).unwrap();
+        assert!(sysroot.join("libraries/libx.dlib").is_file());
+        assert_eq!(fs::read(sysroot.join("include/x.h")).unwrap(), b"h");
+        assert!(sysroot.join("share/cmake/X/XConfig.cmake").is_file());
+        // The rest of share/ goes into images only.
+        assert!(!sysroot.join("share/x/data").exists());
+        // A second run finds the port's own files and replaces nothing.
+        install_in(&sysroot, &record, std::slice::from_ref(&one)).unwrap();
+    }
+
+    #[test]
+    fn a_sysroot_without_the_record_takes_the_same_files_but_not_changed_ones() {
+        let sysroot = sysroot();
+        let record = make(&[]);
+        let one = prepared(
+            "elegance",
+            "",
+            &[
+                ("libraries/libx.dlib", lib()),
+                ("include/x.h", b"h".to_vec()),
+            ],
+        );
+        install_in(&sysroot, &record, std::slice::from_ref(&one)).unwrap();
+        // The cache holds the sysroot, not the record.
+        fs::remove_dir_all(&record).unwrap();
+        install_in(&sysroot, &record, std::slice::from_ref(&one)).unwrap();
+        assert!(record.join("elegance.files").is_file());
+        fs::remove_dir_all(&record).unwrap();
+        fs::write(sysroot.join("include/x.h"), b"changed").unwrap();
+        let error = install_in(&sysroot, &record, std::slice::from_ref(&one)).unwrap_err();
+        assert!(format!("{error:#}").contains("would replace"), "{error:#}");
+        assert_eq!(fs::read(sysroot.join("include/x.h")).unwrap(), b"changed");
+    }
+
+    #[test]
+    fn a_library_that_fails_leaves_the_sysroot_as_it_was() {
+        let sysroot = sysroot();
+        let record = make(&[]);
+        let good = prepared("good", "", &[("include/g.h", b"g".to_vec())]);
+        let bad = prepared(
+            "bad",
+            "",
+            &[(
+                "libraries/libx.dlib",
+                dynamic_elf(Some("liby.dlib"), &[], &[], Some((1, 1))),
+            )],
+        );
+        let error = install_in(&sysroot, &record, &[good, bad]).unwrap_err();
+        assert!(format!("{error:#}").contains("bad"), "{error:#}");
+        assert!(!sysroot.join("include/g.h").exists());
+    }
+
+    #[test]
+    fn a_file_of_the_sysroot_or_of_another_port_is_not_replaced() {
+        let sysroot = make(&[("include/own.h", b"1".to_vec())]);
+        let record = make(&[]);
+        let theirs = prepared("theirs", "", &[("include/own.h", b"2".to_vec())]);
+        // The sysroot has libc.dlib too; the tree is checked against it.
+        fs::create_dir_all(sysroot.join("libraries")).unwrap();
+        fs::write(
+            sysroot.join("libraries/libc.dlib"),
+            dynamic_elf(Some("libc.dlib"), &[], &[], Some((1, 2))),
+        )
+        .unwrap();
+        let error = install_in(&sysroot, &record, &[theirs]).unwrap_err();
+        assert!(format!("{error:#}").contains("would replace"), "{error:#}");
+        let a = prepared("a", "", &[("include/same.h", b"1".to_vec())]);
+        let b = prepared("b", "", &[("include/same.h", b"2".to_vec())]);
+        let error = install_in(&sysroot, &record, &[a, b]).unwrap_err();
+        assert!(format!("{error:#}").contains("port a"), "{error:#}");
+    }
+
+    #[test]
+    fn images_get_the_files_of_the_editions_that_hold_them() {
+        use crate::build::Edition;
+        let editions = "[editions]\n\"libraries/libx.dlib\" = [\"desktop\"]\n";
+        let item = prepared(
+            "elegance",
+            editions,
+            &[
+                ("libraries/libx.dlib", lib()),
+                ("include/x.h", b"h".to_vec()),
+                ("share/x/data", b"d".to_vec()),
+            ],
+        );
+        let sysroot = sysroot();
+        let names = |edition| -> Vec<String> {
+            image_members_in(std::slice::from_ref(&item), edition, &[], &sysroot)
+                .unwrap()
+                .into_iter()
+                .map(|(at, _)| at)
+                .collect()
+        };
+        assert_eq!(
+            names(Edition::Desktop),
+            ["system/libraries/libx.dlib", "system/share/x/data"]
+        );
+        assert_eq!(names(Edition::Server), ["system/share/x/data"]);
+        // A member that is there already is not replaced.
+        let have = vec![("system/share/x/data".to_owned(), PathBuf::from("x"))];
+        let error = image_members_in(
+            std::slice::from_ref(&item),
+            Edition::Server,
+            &have,
+            &sysroot,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("elegance")
+                && format!("{error:#}").contains("would replace"),
+            "{error:#}"
+        );
+        // A library that does not fit the sysroot is refused here too.
+        let bad = prepared(
+            "bad",
+            "",
+            &[(
+                "libraries/libx.dlib",
+                dynamic_elf(Some("liby.dlib"), &[], &[], Some((1, 1))),
+            )],
+        );
+        let error = image_members_in(&[bad], Edition::Desktop, &[], &sysroot).unwrap_err();
+        assert!(format!("{error:#}").contains("bad"), "{error:#}");
+        // A table that names a file that the archive lacks fails.
+        let wrong = prepared(
+            "wrong",
+            "[editions]\n\"libraries/gone.dlib\" = [\"desktop\"]\n",
+            &[("libraries/libx.dlib", lib())],
+        );
+        assert!(wrong.port.check_editions(&["libraries/libx.dlib"]).is_err());
     }
 }

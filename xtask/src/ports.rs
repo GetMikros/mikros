@@ -432,9 +432,10 @@ mod tests {
         let dir = crate::workspace_root().join("user/ports");
         for entry in fs::read_dir(dir).unwrap() {
             let name = entry.unwrap().file_name().into_string().unwrap();
-            if !EDITION_PORTS.contains(&name.as_str()) {
+            let port = load(&name).unwrap();
+            if !EDITION_PORTS.contains(&name.as_str()) && port.prebuilt.is_none() {
                 assert!(
-                    load(&name).unwrap().editions.is_empty(),
+                    port.editions.is_empty(),
                     "{name} has an [editions] table that the build never reads"
                 );
             }

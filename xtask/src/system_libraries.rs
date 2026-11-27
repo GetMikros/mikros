@@ -20,12 +20,19 @@ use std::path::Path;
 
 /// Writes `contents` to `path`, creating its directory, unless it holds
 /// them already.
-fn write_if_changed(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_if_changed(path: &Path, contents: &[u8]) -> Result<()> {
     if fs::read(path).is_ok_and(|old| old == contents) {
         return Ok(());
     }
-    fs::create_dir_all(path.parent().context("a path without a directory")?)?;
-    fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
+    let dir = path.parent().context("a path without a directory")?;
+    fs::create_dir_all(dir)?;
+    // Written beside the file and renamed, so that a run that stops half
+    // way leaves no partial file.
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = std::path::PathBuf::from(part);
+    fs::write(&part, contents).with_context(|| format!("writing {}", part.display()))?;
+    fs::rename(&part, path).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Copies the files below `from` to `to`, keeping their layout.
@@ -70,7 +77,9 @@ pub fn install() -> Result<()> {
     crate::wayland::install_protocols()?;
     mikros_protocols()?;
     xkbcommon()?;
-    vulkan()
+    vulkan()?;
+    // The prebuilt libraries that the ports pin (MIKSPEC-0062.R19).
+    crate::prebuilt::install_all()
 }
 
 /// Installs the protocol files of the Mikros Wayland extensions, which

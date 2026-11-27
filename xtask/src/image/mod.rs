@@ -202,6 +202,9 @@ pub fn run(args: &Args) -> Result<()> {
             bytes.div_ceil(1 << 20)
         );
     }
+    for (name, commit) in crate::prebuilt::held(args.edition)? {
+        println!("prebuilt {name} {commit}");
+    }
     let out = path(args.kind, args.edition, args.live, args.tests);
     // An image for installing or releasing renews its partition GUIDs at
     // its first boot, so that the disks copied from it do not share them;
