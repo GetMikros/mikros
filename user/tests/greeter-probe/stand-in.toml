@@ -57,7 +57,7 @@ executable = "greeter-probe"
 portable = false
 installable = false
 shell_parts = [
-  { roles = ["greeter"], executable = "greeter-probe", arguments = ["--login", "dee", "{password}"] },
+  { roles = ["greeter"], executable = "greeter-probe", arguments = ["--login", "dee", "{password}", "--then", "eve", "{password}"] },
 ]
 files = [
   { name = "greeter-probe", from = "self", executable = true },

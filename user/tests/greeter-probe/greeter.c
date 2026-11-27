@@ -5,7 +5,8 @@
  * clears to one colour and presents through the Wayland WSI, and which
  * the desktop run looks for on the screen. With the arguments
  * `--login <name> <password>`, it then logs that user in through
- * Login. Then it serves the connection until the compositor closes it.
+ * Login, and with `--then <name> <password>` after those, it logs that
+ * second user in when the key L is pressed. Then it serves the connection until the compositor closes it.
  * Once the seat has a keyboard, it takes the keyboard's keymap and key
  * repeat, and when the toplevel has the keyboard's focus and the key K is
  * pressed, after the repeat of 25 keys per second after 600 ms that the
@@ -37,7 +38,7 @@
 #include <vulkan/vulkan.h>
 #include "xdg-shell-client-protocol.h"
 
-enum { ROLE_USER = 16, WAYLAND_ID = 1, LOGIN_ID = 3, KIND_CHANNEL = 9, KEY_K = 37 };
+enum { ROLE_USER = 16, WAYLAND_ID = 1, LOGIN_ID = 3, KIND_CHANNEL = 9, KEY_K = 37, KEY_L = 38 };
 
 /* The memory of the Login call's messages. */
 static uint8_t arena_memory[MIKROS_MIDL_CALL_ROOM + 4096];
@@ -60,6 +61,9 @@ struct state {
 	 * typed: 1 until the frame of the second colour is presented, then
 	 * 2. */
 	int keymap, repeat, focused, typed;
+	/* Whether the key L asked for the second login: 1 until the login
+	 * was made, then 2. */
+	int again;
 	/* What presents the toplevel's frames. */
 	VkDevice device;
 	VkQueue queue;
@@ -159,6 +163,8 @@ static void key(void *data, struct wl_keyboard *keyboard, uint32_t serial, uint3
 	if (key == KEY_K && state == WL_KEYBOARD_KEY_STATE_PRESSED && s->keymap && s->repeat &&
 	    s->focused && !s->typed)
 		s->typed = 1;
+	if (key == KEY_L && state == WL_KEYBOARD_KEY_STATE_PRESSED && s->focused && !s->again)
+		s->again = 1;
 }
 
 static void modifiers(void *data, struct wl_keyboard *keyboard, uint32_t serial,
@@ -402,7 +408,10 @@ static int draw(struct wl_display *display, struct wl_surface *surface, struct s
 /* Logs `name` in with `password` through the Login channel. */
 static int log_in(const char *name, const char *password)
 {
-	mikros_handle_t login = mikros_take_startup_handle(ROLE_USER, LOGIN_ID);
+	/* The channel is taken once, for every login. */
+	static mikros_handle_t login;
+	if (login == 0)
+		login = mikros_take_startup_handle(ROLE_USER, LOGIN_ID);
 	if (login == 0)
 		return 60;
 	mikros_midl_arena_t arena;
@@ -499,13 +508,26 @@ int main(int argc, char **argv)
 		return 21;
 
 	int failed = draw(display, surface, &s);
-	if (!failed && argc == 4 && strcmp(argv[1], "--login") == 0)
+	if (!failed && argc >= 4 && strcmp(argv[1], "--login") == 0)
 		failed = log_in(argv[2], argv[3]);
+	/* With `--then <name> <password>` after the first login, the key L
+	 * logs that second user in. */
+	const char *then_name = NULL, *then_password = NULL;
+	if (argc == 7 && strcmp(argv[4], "--then") == 0) {
+		then_name = argv[5];
+		then_password = argv[6];
+	}
 	/* The exit code, which the compositor logs, names the step that
 	 * failed. */
 	if (failed)
 		return failed;
 	while (wl_display_dispatch(display) >= 0) {
+		if (s.again == 1 && then_name) {
+			s.again = 2;
+			failed = log_in(then_name, then_password);
+			if (failed)
+				return failed;
+		}
 		if (s.typed == 1) {
 			s.typed = 2;
 			failed = present(&s, &TYPED);

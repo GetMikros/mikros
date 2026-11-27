@@ -42,6 +42,12 @@ const GREETER: &str = "compositor: started the greeter as pid";
 const LOGGED_IN: &str = "sessionmgr: dee logged in on console 1";
 const DESKTOP_STARTED: &str = "sessionmgr: started the desktop of dee";
 const DESKTOP_ENDED: &str = "sessionmgr: the desktop of dee ended";
+/// What the session manager logs when the greeter, which the key L makes
+/// log in `eve`, a user whose login mode is desktop, started eve's desktop,
+/// and that it ended the greeter's compositor after the reply to Login
+/// (MIKSPEC-0057.R42).
+const EVE_STARTED: &str = "sessionmgr: started the desktop of eve for the greeter's login";
+const GREETER_ENDED: &str = "sessionmgr: ended the compositor in greeter mode";
 /// What the compositor logs once it cancelled the shell probe's
 /// question, and once the shell probe exited, which it does with 0 when
 /// it was refused.
@@ -506,11 +512,13 @@ pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> 
         .desktop_image
         .as_deref()
         .context("the build of the system tests has no desktop system")?;
-    run_with(machine, kind, dir, timeout, &built, system, &SDL)
+    run_with(machine, kind, dir, timeout, &built, system, &SDL, true)
 }
 
 /// Boots the desktop run's scenario of `built` with the system `system`,
-/// whose shell probe's switcher part shows `window`.
+/// whose shell probe's switcher part shows `window`, and with the login of
+/// a desktop user at the greeter after dee's desktop when `desktop_login`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_with(
     machine: &MachineArgs,
     kind: Kind,
@@ -519,6 +527,7 @@ pub fn run_with(
     built: &build::Built,
     system: &Path,
     window: &Window,
+    desktop_login: bool,
 ) -> Result<()> {
     fs::create_dir_all(dir)?;
     let disk = dir.join("disk.img");
@@ -711,7 +720,32 @@ pub fn run_with(
         // well, so the client of this step is the third connection.
         wait_for_lines(&log, CLIENT_CONNECTED, 3, &mut qemu, deadline)?;
         crate::console::type_keys(&socket, "e x i t ret")?;
-        scenario::wait_for_line(&log, DESKTOP_ENDED, &mut qemu, deadline).map(drop)
+        scenario::wait_for_line(&log, DESKTOP_ENDED, &mut qemu, deadline)?;
+        if !desktop_login {
+            return Ok(());
+        }
+        // The greeter started again and logged dee in on the console again,
+        // as its arguments say; the desktop's screen shows the greeter,
+        // and the key L logs `eve` in there, whose desktop then owns the
+        // seat while the greeter's compositor ends.
+        wait_for_lines(&log, LOGGED_IN, 2, &mut qemu, deadline)?;
+        screen.until(
+            &mut qemu,
+            COLOUR,
+            &gone,
+            "the console showed after the greeter",
+        )?;
+        scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
+        screen.until(&mut qemu, COLOUR, &covered, "the greeter showed again")?;
+        // The click gives the greeter the keyboard, as in the first step.
+        scenario::monitor(&socket, "mouse_button 1")?;
+        scenario::monitor(&socket, "mouse_button 0")?;
+        scenario::monitor(&socket, "sendkey l")?;
+        scenario::wait_for_line(&log, EVE_STARTED, &mut qemu, deadline)?;
+        // The first of these lines is from the greeter that dee's desktop
+        // ended before; the second is from this login.
+        wait_for_lines(&log, GREETER_ENDED, 2, &mut qemu, deadline)?;
+        screen.until(&mut qemu, WALLPAPER, &covered, "eve's desktop showed")
     })();
     let _ = qemu.kill();
     let _ = qemu.wait();

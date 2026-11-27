@@ -247,6 +247,7 @@ fn test(args: &Args, install: &Path) -> Result<()> {
         &built,
         system,
         &WINDOW,
+        false,
     )?;
     println!("ok       the Dawn window showed its frame");
     Ok(())

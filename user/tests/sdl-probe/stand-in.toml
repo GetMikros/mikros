@@ -24,3 +24,11 @@ link = [
   { port = "vulkan-loader", file = "libvulkan.dlib", linking = "dynamic" },
 ]
 protocols = []
+
+# The user whom the greeter probe logs in when the key L is pressed, to
+# test the login of a user of the desktop.
+[account]
+name = "eve"
+full_name = "Eve"
+kind = "standard"
+login = "desktop"
