@@ -689,3 +689,99 @@ fn names_package_protocols_under_the_package() {
     assert!(!m.service.provides[0].own_app);
     assert_eq!(m.unknown.len(), 1);
 }
+
+fn grants(text: &str, source: Source) -> GrantList {
+    parse_grant_list(text.as_bytes(), source).unwrap()
+}
+
+#[test]
+fn a_grant_list_keeps_what_it_may_hold_and_names_the_rest() {
+    let list = Source::List { greeter: false };
+    let read = grants(
+        "permissions:\n  - admin.power.control\n  - user.power.control\n  - system.prompts.use\n  \
+         - system.gpu_priority.use\n  - system.users.authenticate\n  - user.full_disk.access\n  \
+         - admin.grants.manage\n  - user.pictures.access\n  - Bad.Name\n  - user.a.b.c\n  - default.x.read\n",
+        list,
+    );
+    assert_eq!(
+        read.names,
+        [
+            "admin.power.control",
+            "user.power.control",
+            "system.prompts.use",
+            "system.gpu_priority.use"
+        ]
+    );
+    let why: Vec<_> = read.rejected.iter().map(|(_, r)| *r).collect();
+    assert_eq!(
+        why,
+        [
+            Rejected::Scope,
+            Rejected::Reserved,
+            Rejected::Reserved,
+            Rejected::Reserved,
+            Rejected::BadName,
+            Rejected::BadName,
+            Rejected::Scope
+        ]
+    );
+}
+
+#[test]
+fn a_missing_or_empty_grant_list_is_empty() {
+    for text in ["permissions: []\n", "other: 1\n"] {
+        let read = parse_grant_list(text.as_bytes(), Source::List { greeter: false });
+        assert_eq!(read, Ok(GrantList::default()), "{text:?}");
+    }
+}
+
+#[test]
+fn a_grant_list_has_at_most_32_names() {
+    let text = |n: usize| {
+        let mut s = String::from("permissions:\n");
+        for i in 0..n {
+            s.push_str(&std::format!("  - user.thing{i}.use\n"));
+        }
+        s
+    };
+    assert_eq!(
+        grants(&text(32), Source::List { greeter: false })
+            .names
+            .len(),
+        32
+    );
+    let e = parse_grant_list(text(33).as_bytes(), Source::List { greeter: false });
+    assert_eq!(e.unwrap_err().kind, ErrorKind::TooManyPermissions);
+    assert!(parse_grant_list(b"permissions: x\n", Source::List { greeter: false }).is_err());
+}
+
+#[test]
+fn a_greeter_list_holds_one_user_permission_and_no_admin() {
+    let greeter = Source::List { greeter: true };
+    assert_eq!(check_grant("user.power.control", greeter), Ok(()));
+    assert_eq!(check_grant("system.prompts.use", greeter), Ok(()));
+    for name in [
+        "user.network.access",
+        "admin.power.control",
+        "system.users.authenticate",
+    ] {
+        assert_eq!(check_grant(name, greeter), Err(Rejected::Greeter), "{name}");
+    }
+}
+
+#[test]
+fn program_entries_obey_the_rules_for_admin_and_user_only() {
+    let program = Source::Program;
+    assert_eq!(check_grant("admin.power.control", program), Ok(()));
+    assert_eq!(check_grant("user.network.access", program), Ok(()));
+    assert_eq!(check_grant("system.users.authenticate", program), Ok(()));
+    assert_eq!(
+        check_grant("user.volumes.access", program),
+        Err(Rejected::Reserved)
+    );
+    assert_eq!(
+        check_grant("admin.grants.manage", program),
+        Err(Rejected::Reserved)
+    );
+    assert_eq!(check_grant("user.net", program), Err(Rejected::BadName));
+}

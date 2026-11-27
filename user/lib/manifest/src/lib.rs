@@ -14,6 +14,7 @@
 extern crate alloc;
 
 mod driver;
+mod grants;
 mod order;
 pub mod path;
 pub mod profiles;
@@ -24,6 +25,9 @@ mod tests;
 pub use driver::{
     Choice, DRIVER_PREFIX, Driver, DriverKind, DriverManifest, Need, choose, installed_may_match,
     is_hardware_id, parse_driver,
+};
+pub use grants::{
+    GRANTS_FILE, GrantList, MAX_GRANTS, Rejected, Source, check_grant, parse_grant_list,
 };
 pub use order::{Blocked, Order, order};
 pub use program::{NamespaceEntry, Program, ProgramManifest, parse_program};
@@ -183,6 +187,8 @@ pub enum ErrorKind {
     /// The manifest of a command has this key, which only other programs'
     /// manifests may have.
     CommandKey(&'static str),
+    /// A grant list holds more names than a list may.
+    TooManyPermissions,
     /// A package's service provides a protocol whose name does not start
     /// with the package's ID and `.`.
     BadProtocol,
