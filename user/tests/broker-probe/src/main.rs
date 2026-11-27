@@ -27,7 +27,7 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{
     Broker, BrokerAsyncClient, BrokerEvent, Decision, Grant, Permissions, PermissionsAsyncClient,
-    Prompter,
+    Prompter, SystemGrants, SystemGrantsAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::{
     HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
@@ -48,6 +48,7 @@ const CONTROL_ID: u32 = 0;
 const BROKER: &str = "/system/services/system.permbroker/permbroker";
 const PROTOCOL: &str = "mikros.permissions.Broker";
 const ASK_PROTOCOL: &str = "mikros.permissions.Permissions";
+const GRANTS_PROTOCOL: &str = "mikros.permissions.SystemGrants";
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
 const PAGE_SIZE: u64 = 4096;
@@ -352,6 +353,53 @@ async fn grant_system(b: &BrokerAsyncClient, app: &str, p: &[&str]) -> Result<()
     }
 }
 
+async fn grant_list(b: &BrokerAsyncClient, app: &str, p: &[&str]) -> Result<(), Status> {
+    let p = p.iter().map(|p| String::from(*p)).collect();
+    match b.grant_list(app.into(), p).await {
+        Ok(r) => r.map(drop),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+async fn registrations_done(b: &BrokerAsyncClient) -> Result<(), Status> {
+    match b.registrations_done().await {
+        Ok(r) => r.map(drop),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// A connection to `SystemGrants` for `caller`.
+fn connect_grants(
+    provider: &ProviderClient,
+    caller: &str,
+    reactor: &Reactor,
+) -> SystemGrantsAsyncClient {
+    let (client, server) = endpoints::<SystemGrants>().expect("a channel");
+    let _ = provider.connect(
+        GRANTS_PROTOCOL.into(),
+        None,
+        server.into_handle(),
+        process(2, caller, KOID),
+    );
+    SystemGrantsAsyncClient::new(client, reactor.clone())
+}
+
+/// The pairs that one call of `SystemGrants.List` returns after `after`.
+async fn list_grants(
+    b: &SystemGrantsAsyncClient,
+    after: (&str, &str),
+) -> Result<Vec<(String, String)>, Status> {
+    match b.list(after.0.into(), after.1.into()).await {
+        Ok(r) => r.map(|r| {
+            r.grants
+                .into_iter()
+                .map(|g| (g.app_id, g.permission))
+                .collect()
+        }),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
 const MANAGER: &str = "system.servicemgr";
 const ADMIN: &str = "test.admin";
 const APP: &str = "test.app";
@@ -587,6 +635,123 @@ async fn probe(
     c(
         "not asking for a decided permission",
         request(&admin, APP, "user.camera.use").await == Ok(Decision::Denied),
+    )?;
+
+    // Grant lists (MIKSPEC-0037.R68) and what lists the grants
+    // (MIKSPEC-0037.R65).
+    const LISTED: &str = "system.mikros.listed";
+    c(
+        "refusing a grant list without system.permissions.set",
+        grant_list(&stranger, LISTED, &["user.camera.use"]).await == Err(Status::AccessDenied),
+    )?;
+    c(
+        "refusing a grant list of an app that is not a system app's",
+        grant_list(&manager, APP, &["user.camera.use"]).await == Err(Status::InvalidArgs),
+    )?;
+    c(
+        "refusing a grant list with an unknown name",
+        grant_list(&manager, LISTED, &["user.camera.use", "nope"]).await
+            == Err(Status::InvalidArgs),
+    )?;
+    c(
+        "refusing a grant list with a reserved name",
+        grant_list(&manager, LISTED, &["user.full_disk.access"]).await == Err(Status::InvalidArgs),
+    )?;
+    c(
+        "refusing a grant list with a system name it may not hold",
+        grant_list(&manager, LISTED, &["system.devices.manage"]).await == Err(Status::InvalidArgs),
+    )?;
+    c(
+        "registering a grant list",
+        grant_list(
+            &manager,
+            LISTED,
+            &[
+                "user.camera.use",
+                "user.power.control",
+                "system.prompts.use",
+            ],
+        )
+        .await
+            == Ok(()),
+    )?;
+    c(
+        "replacing a grant list",
+        grant_list(&manager, LISTED, &["user.camera.use", "system.prompts.use"]).await == Ok(()),
+    )?;
+    c(
+        "allowing a listed permission to a user without a question",
+        request_for(&manager, identity(1, LISTED), "user.camera.use").await
+            == Ok(Decision::Allowed),
+    )?;
+    c(
+        "not allowing it to user ID 0",
+        check(&manager, 0, LISTED, "user.camera.use").await == Ok(Decision::Undetermined),
+    )?;
+    c(
+        "denying a listed system permission to user ID 0",
+        check(&manager, 0, LISTED, "system.prompts.use").await == Ok(Decision::Denied),
+    )?;
+    c(
+        "not allowing what the replaced list held",
+        check(&manager, 1, LISTED, "user.power.control").await == Ok(Decision::Undetermined),
+    )?;
+    c("refusing a grant for a listed permission", {
+        let grant = Grant {
+            user: 1,
+            app_id: LISTED.into(),
+            permission: "user.camera.use".into(),
+            decision: Decision::Denied,
+        };
+        let set = other.set_grant(grant).await;
+        matches!(set, Ok(Err(Status::InvalidArgs)))
+    })?;
+    let lister = connect_grants(&provider, MANAGER_APP, reactor);
+    let page = list_grants(&lister, ("", "")).await;
+    c(
+        "listing the grants of lists, sorted",
+        page.as_ref().is_ok_and(|p| {
+            p.windows(2).all(|w| w[0] < w[1])
+                && p.contains(&(LISTED.into(), "user.camera.use".into()))
+                && p.contains(&(LISTED.into(), "system.prompts.use".into()))
+        }),
+    )?;
+    let last = page
+        .ok()
+        .and_then(|p| p.last().cloned())
+        .unwrap_or_default();
+    c(
+        "listing nothing after the last grant",
+        list_grants(&lister, (&last.0, &last.1)).await == Ok(Vec::new()),
+    )?;
+    let nobody = connect_grants(&provider, APP, reactor);
+    c(
+        "refusing to list the grants without system.grants.manage",
+        list_grants(&nobody, ("", "")).await == Err(Status::AccessDenied),
+    )?;
+    c(
+        "ending the registrations",
+        registrations_done(&stranger).await == Err(Status::AccessDenied),
+    )?;
+    c(
+        "ending the registrations by the service manager",
+        registrations_done(&manager).await == Ok(()),
+    )?;
+    c(
+        "ending them only once",
+        registrations_done(&manager).await == Err(Status::BadState),
+    )?;
+    c(
+        "refusing a grant list afterwards",
+        grant_list(&manager, LISTED, &["user.camera.use"]).await == Err(Status::BadState),
+    )?;
+    c(
+        "registering a manifest's permissions afterwards",
+        grant_system(&manager, "test.late", &["admin.time.set"]).await == Ok(()),
+    )?;
+    c(
+        "keeping the list",
+        check(&manager, 1, LISTED, "user.camera.use").await == Ok(Decision::Allowed),
     )?;
 
     // `Ask` is for user permissions, with a decision of its own
