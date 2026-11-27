@@ -1121,3 +1121,42 @@ fn system_grants_list_every_scope_in_order_and_by_page() {
     assert_eq!(seen, all);
     assert!(s.system_grants(("~", "")).is_empty());
 }
+
+#[test]
+fn registered_permissions_are_the_admin_and_user_ones_of_manifests_and_lists() {
+    let mut s = Store::default();
+    s.grant_system(
+        "org.b",
+        &strings(&["system.devices.manage", "admin.time.set"]),
+    )
+    .unwrap();
+    s.grant_list(LIST_APP, &strings(&[LISTED, "system.prompts.use"]))
+        .unwrap();
+    let pairs = |s: &Store| s.registered();
+    assert_eq!(
+        pairs(&s),
+        [
+            ("org.b".to_string(), "admin.time.set".to_string()),
+            (LIST_APP.to_string(), LISTED.to_string())
+        ]
+    );
+    assert!(!s.done());
+    s.registrations_done().unwrap();
+    assert!(s.done());
+}
+
+#[test]
+fn only_a_registration_of_an_admin_or_user_permission_counts_for_the_log() {
+    let mut s = Store::default();
+    s.grant_system(APP, &strings(&["system.devices.manage", "admin.time.set"]))
+        .unwrap();
+    s.grant_list(LIST_APP, &strings(&[LISTED, "system.prompts.use"]))
+        .unwrap();
+    assert!(s.registered_grant(id(APP), "admin.time.set"));
+    assert!(!s.registered_grant(id(APP), "system.devices.manage"));
+    assert!(s.registered_grant(id_of(1, LIST_APP, ""), LISTED));
+    assert!(!s.registered_grant(id_of(1, LIST_APP, ""), "system.prompts.use"));
+    // Not for the client that a list does not reach, or another app.
+    assert!(!s.registered_grant(id_of(0, LIST_APP, ""), LISTED));
+    assert!(!s.registered_grant(id(APP), LISTED));
+}

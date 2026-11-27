@@ -123,6 +123,12 @@ struct Inner {
     /// of a revocation sent to them.
     confirming: RefCell<Vec<Confirming>>,
     sequence: Cell<u64>,
+    /// The processes, by kernel object ID with their process ID, that
+    /// were told `ALLOWED` for a permission registered by a manifest or a
+    /// grant list, with that permission (MIKSPEC-0037.R65).
+    logged: RefCell<BTreeMap<(u64, String), u32>>,
+    /// Whether the records of ended processes are being dropped.
+    sweeping: Cell<bool>,
     /// Through which a service that confirmed too late is killed.
     launcher: Rc<LauncherAsyncClient>,
     reactor: Reactor,
@@ -159,6 +165,8 @@ impl Broker {
             watchers: RefCell::new(Vec::new()),
             confirming: RefCell::new(Vec::new()),
             sequence: Cell::new(0),
+            logged: RefCell::default(),
+            sweeping: Cell::new(false),
             launcher: Rc::new(launcher),
             reactor,
             spawner,
@@ -289,6 +297,75 @@ fn log_elevated(client: &ClientIdentity, permission: &str) {
         Info,
         "permbroker: allowed {permission} to process {pid} ({app_id}) by the elevation of user {admin}"
     );
+}
+
+/// Logs the `admin` and `user` ones among `permissions`, which are
+/// registered for `app_id` by a manifest or a grant list.
+fn log_registered(app_id: &str, permissions: &[String]) {
+    for permission in permissions {
+        if permission.starts_with("admin.") || permission.starts_with("user.") {
+            mikros_rt::log!(Info, "permbroker: {app_id} is granted {permission}");
+        }
+    }
+}
+
+/// Logs the first answer `ALLOWED` that `client`'s process gets for
+/// `permission`, when a registration of a manifest or a grant list
+/// grants it, once the registrations are done (MIKSPEC-0037.R65). Returns
+/// whether it is a new record.
+fn note_allowed(inner: &Inner, client: &ClientIdentity, permission: &str) -> bool {
+    if client.koid == 0 {
+        return false;
+    }
+    let granted = {
+        let store = inner.store.borrow();
+        store.done() && store.registered_grant(identity(client), permission)
+    };
+    if !granted {
+        return false;
+    }
+    let key = (client.koid, String::from(permission));
+    let new = inner.logged.borrow_mut().insert(key, client.pid).is_none();
+    if new {
+        let (pid, app_id, user) = (client.pid, &client.app_id, client.user);
+        mikros_rt::log!(
+            Info,
+            "permbroker: allowed {permission} to process {pid} ({app_id}) of user {user}"
+        );
+    }
+    new
+}
+
+/// `note_allowed`, and a look at which of the recorded processes ended
+/// when the record is new.
+fn allowed(inner: &Rc<Inner>, client: &ClientIdentity, permission: &str) {
+    if note_allowed(inner, client, permission) && !inner.sweeping.replace(true) {
+        let inner = inner.clone();
+        inner.spawner.clone().spawn(forget_ended(inner));
+    }
+}
+
+/// Drops the records of `Inner::logged` of processes that ended: those
+/// that `GetInfo` does not know by their process ID, or knows with
+/// another kernel object ID, as the broker holds `system.processes.read`.
+async fn forget_ended(inner: Rc<Inner>) {
+    let processes: BTreeSet<(u64, u32)> = inner
+        .logged
+        .borrow()
+        .iter()
+        .map(|((koid, _), pid)| (*koid, *pid))
+        .collect();
+    for (koid, pid) in processes {
+        let alive = match inner.launcher.get_info(pid).await {
+            Ok(Ok(found)) => found.info.koid == koid,
+            Ok(Err(Status::NotFound)) => false,
+            _ => true,
+        };
+        if !alive {
+            inner.logged.borrow_mut().retain(|(k, _), _| *k != koid);
+        }
+    }
+    inner.sweeping.set(false);
 }
 
 fn to_midl(decision: Decision) -> midl::Decision {
@@ -479,6 +556,10 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
                     if elevated {
                         log_elevated(&q.client, &q.permission);
                     }
+                    if decision == Decision::Allowed {
+                        drop(store);
+                        allowed(&inner, &q.client, &q.permission);
+                    }
                     Ok(decision)
                 });
                 r.reply(
@@ -492,7 +573,13 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
                 // A prompt may take long, so the request runs on its own.
                 let (inner, server, caller) = (inner.clone(), server.clone(), caller.clone());
                 inner.spawner.clone().spawn(async move {
+                    let (client, permission) = (q.client.clone(), q.permission.clone());
                     let result = decide_request(&inner, &caller, q).await;
+                    if let Ok(answer) = &result
+                        && matches!(answer.decision, midl::Decision::Allowed)
+                    {
+                        allowed(&inner, &client, &permission);
+                    }
                     let _ = r.reply(server.server(), result);
                 });
                 Ok(())
@@ -553,6 +640,9 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
                 let result = inner.authorize(&caller, Call::GrantSystem).and_then(|()| {
                     let mut store = inner.store.borrow_mut();
                     let granted = store.grant_system(&q.app_id, &q.permissions);
+                    if granted.is_ok() && store.done() {
+                        log_registered(&q.app_id, &q.permissions);
+                    }
                     granted
                         .map(|()| BrokerGrantSystemResponse {})
                         .map_err(status)
@@ -571,7 +661,13 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
                 let result = inner
                     .authorize(&caller, Call::RegistrationsDone)
                     .and_then(|()| {
-                        let done = inner.store.borrow_mut().registrations_done();
+                        let mut store = inner.store.borrow_mut();
+                        let done = store.registrations_done();
+                        if done.is_ok() {
+                            for (app_id, permission) in store.registered() {
+                                log_registered(&app_id, &[permission]);
+                            }
+                        }
                         done.map(|()| BrokerRegistrationsDoneResponse {})
                             .map_err(status)
                     });
@@ -619,6 +715,9 @@ async fn ask(
     let decision = inner
         .request(caller, String::new(), &permission, String::new())
         .await?;
+    if decision == Decision::Allowed {
+        note_allowed(inner, caller, &permission);
+    }
     Ok(midl::PermissionsAskResponse {
         decision: match decision {
             Decision::Allowed => midl::Decision::Allowed,

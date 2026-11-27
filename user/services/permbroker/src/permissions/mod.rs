@@ -635,17 +635,43 @@ impl Store {
     /// `SYSTEM_LIST_MAX` of those after the pair `after`
     /// (MIKSPEC-0037.R65).
     pub fn system_grants(&self, after: (&str, &str)) -> Vec<(String, String)> {
+        let mut all = self.system_grants_all();
+        all.retain(|(a, p)| (a.as_str(), p.as_str()) > after);
+        all.truncate(SYSTEM_LIST_MAX);
+        all
+    }
+
+    /// Every permission that a manifest or a list granted, sorted.
+    fn system_grants_all(&self) -> Vec<(String, String)> {
         let mut all: BTreeSet<(&str, &str)> = BTreeSet::new();
         for map in [&self.system, &self.lists] {
-            for (app_id, set) in map.range(String::from(after.0)..) {
+            for (app_id, set) in map {
                 all.extend(set.iter().map(|p| (app_id.as_str(), p.as_str())));
             }
         }
+        all.into_iter().map(|(a, p)| (a.into(), p.into())).collect()
+    }
+
+    /// Whether `registrations_done` has succeeded.
+    pub fn done(&self) -> bool {
+        self.done
+    }
+
+    /// Every `admin` and `user` permission that a manifest or a grant
+    /// list granted to an app ID, by app ID and permission
+    /// (MIKSPEC-0037.R65).
+    pub fn registered(&self) -> Vec<(String, String)> {
+        let all = self.system_grants_all();
         all.into_iter()
-            .filter(|&pair| pair > after)
-            .take(SYSTEM_LIST_MAX)
-            .map(|(a, p)| (a.into(), p.into()))
+            .filter(|(_, p)| matches!(scope(p), Some(Scope::Admin | Scope::User)))
             .collect()
+    }
+
+    /// Whether the answer `ALLOWED` of `check` for `permission` comes from a
+    /// registration of an `admin` or `user` permission.
+    pub fn registered_grant(&self, client: Identity<'_>, permission: &str) -> bool {
+        matches!(scope(permission), Some(Scope::Admin | Scope::User))
+            && self.system_of(client, permission)
     }
 
     /// Registers `permissions` as the grant list of `app_id`, which
