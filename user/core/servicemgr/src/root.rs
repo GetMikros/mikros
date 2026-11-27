@@ -117,6 +117,27 @@ async fn new_services(
         .collect()
 }
 
+/// The entries of `permissions`, a program manifest's, that may be
+/// registered: an `admin` or `user` entry that breaks the rules is logged
+/// and left out (MIKSPEC-0037.R59).
+fn usable_permissions(
+    path: &str,
+    permissions: Vec<alloc::string::String>,
+) -> Vec<alloc::string::String> {
+    permissions
+        .into_iter()
+        .filter(
+            |name| match mikros_manifest::check_grant(name, mikros_manifest::Source::Program) {
+                Ok(()) => true,
+                Err(why) => {
+                    mikros_rt::log!(Error, "{path}: {name} is ignored: {why:?}");
+                    false
+                }
+            },
+        )
+        .collect()
+}
+
 /// Registers the permissions of each valid program manifest with the
 /// broker. A manifest that is not valid, or whose app ID is that of a
 /// service among `services`, is logged and ignored.
@@ -176,7 +197,8 @@ async fn register_programs(
             );
             continue;
         }
-        match broker::grant(&broker, &program.app_id, program.permissions).await {
+        let permissions = usable_permissions(&path, program.permissions);
+        match broker::grant_each(&broker, &path, &program.app_id, permissions).await {
             Ok(()) => registered += 1,
             Err(why) => mikros_rt::log!(Error, "{path}: {why}"),
         }

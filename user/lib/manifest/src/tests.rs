@@ -262,7 +262,7 @@ fn priority_is_read_without_a_range() {
 const PROGRAM: &str = "app_id: system.console
 binary: /system/bin/console
 permissions:
-  - devices.framebuffer
+  - system.devices.read
 namespace:
   - path: /system
     rights: rx
@@ -276,7 +276,7 @@ fn reads_a_program_manifest() {
     let p = read.program;
     assert_eq!(p.app_id, "system.console");
     assert_eq!(p.binary, "/system/bin/console");
-    assert_eq!(p.permissions, ["devices.framebuffer"]);
+    assert_eq!(p.permissions, ["system.devices.read"]);
     assert_eq!(
         p.namespace,
         [NamespaceEntry {
@@ -784,4 +784,27 @@ fn program_entries_obey_the_rules_for_admin_and_user_only() {
         Err(Rejected::Reserved)
     );
     assert_eq!(check_grant("user.net", program), Err(Rejected::BadName));
+}
+
+#[test]
+fn a_program_manifest_has_at_most_32_permissions_of_three_scopes() {
+    let text = |permissions: &str| {
+        format!("app_id: system.console\nbinary: /system/bin/console\npermissions:\n{permissions}")
+    };
+    let kind = |text: &str| {
+        parse_program("system.console.yaml", text.as_bytes())
+            .map(|m| m.program.permissions.len())
+            .map_err(|e| e.kind)
+    };
+    let many = |n: usize| {
+        (0..n)
+            .map(|i| format!("  - user.thing{i}.use\n"))
+            .collect::<String>()
+    };
+    assert_eq!(kind(&text(&many(32))), Ok(32));
+    assert_eq!(kind(&text(&many(33))), Err(ErrorKind::TooManyPermissions));
+    let default = "  - default.network.use\n";
+    assert_eq!(kind(&text(default)), Err(ErrorKind::BadScope));
+    let mixed = "  - system.a.use\n  - admin.a.use\n  - user.a.use\n";
+    assert_eq!(kind(&text(mixed)), Ok(3));
 }

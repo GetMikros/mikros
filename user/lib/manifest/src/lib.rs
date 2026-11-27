@@ -187,7 +187,10 @@ pub enum ErrorKind {
     /// The manifest of a command has this key, which only other programs'
     /// manifests may have.
     CommandKey(&'static str),
-    /// A grant list holds more names than a list may.
+    /// A program manifest lists a permission of a scope other than
+    /// `system`, `admin` and `user`.
+    BadScope,
+    /// A grant list or a program manifest holds more names than it may.
     TooManyPermissions,
     /// A package's service provides a protocol whose name does not start
     /// with the package's ID and `.`.

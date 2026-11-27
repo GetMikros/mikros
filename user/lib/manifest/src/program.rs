@@ -92,12 +92,30 @@ pub fn parse_program(file_name: &str, bytes: &[u8]) -> Result<ProgramManifest, E
     let program = Program {
         app_id: app_id.into(),
         binary: binary.into(),
-        permissions: crate::permissions(map)?,
+        permissions: permissions(map)?,
         namespace,
         spawned_by: strings(map, "spawned_by")?,
         command,
     };
     Ok(ProgramManifest { program, unknown })
+}
+
+/// The permissions of a program manifest: at most `MAX_GRANTS`, each of
+/// the scopes `system`, `admin` and `user` (MIKSPEC-0036.R54). Whether the
+/// `admin` and `user` ones may be registered is for `check_grant`, entry
+/// by entry.
+fn permissions(map: mikros_yaml::Map<'_>) -> Result<Vec<String>, Error> {
+    let items = list(map, "permissions")?;
+    if items.len() > crate::MAX_GRANTS {
+        return Err(error(&items[0], ErrorKind::TooManyPermissions));
+    }
+    for item in items {
+        let scope = item.string()?.split('.').next().unwrap_or_default();
+        if !matches!(scope, "system" | "admin" | "user") {
+            return Err(error(item, ErrorKind::BadScope));
+        }
+    }
+    crate::permissions(map)
 }
 
 /// The entries of `namespace` in `map`, none when it is absent, adding
