@@ -16,6 +16,9 @@ env:
 jobs:
   ci:
     runs-on: ubuntu-24.04
+    # A push to main publishes the sysroot as a release (MIKSPEC-0062.R11).
+    permissions:
+      contents: write
     # Debian trixie has the btrfs-progs and QEMU versions the tools need.
     container: debian:trixie
     steps:
@@ -26,11 +29,14 @@ jobs:
             build-essential ca-certificates curl git \
             qemu-system-x86 gdb btrfs-progs exfatprogs \
             cmake ninja-build clang lld python3 zstd bison \
-            libexpat1-dev pkg-config python3-mako python3-packaging python3-yaml flex
+            libexpat1-dev pkg-config python3-mako python3-packaging python3-yaml flex gh
       - uses: actions/checkout@v4
         with:
           # The commit checks look at every commit since the base branch.
           fetch-depth: 0
+          # The token that can write contents is only given to the step that
+          # publishes, not left in the checkout for the code that CI runs.
+          persist-credentials: false
       - name: Set up the build
         id: setup
         uses: ./.github/actions/setup
@@ -44,6 +50,72 @@ jobs:
           done
       - name: Test
         run: cargo xtask test --host
+      # For a commit of main that passed, the sysroot and the toolchain
+      # that the build made are the release `sysroot-<commit>` with their
+      # two archives and the SHA-256 of each, and `sysroot-latest` has the
+      # same files for the newest commit (MIKSPEC-0062.R22). A release is
+      # deleted only to make `sysroot-latest` again.
+      - name: Publish the sysroot and the toolchain
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          commit=$(git rev-parse --short=12 HEAD)
+          llvm=$(ls -d target/llvm/llvm-project-*.src | head -n 1 | sed 's/.*llvm-project-//; s/\.src$//')
+          cmake=$(target/cmake/install/bin/cmake --version | head -n 1 | sed 's/.* //')
+          meson_dir=$(ls -d target/meson/meson-*/ | head -n 1)
+          meson_dir=${meson_dir%/}
+          meson=${meson_dir##*/meson-}
+          manifest() {
+            printf 'commit: %s\nllvm: %s\ncmake: %s\nmeson: %s\n' "$GITHUB_SHA" "$llvm" "$cmake" "$meson"
+          }
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          mkdir "$stage/out"
+          # The sysroot, with its manifest at the root of the archive.
+          mkdir "$stage/sysroot-files"
+          cp -a target/sysroot "$stage/sysroot-files/sysroot"
+          manifest > "$stage/sysroot-files/sysroot-manifest.yaml"
+          # The toolchain as copies, without debug sections, so that the
+          # cached builds that the next run restores stay as they are.
+          mkdir -p "$stage/toolchain-files/llvm" "$stage/toolchain-files/cmake" "$stage/toolchain-files/meson"
+          cp -a target/llvm/install "$stage/toolchain-files/llvm/install"
+          cp -a target/cmake/install "$stage/toolchain-files/cmake/install"
+          cp -a "$meson_dir" "$stage/toolchain-files/meson/"
+          manifest > "$stage/toolchain-files/toolchain-manifest.yaml"
+          find "$stage/toolchain-files" -type f \( -perm /111 -o -name '*.so*' \) |
+            while read -r file; do
+              if head -c 4 "$file" | grep -q 'ELF'; then
+                strip --strip-debug "$file" 2> /dev/null || true
+              fi
+            done
+          cd "$stage/out"
+          sysroot="mikros-sysroot-$commit.tar.zst"
+          toolchain="mikros-toolchain-$commit.tar.zst"
+          tar --use-compress-program="zstd -19 -T0" -C "$stage/sysroot-files" -cf "$sysroot" .
+          tar --use-compress-program="zstd -19 -T0" -C "$stage/toolchain-files" -cf "$toolchain" .
+          sha256sum "$sysroot" > "$sysroot.sha256"
+          sha256sum "$toolchain" > "$toolchain.sha256"
+          files="$sysroot $sysroot.sha256 $toolchain $toolchain.sha256"
+          if ! gh release view "sysroot-$commit" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "sysroot-$commit" $files --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --prerelease \
+              --title "Mikros sysroot and toolchain $commit" \
+              --notes "The sysroot and the toolchain of cargo xtask at commit $GITHUB_SHA."
+          fi
+          # `sysroot-latest` moves only to the commit that is the head of
+          # main, so that a run that ends late does not set it back.
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            if gh release view sysroot-latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              gh release delete sysroot-latest --cleanup-tag --yes --repo "$GITHUB_REPOSITORY"
+            fi
+            gh release create sysroot-latest $files --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --prerelease \
+              --title "Mikros sysroot and toolchain, newest" \
+              --notes "The newest release is sysroot-$commit."
+          fi
       # The caches are saved even when the tests fail, once the build
       # succeeded, under the keys and paths that the setup restored them
       # with. A cache whose exact key was found is not saved again.
