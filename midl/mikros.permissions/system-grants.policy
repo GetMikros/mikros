@@ -1,0 +1,3 @@
+# Access policy of the methods of system-grants.midl (MIKSPEC-0023.R47).
+
+SystemGrants.List: permission:system.grants.manage

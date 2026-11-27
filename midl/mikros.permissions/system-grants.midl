@@ -1,0 +1,14 @@
+// MIKSPEC-0037.R65
+
+library mikros.permissions;
+using mikros.base;
+
+type SystemGrant = struct {
+    app_id string<128>;
+    permission string<64>;
+};
+
+protocol SystemGrants {
+    @1 List(after_app_id string<128>, after_permission string<64>)
+        -> (grants vector<SystemGrant, 128>) error base.Status;
+};

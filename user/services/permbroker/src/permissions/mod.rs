@@ -67,6 +67,8 @@ pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
     "system.devices.manage",
     "admin.power.control",
 ];
+/// The most grants one `SystemGrants.List` reply holds.
+pub const SYSTEM_LIST_MAX: usize = 128;
 /// The most grants one `ListGrants` reply holds.
 pub const LIST_MAX: usize = 256;
 /// The permission that `ListGrants` for another user, and `SetGrant` for
@@ -142,6 +144,7 @@ pub enum Call {
     SetGrant,
     ListGrants,
     GrantSystem,
+    ListSystemGrants,
     RegisterPrompter,
 }
 
@@ -161,7 +164,7 @@ impl Call {
         match self {
             Call::Check | Call::Watch => "system.permissions.read",
             Call::Request => "system.permissions.request",
-            Call::SetGrant | Call::ListGrants => "system.grants.manage",
+            Call::SetGrant | Call::ListGrants | Call::ListSystemGrants => "system.grants.manage",
             Call::GrantSystem => "system.permissions.set",
             Call::RegisterPrompter => "system.prompts.use",
         }
@@ -601,6 +604,24 @@ impl Store {
     /// none, when one is unknown or a `default` one.
     pub fn grant_system(&mut self, app_id: &str, permissions: &[String]) -> Result<(), Failure> {
         self.add_system(app_id, permissions)
+    }
+
+    /// The permissions that manifests and grant lists grant to app IDs, of
+    /// every scope, by app ID and then permission in byte order, at most
+    /// `SYSTEM_LIST_MAX` of those after the pair `after`
+    /// (MIKSPEC-0037.R65).
+    pub fn system_grants(&self, after: (&str, &str)) -> Vec<(String, String)> {
+        let mut all: BTreeSet<(&str, &str)> = BTreeSet::new();
+        for map in [&self.system, &self.lists] {
+            for (app_id, set) in map.range(String::from(after.0)..) {
+                all.extend(set.iter().map(|p| (app_id.as_str(), p.as_str())));
+            }
+        }
+        all.into_iter()
+            .filter(|&pair| pair > after)
+            .take(SYSTEM_LIST_MAX)
+            .map(|(a, p)| (a.into(), p.into()))
+            .collect()
     }
 
     /// Adds `permissions` to the grant list of `app_id`, as

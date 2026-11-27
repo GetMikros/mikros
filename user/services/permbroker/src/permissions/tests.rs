@@ -179,6 +179,7 @@ fn each_call_needs_its_permission() {
         (Call::Watch, "system.permissions.read"),
         (Call::SetGrant, "system.grants.manage"),
         (Call::ListGrants, "system.grants.manage"),
+        (Call::ListSystemGrants, "system.grants.manage"),
         (Call::GrantSystem, "system.permissions.set"),
         (Call::RegisterPrompter, "system.prompts.use"),
     ];
@@ -997,4 +998,45 @@ fn grant_lists_are_not_written_to_the_grants_file() {
         s.grant_list(APP, &strings(&[DEFAULT_PERMISSION])),
         Err(Failure::InvalidArgs)
     );
+}
+
+#[test]
+fn system_grants_list_every_scope_in_order_and_by_page() {
+    let mut s = store();
+    s.grant_system("org.b", &strings(&["user.shares.use", "admin.time.set"]))
+        .unwrap();
+    s.grant_list("org.a", &strings(&[LISTED, "system.prompts.use"]))
+        .unwrap();
+    s.grant_system("org.a", &strings(&["admin.time.set", LISTED]))
+        .unwrap();
+    let all = s.system_grants(("", ""));
+    let pairs: Vec<(&str, &str)> = all.iter().map(|(a, p)| (a.as_str(), p.as_str())).collect();
+    let ours: Vec<_> = pairs
+        .iter()
+        .filter(|(a, _)| a.starts_with("org."))
+        .collect();
+    assert_eq!(
+        ours,
+        [
+            &("org.a", "admin.time.set"),
+            &("org.a", "system.prompts.use"),
+            &("org.a", LISTED),
+            &("org.b", "admin.time.set"),
+            &("org.b", "user.shares.use"),
+        ]
+    );
+    assert!(pairs.windows(2).all(|w| w[0] < w[1]));
+    // Paging: each page starts after the last pair of the one before.
+    let mut seen = Vec::new();
+    let mut after = (String::new(), String::new());
+    loop {
+        let page = s.system_grants((&after.0, &after.1));
+        let Some(last) = page.last().cloned() else {
+            break;
+        };
+        seen.extend(page);
+        after = last;
+    }
+    assert_eq!(seen, all);
+    assert!(s.system_grants(("~", "")).is_empty());
 }

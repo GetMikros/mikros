@@ -15,3 +15,6 @@ provides:
   # Questions about the caller's own permissions, for every process
   # (MIKSPEC-0094.R5).
   - protocol: mikros.permissions.Permissions
+  # The grants of manifests and grant lists (MIKSPEC-0037.R65); List needs
+  # system.grants.manage, which the broker checks.
+  - protocol: mikros.permissions.SystemGrants

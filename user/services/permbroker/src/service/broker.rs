@@ -203,6 +203,31 @@ impl Broker {
         });
     }
 
+    /// Serves `SystemGrants` on the connection `end` of `caller` until it
+    /// closes: `List` for callers that hold `system.grants.manage`.
+    pub fn serve_system_grants(&self, end: ServerEnd<midl::SystemGrants>, caller: ClientIdentity) {
+        let inner = self.0.clone();
+        let spawner = inner.spawner.clone();
+        spawner.spawn(async move {
+            use midl::SystemGrantsRequest as R;
+            let server = midl::SystemGrantsAsyncServer::new(end, inner.reactor.clone());
+            while let Ok(request) = server.next().await {
+                let R::List(q, r) = request;
+                let result = inner.authorize(&caller, Call::ListSystemGrants).map(|()| {
+                    let after = (q.after_app_id.as_str(), q.after_permission.as_str());
+                    let grants = inner.store.borrow().system_grants(after);
+                    midl::SystemGrantsListResponse {
+                        grants: grants
+                            .into_iter()
+                            .map(|(app_id, permission)| midl::SystemGrant { app_id, permission })
+                            .collect(),
+                    }
+                });
+                let _ = r.reply(server.server(), result);
+            }
+        });
+    }
+
     /// Serves `Permissions` on the connection `end` of `caller` until it
     /// closes: `Ask` for the caller's own identity, which needs no
     /// permission (MIKSPEC-0094.R5).

@@ -4,7 +4,7 @@
 //! must be a read-only, write-sealed memory object, and starts from the
 //! trusted grants of `crate::permissions::Store::bootstrap`. Without a
 //! valid manifest it ends. It then serves `mikros.permissions.Broker`, and
-//! `Permissions` and `AppNumbers` for every process, on
+//! `Permissions` and `AppNumbers` for every process, and `SystemGrants`, on
 //! each connection that the service manager forwards on its `PROVIDER`
 //! startup handle, to the caller that the connection names. It asks the
 //! session manager for `admin` permissions through its own directory.
@@ -32,6 +32,8 @@ const APP_ID: &str = "system.permbroker";
 const PROTOCOL: &str = "mikros.permissions.Broker";
 /// The numbers of app IDs, for every process.
 const APP_NUMBERS: &str = "mikros.permissions.AppNumbers";
+/// The grants of manifests and grant lists (MIKSPEC-0037.R65).
+const SYSTEM_GRANTS: &str = "mikros.permissions.SystemGrants";
 /// `Ask`, for every process (MIKSPEC-0094.R5).
 const PERMISSIONS: &str = "mikros.permissions.Permissions";
 /// The `id` of the manifest among the `USER` startup handles.
@@ -78,6 +80,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 broker.serve(ServerEnd::new(c.server), c.client);
             } else if c.protocol == APP_NUMBERS && c.instance.is_none() {
                 broker.serve_numbers(ServerEnd::new(c.server), c.client);
+            } else if c.protocol == SYSTEM_GRANTS && c.instance.is_none() {
+                broker.serve_system_grants(ServerEnd::new(c.server), c.client);
             } else if c.protocol == PERMISSIONS && c.instance.is_none() {
                 broker.serve_permissions(ServerEnd::new(c.server), c.client);
             }
