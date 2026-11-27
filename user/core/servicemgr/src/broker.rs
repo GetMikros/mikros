@@ -88,31 +88,6 @@ pub async fn grant(
     }
 }
 
-/// Registers `permissions` for `app_id` as `grant` does, except that the
-/// entries that the broker refuses are logged for `source` and left out,
-/// and the others registered one by one (MIKSPEC-0037.R59).
-pub async fn grant_each(
-    broker: &BrokerAsyncClient,
-    source: &str,
-    app_id: &str,
-    permissions: Vec<String>,
-) -> Result<(), String> {
-    if grant(broker, app_id, permissions.clone()).await.is_ok() {
-        return Ok(());
-    }
-    let mut failed = false;
-    for permission in permissions {
-        if let Err(why) = grant(broker, app_id, alloc::vec![permission.clone()]).await {
-            mikros_rt::log!(Error, "{source}: {permission} is ignored: {why}");
-            failed = true;
-        }
-    }
-    match failed {
-        true => Ok(()),
-        false => Err(format!("registering {app_id} failed")),
-    }
-}
-
 /// A memory object that holds `bytes`, sealed against writes, as a
 /// handle without `WRITE`.
 fn sealed_copy(bytes: &[u8]) -> Result<OwnedHandle, sys::Status> {

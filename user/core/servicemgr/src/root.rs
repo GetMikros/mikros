@@ -119,23 +119,31 @@ async fn new_services(
 }
 
 /// The entries of `permissions`, a program manifest's, that may be
-/// registered: an `admin` or `user` entry that breaks the rules is logged
-/// and left out (MIKSPEC-0037.R59).
+/// registered: an `admin` or `user` entry that breaks the rules, or that
+/// the broker does not know (`known`, sorted), is logged and left out
+/// (MIKSPEC-0037.R59).
 fn usable_permissions(
     path: &str,
     permissions: Vec<alloc::string::String>,
+    known: &[alloc::string::String],
 ) -> Vec<alloc::string::String> {
     permissions
         .into_iter()
-        .filter(
-            |name| match mikros_manifest::check_grant(name, mikros_manifest::Source::Program) {
-                Ok(()) => true,
-                Err(why) => {
-                    mikros_rt::log!(Error, "{path}: {name} is ignored: {why:?}");
-                    false
-                }
-            },
-        )
+        .filter(|name| {
+            let source = mikros_manifest::Source::Program;
+            if let Err(why) = mikros_manifest::check_grant(name, source) {
+                mikros_rt::log!(Error, "{path}: {name} is ignored: {why:?}");
+                false
+            } else if known.binary_search(name).is_err() {
+                mikros_rt::log!(
+                    Error,
+                    "{path}: {name} is ignored: the broker does not know it"
+                );
+                false
+            } else {
+                true
+            }
+        })
         .collect()
 }
 
@@ -163,6 +171,7 @@ async fn register_programs(
         );
         return;
     };
+    let known = crate::grants::known_permissions(&broker).await;
     let mut registered = 0;
     for name in names {
         let path = format!("{PROGRAMS_PATH}/{name}");
@@ -198,8 +207,8 @@ async fn register_programs(
             );
             continue;
         }
-        let permissions = usable_permissions(&path, program.permissions);
-        match broker::grant_each(&broker, &path, &program.app_id, permissions).await {
+        let permissions = usable_permissions(&path, program.permissions, &known);
+        match broker::grant(&broker, &program.app_id, permissions).await {
             Ok(()) => registered += 1,
             Err(why) => mikros_rt::log!(Error, "{path}: {why}"),
         }

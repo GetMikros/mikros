@@ -135,7 +135,7 @@ async fn register_lists(reactor: &Reactor, system: &NodeAsyncClient, broker: &Br
 
 /// The names of the permissions that the broker knows, sorted: the pages
 /// of `ListPermissions` up to the empty one.
-async fn known_permissions(broker: &BrokerAsyncClient) -> Vec<String> {
+pub async fn known_permissions(broker: &BrokerAsyncClient) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     loop {
         let after = names.last().cloned().unwrap_or_default();
