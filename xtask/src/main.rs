@@ -26,6 +26,7 @@ mod fetch;
 mod firmware;
 mod fonts;
 mod fuzz;
+mod git_deps;
 mod glslang;
 mod image;
 mod input;

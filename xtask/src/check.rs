@@ -32,6 +32,27 @@ fn user_cargo() -> Command {
     command
 }
 
+/// The packages of the user workspace, with the paths of their manifests.
+fn user_manifests() -> Result<Vec<(String, std::path::PathBuf)>> {
+    let output = user_cargo()
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .context("failed to run cargo metadata")?;
+    if !output.status.success() {
+        bail!("cargo metadata failed in the user workspace");
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let mut found = Vec::new();
+    for package in metadata["packages"].as_array().context("no packages")? {
+        let name = package["name"].as_str().unwrap_or("?").to_owned();
+        let manifest = package["manifest_path"]
+            .as_str()
+            .context("no manifest path")?;
+        found.push((name, manifest.into()));
+    }
+    Ok(found)
+}
+
 /// The members of the user workspace whose sources have tests but which
 /// are not among its default members, so that `cargo test` in the
 /// workspace would leave their tests out.
@@ -278,6 +299,14 @@ pub fn run(args: &Args) -> Result<()> {
 
     if let Err(problem) = crate::apps::check_all() {
         problems.push(format!("{problem:#}"));
+    }
+
+    // Crates from git repositories are pinned by commit (MIKSPEC-0062.R21).
+    match user_manifests()
+        .and_then(|m| crate::git_deps::check(&crate::workspace_root().join("user"), &m))
+    {
+        Ok(found) => problems.extend(found),
+        Err(problem) => problems.push(format!("{problem:#}")),
     }
 
     let mut fmt = cargo();
