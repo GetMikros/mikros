@@ -40,6 +40,7 @@ repository. Code and commits refer to them by ID, such as `MIKSPEC-0012.R3`.
 | `kernel/gdb/` | GDB commands for inspecting the kernel |
 | `user/bin/` | Programs: the shell `msh`, the text console, the compositor, setup and the command-line utilities |
 | `user/core/` | `init`, the initial process, and the process and service managers |
+| `user/apps/` | System apps, each a package with `kind = "app"`, installed as `/system/apps/system.mikros.<name>/` |
 | `user/services/` | System services, each with its manifest |
 | `user/drivers/` | Device and file system drivers, each with its `driver.yaml` |
 | `user/lib/` | Libraries that two or more packages, or xtask, use |
