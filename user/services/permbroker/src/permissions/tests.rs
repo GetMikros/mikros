@@ -229,7 +229,7 @@ fn grant_system_adds_and_checks_every_name_first() {
     );
     s.grant_system(APP, &strings(&["system.devices.manage"]))
         .unwrap();
-    let bad = strings(&["admin.power.control", "user.camera.use"]);
+    let bad = strings(&["admin.power.control", DEFAULT_PERMISSION]);
     assert_eq!(s.grant_system(APP, &bad), Err(Failure::InvalidArgs));
     let unknown = strings(&["admin.power.control", "nope"]);
     assert_eq!(s.grant_system(APP, &unknown), Err(Failure::NotFound));
@@ -857,4 +857,144 @@ fn taking_full_disk_away_revokes_the_folders_without_a_grant_of_their_own() {
         .set_grant_revoking(&grant(1, FULL_DISK, Decision::Denied))
         .unwrap();
     assert!(again.is_empty());
+}
+
+const LISTED: &str = "user.power.control";
+
+fn id_of<'a>(user: u32, app_id: &'a str, checksum: &'static str) -> Identity<'a> {
+    Identity {
+        user,
+        checksum,
+        ..id(app_id)
+    }
+}
+
+fn answer(s: &Store, client: Identity<'_>, permission: &str) -> Decision {
+    s.check(client, permission).unwrap().0
+}
+
+#[test]
+fn a_manifest_grants_a_user_permission_to_every_user() {
+    let mut s = store();
+    s.grant_system(APP, &strings(&[USER_PERMISSION])).unwrap();
+    for user in [0, 1, 1000] {
+        let c = id_of(user, APP, "");
+        assert_eq!(answer(&s, c, USER_PERMISSION), Decision::Allowed);
+        assert_eq!(
+            s.request(c, USER_PERMISSION),
+            Ok((Requested::Decided(Decision::Allowed), false))
+        );
+    }
+    // Neither a portable app nor a build has it, and another app does not.
+    assert_ne!(
+        answer(&s, id_of(1, APP, "abc"), USER_PERMISSION),
+        Decision::Allowed
+    );
+    assert_ne!(
+        answer(&s, id_of(1, APP, BUILD), USER_PERMISSION),
+        Decision::Allowed
+    );
+    assert_ne!(
+        answer(&s, id_of(1, "org.other", ""), USER_PERMISSION),
+        Decision::Allowed
+    );
+}
+
+#[test]
+fn a_grant_list_grants_every_scope_to_every_user_but_zero() {
+    let mut s = store();
+    let names = strings(&[LISTED, "admin.power.control", "system.prompts.use"]);
+    s.grant_list(APP, &names).unwrap();
+    for name in &names {
+        for user in [1, 2, 1000] {
+            let c = id_of(user, APP, "");
+            assert_eq!(answer(&s, c, name), Decision::Allowed, "{name}");
+            assert_eq!(
+                s.request(c, name),
+                Ok((Requested::Decided(Decision::Allowed), false))
+            );
+        }
+        assert_ne!(
+            answer(&s, id_of(0, APP, ""), name),
+            Decision::Allowed,
+            "{name}"
+        );
+        assert_ne!(
+            answer(&s, id_of(1, APP, "abc"), name),
+            Decision::Allowed,
+            "{name}"
+        );
+        assert_ne!(
+            answer(&s, id_of(1, APP, BUILD), name),
+            Decision::Allowed,
+            "{name}"
+        );
+    }
+    // User ID 0 is asked as for any permission nothing grants.
+    assert_eq!(
+        s.request(id_of(0, APP, ""), LISTED),
+        Ok((Requested::Ask, false))
+    );
+    assert_eq!(
+        s.request(id_of(0, APP, ""), "admin.power.control"),
+        Ok((Requested::Authorize, false))
+    );
+}
+
+#[test]
+fn a_grant_list_wins_over_a_stored_grant_and_leaves_it_alone() {
+    let mut s = store();
+    s.set_grant(&grant(1, USER_PERMISSION, Decision::Denied))
+        .unwrap();
+    s.grant_list(APP, &strings(&[USER_PERMISSION])).unwrap();
+    assert_eq!(answer(&s, id(APP), USER_PERMISSION), Decision::Allowed);
+    // The stored grant is still there, and shows again without the list.
+    assert_eq!(s.list(1).len(), 1);
+    let mut kept = Store::default();
+    kept.set_grant(&grant(1, USER_PERMISSION, Decision::Denied))
+        .unwrap();
+    assert_eq!(answer(&kept, id(APP), USER_PERMISSION), Decision::Denied);
+}
+
+#[test]
+fn set_grant_fails_for_what_a_manifest_or_a_list_grants() {
+    let mut s = store();
+    s.grant_system(APP, &strings(&[USER_PERMISSION])).unwrap();
+    s.grant_list("org.listed", &strings(&[LISTED])).unwrap();
+    let set = |app: &str, permission: &str, decision| Grant {
+        app_id: app.to_string(),
+        ..grant(1, permission, decision)
+    };
+    for decision in [Decision::Allowed, Decision::Denied, Decision::Undetermined] {
+        assert_eq!(
+            s.set_grant(&set(APP, USER_PERMISSION, decision)),
+            Err(Failure::InvalidArgs)
+        );
+        assert_eq!(
+            s.set_grant_revoking(&set("org.listed", LISTED, decision)),
+            Err(Failure::InvalidArgs)
+        );
+    }
+    // Other permissions of the same apps are still settable.
+    assert!(
+        s.set_grant(&set(APP, "user.shares.use", Decision::Allowed))
+            .is_ok()
+    );
+    assert!(s.list(1).iter().all(|g| g.permission != LISTED));
+}
+
+#[test]
+fn grant_lists_are_not_written_to_the_grants_file() {
+    let mut s = store();
+    s.grant_list(APP, &strings(&[LISTED])).unwrap();
+    s.grant_system(APP, &strings(&[USER_PERMISSION])).unwrap();
+    assert!(s.list(1).is_empty());
+    assert_eq!(
+        s.grant_list(APP, &strings(&["nope"])),
+        Err(Failure::NotFound)
+    );
+    assert_eq!(
+        s.grant_list(APP, &strings(&[DEFAULT_PERMISSION])),
+        Err(Failure::InvalidArgs)
+    );
 }

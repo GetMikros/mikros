@@ -66,7 +66,7 @@ impl Model {
                 .system
                 .contains(&(client.app_id.to_owned(), permission.to_owned()));
         let decision = match scope {
-            Scope::System | Scope::Admin if system => Decision::Allowed,
+            Scope::System | Scope::Admin | Scope::User if system => Decision::Allowed,
             Scope::Admin if self.holds(client, permission) => Decision::Allowed,
             Scope::System | Scope::Admin => Decision::Undetermined,
             Scope::User => grant,
@@ -134,11 +134,15 @@ fuzz_target!(|data: &[u8]| {
                     permission: permission.into(),
                     decision,
                 };
+                let registered = model
+                    .system
+                    .contains(&(app_id.to_owned(), permission.to_owned()));
                 let expected = match (scope(permission), decision) {
                     (None, _) => Err(Failure::NotFound),
                     (Some(Scope::System | Scope::Admin), _) | (_, Decision::Undetermined) => {
                         Err(Failure::InvalidArgs)
                     }
+                    (Some(_), _) if registered => Err(Failure::InvalidArgs),
                     (Some(scope), _) => {
                         let key = (client.user, app_id.into(), String::new(), permission.into());
                         let before = model
@@ -191,11 +195,11 @@ fuzz_target!(|data: &[u8]| {
                 let all = [permission.to_owned()];
                 let expected = match scope(permission) {
                     None => Err(Failure::NotFound),
-                    Some(Scope::System | Scope::Admin) => {
+                    Some(Scope::System | Scope::Admin | Scope::User) => {
                         model.system.insert((app_id.into(), permission.into()));
                         Ok(())
                     }
-                    Some(_) => Err(Failure::InvalidArgs),
+                    Some(Scope::Default) => Err(Failure::InvalidArgs),
                 };
                 assert_eq!(store.grant_system(app_id, &all), expected, "GrantSystem");
             }

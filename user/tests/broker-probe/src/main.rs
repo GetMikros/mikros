@@ -422,8 +422,8 @@ async fn probe(
         check(&manager, 1, APP, "user.camera.use").await == Ok(Decision::Undetermined),
     )?;
     c(
-        "refusing to grant a user permission as a system one",
-        grant_system(&manager, ADMIN, &["user.camera.use"]).await == Err(Status::InvalidArgs),
+        "refusing to register a default permission",
+        grant_system(&manager, ADMIN, &["default.network.use"]).await == Err(Status::InvalidArgs),
     )?;
     let admin_permissions = [
         "system.permissions.read",

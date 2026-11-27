@@ -185,9 +185,13 @@ pub enum Requested {
 
 #[derive(Default)]
 pub struct Store {
-    /// The `system` and `admin` permissions of each app ID, for every
-    /// user.
+    /// The permissions that manifests grant to each app ID, of the
+    /// scopes `system`, `admin` and `user`, for every user.
     system: BTreeMap<String, BTreeSet<String>>,
+    /// The permissions that the grant lists of system apps grant to each
+    /// app ID, for every user but user ID 0 (MIKSPEC-0037.R68). Neither
+    /// this nor `system` is written to the grants file.
+    lists: BTreeMap<String, BTreeSet<String>>,
     /// The grants, by user, app ID, the checksum of a portable app's
     /// package or nothing for an installed app (MIKSPEC-0101.R46), and
     /// permission. None is `Undetermined`.
@@ -212,6 +216,7 @@ impl Store {
         store
             .system
             .insert(SERVICE_MANAGER.into(), manager.collect());
+        Store::check_names(permissions, false)?;
         store.add_system(own_app_id, permissions)?;
         Ok(store)
     }
@@ -384,11 +389,19 @@ impl Store {
             .unwrap_or(Decision::Undetermined)
     }
 
-    /// Whether `client` has the `system` or `admin` permission
-    /// `permission` of its app ID, which a portable app or a build never
-    /// has.
+    /// Whether `client` has the permission `permission` of its app ID
+    /// from a manifest or a grant list, which a portable app or a build
+    /// never has, and a list grants to no client of user ID 0.
     fn system_of(&self, client: Identity<'_>, permission: &str) -> bool {
-        client.checksum.is_empty() && self.has_system(client.app_id, permission)
+        client.checksum.is_empty()
+            && (self.has_system(client.app_id, permission)
+                || (client.user != 0 && self.in_list(client.app_id, permission)))
+    }
+
+    fn in_list(&self, app_id: &str, permission: &str) -> bool {
+        self.lists
+            .get(app_id)
+            .is_some_and(|set| set.contains(permission))
     }
 
     /// The decision on `permission` for `client`, without prompting, and
@@ -407,7 +420,9 @@ impl Store {
             false => self.grant(client, permission),
         };
         let decision = match scope {
-            Scope::System | Scope::Admin if self.system_of(client, permission) => Decision::Allowed,
+            Scope::System | Scope::Admin | Scope::User if self.system_of(client, permission) => {
+                Decision::Allowed
+            }
             Scope::Admin if self.holds(client, permission) => Decision::Allowed,
             Scope::System | Scope::Admin => Decision::Undetermined,
             Scope::User if FOLDERS.contains(&permission) && self.full_disk(client) => {
@@ -507,11 +522,17 @@ impl Store {
     }
 
     /// Sets the grant `grant`, which must be `ALLOWED` or `DENIED` for a
-    /// known `user` or `default` permission. Returns what it takes away,
-    /// if anything.
+    /// known `user` or `default` permission that no manifest or grant
+    /// list grants to its app ID. Returns what it takes away, if
+    /// anything.
     pub fn set_grant(&mut self, grant: &Grant) -> Result<Option<Revoked>, Failure> {
         Store::check_grant(grant)?;
         let scope = scope(&grant.permission).ok_or(Failure::NotFound)?;
+        if self.has_system(&grant.app_id, &grant.permission)
+            || self.in_list(&grant.app_id, &grant.permission)
+        {
+            return Err(Failure::InvalidArgs);
+        }
         let before = self.put(grant.user, &grant.app_id, &grant.permission, grant.decision);
         let after = grant.decision;
         let taken = (before == Decision::Allowed && after != Decision::Allowed)
@@ -575,21 +596,39 @@ impl Store {
             .collect()
     }
 
-    /// Adds `permissions` to the `system` and `admin` permissions of
-    /// `app_id`. Fails, adding none, when one is unknown or of another
-    /// scope.
+    /// Adds `permissions` to the `system`, `admin` and `user`
+    /// permissions that a manifest grants to `app_id`. Fails, adding
+    /// none, when one is unknown or a `default` one.
     pub fn grant_system(&mut self, app_id: &str, permissions: &[String]) -> Result<(), Failure> {
         self.add_system(app_id, permissions)
     }
 
-    fn add_system(&mut self, app_id: &str, permissions: &[String]) -> Result<(), Failure> {
+    /// Adds `permissions` to the grant list of `app_id`, as
+    /// `grant_system` does for a manifest. Nothing on the wire calls it yet.
+    #[allow(dead_code)]
+    pub fn grant_list(&mut self, app_id: &str, permissions: &[String]) -> Result<(), Failure> {
+        Store::check_names(permissions, true)?;
+        self.lists
+            .entry(app_id.into())
+            .or_default()
+            .extend(permissions.iter().cloned());
+        Ok(())
+    }
+
+    fn check_names(permissions: &[String], user: bool) -> Result<(), Failure> {
         for p in permissions {
             match scope(p) {
                 None => return Err(Failure::NotFound),
                 Some(Scope::System | Scope::Admin) => {}
-                Some(_) => return Err(Failure::InvalidArgs),
+                Some(Scope::User) if user => {}
+                Some(Scope::User | Scope::Default) => return Err(Failure::InvalidArgs),
             }
         }
+        Ok(())
+    }
+
+    fn add_system(&mut self, app_id: &str, permissions: &[String]) -> Result<(), Failure> {
+        Store::check_names(permissions, true)?;
         self.system
             .entry(app_id.into())
             .or_default()
