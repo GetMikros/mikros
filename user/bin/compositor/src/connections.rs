@@ -1,5 +1,5 @@
 //! Which forwarded connections the compositor serves
-//! (MIKSPEC-0066.R35): in greeter mode only those of the apps that it
+//! (MIKSPEC-0066.R40): in greeter mode only those of the apps that it
 //! started there, and in a user session all.
 
 use std::collections::BTreeSet;

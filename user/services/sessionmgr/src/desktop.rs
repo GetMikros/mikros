@@ -71,7 +71,7 @@ pub struct Desktops {
     /// session's questions are asked on.
     pub session: RefCell<Option<Rc<SessionAsyncServer>>>,
     /// The desktop's compositor's `Compositor` channel, on which the
-    /// connections of clients are forwarded to it (MIKSPEC-0066.R35).
+    /// connections of clients are forwarded to it (MIKSPEC-0066.R40).
     pub connections: RefCell<Option<Rc<CompositorAsyncClient>>>,
     /// The same of the greeter's compositor while it runs.
     pub greeter_connections: RefCell<Option<Rc<CompositorAsyncClient>>>,
@@ -360,7 +360,7 @@ async fn serve_session(
 }
 
 /// The protocols that the session manager provides for the desktop's
-/// clients, which it forwards to the compositor (MIKSPEC-0066.R35).
+/// clients, which it forwards to the compositor (MIKSPEC-0066.R40).
 pub const WAYLAND: &str = "wayland";
 pub const OPENER: &str = "mikros.desktop.Opener";
 pub const FILE_PICKER: &str = "mikros.desktop.FilePicker";

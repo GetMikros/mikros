@@ -53,7 +53,7 @@ use std::time::Duration;
 /// the `Seat` channel.
 const USER: u32 = 16;
 /// The `Compositor` channel, on which the session manager forwards the
-/// connections of clients (MIKSPEC-0066.R35).
+/// connections of clients (MIKSPEC-0066.R40).
 const CONNECTIONS_ID: u32 = 1;
 const SESSION_ID: u32 = 2;
 const LOGIN_ID: u32 = 3;
@@ -267,7 +267,7 @@ impl Compositor {
 
     /// Serves the `Compositor` channel, on which the session manager
     /// forwards the connections of clients with their identities
-    /// (MIKSPEC-0066.R35). A client of the opener or the file picker is
+    /// (MIKSPEC-0066.R40). A client of the opener or the file picker is
     /// refused, as the compositor serves neither yet.
     async fn serve_connections(self: Rc<Self>, connections: OwnedHandle) {
         let server = CompositorAsyncServer::new(ServerEnd::new(connections), self.reactor.clone());

@@ -4,7 +4,7 @@
 //! shows. Each connection is opened with a revocation event of its own;
 //! to change the owner, the session manager signals those events, which
 //! make the drivers close the connections, and opens and gives new ones
-//! to the new owner (MIKSPEC-0066.R2). Screens are numbered after the
+//! to the new owner (MIKSPEC-0066.R42). Screens are numbered after the
 //! function keys: with a desktop installed, screen 1 is the desktop and
 //! screens 2 to 7 are the text consoles 1 to 6; otherwise screens 1 to 6
 //! are the text consoles (MIKSPEC-0066.R12, MIKSPEC-0057.R23).

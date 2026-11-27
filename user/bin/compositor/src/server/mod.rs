@@ -448,7 +448,7 @@ impl Server {
     /// Adds the connection of a shell component of `roles` and `app_id`,
     /// which the compositor created, and returns its ID.
     /// A new client whose app ID the session manager vouched for with the
-    /// identity that it forwarded (MIKSPEC-0066.R35).
+    /// identity that it forwarded (MIKSPEC-0066.R40).
     pub fn connect_client(&mut self, app_id: String) -> ClientId {
         let id = self.connect();
         if let Some(client) = self.clients.get_mut(&id) {
