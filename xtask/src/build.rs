@@ -353,7 +353,16 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
                     .collect()
             };
             prebuild(&built(Runtime::Rt), kind)?;
-            crate::rust_std::prebuild(&built(Runtime::Std), kind)?;
+            // The system apps of user/apps/ are built with the standard
+            // library like the other programs (MIKSPEC-0023.R62).
+            let mut std_programs = built(Runtime::Std);
+            std_programs.extend(
+                crate::apps::all()?
+                    .into_iter()
+                    .filter(|a| a.in_edition(edition))
+                    .map(|a| a.package),
+            );
+            crate::rust_std::prebuild(&std_programs, kind)?;
             // The components of the boot image: init, the managers, the
             // services that start before the root file system is
             // available, and the drivers, which the device manager reads
@@ -431,6 +440,11 @@ fn build_for_with(kind: Kind, boot: BootImage, dawn_test: Option<&DawnTest>) -> 
             // name it, and a test image holds them all.
             let stand_ins = if with_desktop {
                 let all = crate::standin::find(&crate::workspace_root().join("user"))?;
+                crate::apps::check_ids(
+                    &crate::apps::all()?,
+                    all.iter()
+                        .flat_map(|s| s.apps.iter().map(|a| a.id.as_str())),
+                )?;
                 let held: Vec<&crate::standin::StandIn> = all
                     .iter()
                     .filter(|s| tests || s.in_edition(edition))
@@ -2437,6 +2451,15 @@ fn login_members(
         {
             let program = component_build(&component, kind)?;
             members.extend(component.members(kind, &program)?);
+        }
+    }
+    // The system apps, installed as the files of app packages
+    // (MIKSPEC-0023.R62).
+    for app in crate::apps::all()? {
+        if app.in_edition(edition) {
+            let program = crate::rust_std::build(&app.package, kind)?;
+            println!("built    {}", program.display());
+            members.extend(app.members(&program, &crate::workspace_root().join("target/apps"))?);
         }
     }
     members.extend([

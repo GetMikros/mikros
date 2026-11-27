@@ -244,7 +244,7 @@ fn runtime(package: &Value) -> Result<Runtime> {
 
 /// The output of `cargo metadata` for the `user` workspace, without
 /// dependencies.
-fn metadata() -> Result<Value> {
+pub(crate) fn metadata() -> Result<Value> {
     let manifest = crate::workspace_root().join("user/Cargo.toml");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let output = Command::new(cargo)
@@ -274,6 +274,11 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
         let Some(table) = package["metadata"]["mikros"].as_object() else {
             continue;
         };
+        // A system app is a package of user/apps/ that xtask reads in
+        // apps.rs (MIKSPEC-0023.R62).
+        if table.get("kind").and_then(Value::as_str) == Some("app") {
+            continue;
+        }
         let text = |key: &str| -> Result<Option<String>> {
             match table.get(key) {
                 None => Ok(None),

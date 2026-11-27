@@ -276,6 +276,10 @@ fn check_commits(base: &str, ci: bool) -> Result<Vec<String>> {
 pub fn run(args: &Args) -> Result<()> {
     let mut problems = Vec::new();
 
+    if let Err(problem) = crate::apps::check_all() {
+        problems.push(format!("{problem:#}"));
+    }
+
     let mut fmt = cargo();
     fmt.args(["fmt", "--all", "--check"]);
     if !passes(fmt)? {
