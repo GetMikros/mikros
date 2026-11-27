@@ -196,19 +196,17 @@ pub async fn run(
         )));
         let seat = Rc::new(SeatAsyncClient::new(seat, reactor.clone()));
         spawner.spawn(seats.clone().switches(seat.clone()));
-        seats.set_compositor(seat.clone()).await;
+        seats.set_greeter(seat.clone()).await;
         let login =
             LoginAsyncServer::new(ServerEnd::new(login_server.into_handle()), reactor.clone());
         let (d, a, r) = (directory.clone(), accounts.clone(), reactor.clone());
-        let (q, s) = (requests.clone(), seats.clone());
-        spawner.spawn(async move { serve(login, &d, &a, &q, &s, &r).await });
+        let (q, s, sp) = (requests.clone(), seats.clone(), spawner.clone());
+        spawner.spawn(async move { serve(login, &d, &a, &q, &s, &r, &sp).await });
         exited(&launcher, pid).await;
         *desktops.greeter_connections.borrow_mut() = None;
         desktops.greeter.set(None);
         desktops.changed.wake_all();
-        seats
-            .release_compositor(&seat, seats.console_screen(1))
-            .await;
+        seats.release_greeter(&seat, seats.console_screen(1)).await;
         if desktops.linked.borrow().is_some() {
             mikros_rt::log!(Info, "sessionmgr: ended the compositor in greeter mode");
             continue;
@@ -238,11 +236,12 @@ async fn exited(launcher: &LauncherAsyncClient, pid: u32) {
 /// Serves `Login` until the compositor closes it.
 async fn serve(
     login: LoginAsyncServer,
-    directory: &DirectoryAsyncClient,
+    directory: &Rc<DirectoryAsyncClient>,
     accounts: &AccountsAsyncClient,
-    requests: &Requests,
+    requests: &Rc<Requests>,
     seats: &Seats,
     reactor: &Reactor,
+    spawner: &Spawner,
 ) {
     while let Ok(request) = login.next().await {
         let s = login.server();
@@ -265,11 +264,23 @@ async fn serve(
             }
             LoginRequest::Login(q, r) => {
                 let result = match accounts.authenticate(q.name.clone(), q.password).await {
-                    Ok(Ok(a)) => log_in(accounts, requests, seats, a.user, &q.name).await,
+                    Ok(Ok(a)) => {
+                        log_in(
+                            accounts, requests, directory, seats, spawner, a.user, &q.name,
+                        )
+                        .await
+                    }
                     Ok(Err(_)) => Err(Status::AccessDenied),
                     Err(_) => Err(Status::PeerClosed),
                 };
-                r.reply(s, result.map(|()| LoginLoginResponse {}))
+                let ends_greeter = matches!(result, Ok(true));
+                let replied = r.reply(s, result.map(|_| LoginLoginResponse {}));
+                // The greeter's compositor ends after the reply to `Login`
+                // (MIKSPEC-0057.R42).
+                if ends_greeter {
+                    crate::desktop::end_greeter(requests).await;
+                }
+                replied
             }
             LoginRequest::Shutdown(q, r) => {
                 let result = shutdown(directory, reactor, q.kind).await;
@@ -282,22 +293,29 @@ async fn serve(
 /// Starts the session of `user`, named `name`, whom `Login`
 /// authenticated: a user whose login mode is `CONSOLE` on the lowest text
 /// console without a session, whose screen then shows
-/// (MIKSPEC-0057.R39). Sessions of the desktop come with the compositor
-/// of a user session.
+/// (MIKSPEC-0057.R39), and a user whose login mode is `DESKTOP` in a
+/// desktop of its own, whose compositor has the seat when this returns
+/// (MIKSPEC-0057.R42). It says whether the greeter's compositor has to be
+/// ended once the reply has gone: after a desktop.
 async fn log_in(
     accounts: &AccountsAsyncClient,
-    requests: &Requests,
+    requests: &Rc<Requests>,
+    directory: &Rc<DirectoryAsyncClient>,
     seats: &Seats,
+    spawner: &Spawner,
     user: u32,
     name: &str,
-) -> Result<(), Status> {
+) -> Result<bool, Status> {
     match accounts.get_login_mode(user).await {
         Ok(Ok(r)) if r.mode == LoginMode::Console => {
             let console = crate::login::hand_over(requests, user, name).await?;
             seats.switch(seats.console_screen(console)).await;
-            Ok(())
+            Ok(false)
         }
-        Ok(Ok(_)) => Err(Status::NotSupported),
+        Ok(Ok(_)) => {
+            crate::desktop::start_from_greeter(requests, directory, spawner, user, name).await?;
+            Ok(true)
+        }
         Ok(Err(status)) => Err(status),
         Err(_) => Err(Status::PeerClosed),
     }

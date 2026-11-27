@@ -47,6 +47,9 @@ const FOREVER: i64 = i64::MAX;
 const TERM: u32 = 15;
 const KILL: u32 = 9;
 const GRACE: i64 = 5 * SECOND;
+/// How long a compositor that has the seat has to stay before the login is
+/// answered with success.
+const SETTLE: i64 = SECOND / 5;
 
 /// The desktop that runs, linked to a text session.
 #[derive(Clone, Copy, Debug)]
@@ -54,10 +57,14 @@ pub struct Linked {
     /// The compositor's process ID, which leads the desktop's login
     /// session, once it runs.
     pub leader: Option<u32>,
-    /// The login session of the text session.
-    pub text_session: u32,
+    /// The login session of the text session, when the desktop was
+    /// started from one; none for the desktop of a login at the greeter.
+    pub text_session: Option<u32>,
     /// The user of the desktop's session.
     pub user: u32,
+    /// Whether the compositor has exited, while its login session is
+    /// still being ended.
+    pub exited: bool,
 }
 
 /// The state of desktops started from text logins.
@@ -140,21 +147,107 @@ pub async fn start_for(
 ) -> Result<(), Status> {
     let seats = requests.seats.borrow().clone().ok_or(Status::BadState)?;
     let desktops = &requests.desktops;
-    if desktops.linked.borrow().is_some() {
-        return Err(Status::AlreadyExists);
-    }
     let text_session = *requests
         .sessions
         .borrow()
         .get(&console)
         .ok_or(Status::BadState)?;
     let name = name_of(requests, user).await?;
+    // No await lies between this check and the link that it makes, so that
+    // two logins cannot both start a desktop.
+    if desktops.linked.borrow().is_some() {
+        return Err(Status::AlreadyExists);
+    }
     *desktops.linked.borrow_mut() = Some(Linked {
         leader: None,
-        text_session,
+        text_session: Some(text_session),
         user,
+        exited: false,
     });
     end_greeter(requests).await;
+    launch(
+        requests,
+        directory,
+        spawner,
+        &seats,
+        (user, &name),
+        console,
+        Origin::Console,
+    )
+    .await
+}
+
+/// Starts the desktop of `user`, named `name`, whom the greeter logged
+/// in, while the greeter's compositor keeps running: the user's compositor
+/// gets the seat, and the greeter's compositor is ended afterwards by
+/// `end_greeter`, once `Login` has been answered. Fails with `AlreadyExists`
+/// while a desktop runs or starts, and with `Io` when the compositor does
+/// not start or exits before it has the seat; the greeter then owns the seat
+/// again (MIKSPEC-0057.R42).
+pub async fn start_from_greeter(
+    requests: &Rc<Requests>,
+    directory: &Rc<DirectoryAsyncClient>,
+    spawner: &Spawner,
+    user: u32,
+    name: &str,
+) -> Result<(), Status> {
+    let seats = requests.seats.borrow().clone().ok_or(Status::BadState)?;
+    let desktops = &requests.desktops;
+    if desktops.linked.borrow().is_some() {
+        return Err(Status::AlreadyExists);
+    }
+    *desktops.linked.borrow_mut() = Some(Linked {
+        leader: None,
+        text_session: None,
+        user,
+        exited: false,
+    });
+    launch(
+        requests,
+        directory,
+        spawner,
+        &seats,
+        (user, name),
+        1,
+        Origin::Greeter,
+    )
+    .await
+    .map_err(|_| Status::Io)?;
+    // A compositor that exits as soon as it has the seat fails the login:
+    // its end marks the link as exited, while its login session ends.
+    let died = desktops
+        .changed
+        .until(|| desktops.linked.borrow().is_none_or(|l| l.exited));
+    let settled = requests.reactor.sleep_until(now() + SETTLE);
+    if let crate::wait::Either::Left(_) = crate::wait::select(died, settled).await {
+        mikros_rt::log!(Error, "sessionmgr: the desktop of {name} exited at once");
+        return Err(Status::Io);
+    }
+    Ok(())
+}
+
+/// Where the login of a desktop comes from.
+#[derive(Clone, Copy)]
+enum Origin {
+    Console,
+    Greeter,
+}
+
+/// Starts the compositor of `user`, named `name`, and gives it the seat:
+/// the desktop of the link that the caller made. Once the compositor
+/// has exited, the seat goes to the greeter's compositor when it runs, and
+/// otherwise to the text console `console`.
+async fn launch(
+    requests: &Rc<Requests>,
+    directory: &Rc<DirectoryAsyncClient>,
+    spawner: &Spawner,
+    seats: &Rc<crate::seat::Seats>,
+    (user, name): (u32, &str),
+    console: u8,
+    origin: Origin,
+) -> Result<(), Status> {
+    let desktops = &requests.desktops;
+    let name = String::from(name);
     let started = spawn(requests, user, &name).await;
     let (pid, seat, session, connections) = match started {
         Ok(started) => started,
@@ -171,27 +264,42 @@ pub async fn start_for(
     if let Some(linked) = desktops.linked.borrow_mut().as_mut() {
         linked.leader = Some(pid);
     }
-    mikros_rt::log!(
-        Info,
-        "sessionmgr: started the desktop of {name} for console {console} as pid {pid}"
-    );
+    match origin {
+        Origin::Console => mikros_rt::log!(
+            Info,
+            "sessionmgr: started the desktop of {name} for console {console} as pid {pid}"
+        ),
+        Origin::Greeter => mikros_rt::log!(
+            Info,
+            "sessionmgr: started the desktop of {name} for the greeter's login as pid {pid}"
+        ),
+    }
     *desktops.connections.borrow_mut() = Some(Rc::new(CompositorAsyncClient::new(
         connections,
         requests.reactor.clone(),
     )));
     let seat = Rc::new(SeatAsyncClient::new(seat, requests.reactor.clone()));
     spawner.spawn(seats.clone().switches(seat.clone()));
-    seats.set_compositor(seat.clone()).await;
     let (q, d) = (requests.clone(), directory.clone());
     spawner.spawn(async move { serve_session(&q, &d, session, pid).await });
-    let q = requests.clone();
+    seats.set_desktop(seat.clone()).await;
+    let (q, ended_seats, ended_seat) = (requests.clone(), seats.clone(), seat);
     spawner.spawn(async move {
-        ended(&q, pid).await;
+        wait_exit(&q, pid).await;
         mikros_rt::log!(Info, "sessionmgr: the desktop of {name} ended");
-        seats
-            .release_compositor(&seat, seats.console_screen(console))
+        // The seat goes back as soon as the compositor has exited, and a
+        // login that waits for the compositor sees it (MIKSPEC-0057.R42);
+        // its session is ended after that.
+        if let Some(linked) = q.desktops.linked.borrow_mut().as_mut() {
+            linked.exited = true;
+        }
+        q.desktops.changed.wake_all();
+        ended_seats
+            .release_desktop(&ended_seat, ended_seats.console_screen(console))
             .await;
         *q.desktops.connections.borrow_mut() = None;
+        q.desktops.changed.wake_all();
+        end_session(&q, pid).await;
         *q.desktops.linked.borrow_mut() = None;
         q.desktops.changed.wake_all();
     });
@@ -199,7 +307,7 @@ pub async fn start_for(
 }
 
 /// Ends the greeter's compositor when it runs, and waits until it has.
-async fn end_greeter(requests: &Requests) {
+pub async fn end_greeter(requests: &Requests) {
     let desktops = &requests.desktops;
     let Some(pid) = desktops.greeter.get() else {
         return;
@@ -280,17 +388,24 @@ async fn spawn(
     }
 }
 
-/// Waits until the compositor `pid` has exited, and then ends its login
-/// session: `TERM`, and `KILL` after `GRACE` when a process of it still
-/// runs.
-async fn ended(requests: &Requests, pid: u32) {
-    let launcher = &requests.launcher;
+/// Waits until the compositor `pid` has exited.
+async fn wait_exit(requests: &Requests, pid: u32) {
     loop {
-        match launcher.wait(pid as i32, WaitOptions(0), FOREVER).await {
+        match requests
+            .launcher
+            .wait(pid as i32, WaitOptions(0), FOREVER)
+            .await
+        {
             Ok(Ok(w)) if w.status.kind != StatusKind::Exited => continue,
             _ => break,
         }
     }
+}
+
+/// Ends the login session of the compositor `pid` that has exited: `TERM`,
+/// and `KILL` after `GRACE` when a process of it still runs.
+async fn end_session(requests: &Requests, pid: u32) {
+    let launcher = &requests.launcher;
     let _ = launcher.kill_login_session(pid, TERM).await;
     let _ = requests.reactor.sleep_until(now() + GRACE).await;
     let _ = launcher.kill_login_session(pid, KILL).await;
@@ -305,7 +420,7 @@ pub async fn end_linked(requests: &Requests, text_session: u32) {
         text_session: linked,
         ..
     }) = linked
-        && linked == text_session
+        && linked == Some(text_session)
     {
         let _ = requests.launcher.kill_login_session(leader, TERM).await;
     }

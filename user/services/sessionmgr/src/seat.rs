@@ -1,7 +1,7 @@
 //! The seat: the displays and the input devices that the session manager
-//! opens and gives through `Seat` to their owner, the compositor while
-//! one runs and otherwise the text console, with the screen that it
-//! shows. Each connection is opened with a revocation event of its own;
+//! opens and gives through `Seat` to their owner, the compositor of a
+//! user's session while one runs, else the compositor in greeter mode,
+//! and otherwise the text console, with the screen that it shows. Each connection is opened with a revocation event of its own;
 //! to change the owner, the session manager signals those events, which
 //! make the drivers close the connections, and opens and gives new ones
 //! to the new owner (MIKSPEC-0066.R42). Screens are numbered after the
@@ -40,11 +40,14 @@ const REOPEN_EVERY: i64 = SECOND / 20;
 const SIGNALED: u32 = 1 << 3;
 const SAME_RIGHTS: u32 = 1 << 31;
 
-/// Who owns the seat.
+/// Who owns the seat: the compositor of a user's session while one runs,
+/// else the compositor in greeter mode, else the text console
+/// (MIKSPEC-0066.R42).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
     Console,
-    Compositor,
+    Greeter,
+    Desktop,
 }
 
 impl Owner {
@@ -52,7 +55,8 @@ impl Owner {
     fn name(self) -> &'static str {
         match self {
             Owner::Console => "console",
-            Owner::Compositor => "compositor",
+            Owner::Greeter => "greeter",
+            Owner::Desktop => "desktop",
         }
     }
 }
@@ -64,7 +68,10 @@ pub struct Seats {
     /// Whether a desktop is installed, which gives it screen 1.
     desktop: bool,
     console: Rc<SeatAsyncClient>,
-    compositor: RefCell<Option<Rc<SeatAsyncClient>>>,
+    /// The `Seat` channels of the compositor in greeter mode and of the
+    /// compositor of a user's session, while they run.
+    greeter: RefCell<Option<Rc<SeatAsyncClient>>>,
+    desktop_seat: RefCell<Option<Rc<SeatAsyncClient>>>,
     owner: Cell<Owner>,
     /// The revocation events of the connections given to the owner, and
     /// the instances they are of.
@@ -76,6 +83,9 @@ pub struct Seats {
     generation: Cell<u64>,
     /// Whether devices are being given, which happens once at a time.
     giving: Cell<bool>,
+    /// Whether the console has the seat for a question, which a
+    /// compositor that starts meanwhile does not take.
+    lent: Cell<bool>,
 }
 
 impl Seats {
@@ -93,20 +103,35 @@ impl Seats {
             reactor,
             desktop,
             console: Rc::new(console),
-            compositor: RefCell::new(None),
+            greeter: RefCell::new(None),
+            desktop_seat: RefCell::new(None),
             owner: Cell::new(Owner::Console),
             leases: RefCell::new(Vec::new()),
             displays: RefCell::new(BTreeSet::new()),
             inputs: RefCell::new(BTreeSet::new()),
             generation: Cell::new(0),
             giving: Cell::new(false),
+            lent: Cell::new(false),
         })
     }
 
     fn seat(&self, owner: Owner) -> Option<Rc<SeatAsyncClient>> {
         match owner {
             Owner::Console => Some(self.console.clone()),
-            Owner::Compositor => self.compositor.borrow().clone(),
+            Owner::Greeter => self.greeter.borrow().clone(),
+            Owner::Desktop => self.desktop_seat.borrow().clone(),
+        }
+    }
+
+    /// The owner that the compositors that run make it: the one of a
+    /// user's session, else the one in greeter mode.
+    fn compositor_owner(&self) -> Option<Owner> {
+        if self.desktop_seat.borrow().is_some() {
+            Some(Owner::Desktop)
+        } else if self.greeter.borrow().is_some() {
+            Some(Owner::Greeter)
+        } else {
+            None
         }
     }
 
@@ -129,28 +154,52 @@ impl Seats {
         self.desktop
     }
 
-    /// Makes `seat` the compositor's, and the compositor the owner.
-    pub async fn set_compositor(&self, seat: Rc<SeatAsyncClient>) {
-        *self.compositor.borrow_mut() = Some(seat);
-        self.give(Owner::Compositor).await;
+    /// Makes `seat` the seat of the compositor in greeter mode, which owns
+    /// the seat unless the compositor of a user's session runs.
+    pub async fn set_greeter(&self, seat: Rc<SeatAsyncClient>) {
+        *self.greeter.borrow_mut() = Some(seat);
+        if self.desktop_seat.borrow().is_none() && !self.lent.get() {
+            self.give(Owner::Greeter).await;
+        }
     }
 
-    /// Once the compositor of `seat` has exited, makes the text console
-    /// the owner on `screen`, unless another compositor has the seat
-    /// meanwhile.
-    pub async fn release_compositor(&self, seat: &Rc<SeatAsyncClient>, screen: u8) {
-        let same = self
-            .compositor
-            .borrow()
-            .as_ref()
-            .is_some_and(|current| Rc::ptr_eq(current, seat));
-        if !same {
+    /// Makes `seat` the seat of the compositor of a user's session, which
+    /// owns the seat: the compositor in greeter mode loses its displays and
+    /// input devices when it runs (MIKSPEC-0066.R42).
+    pub async fn set_desktop(&self, seat: Rc<SeatAsyncClient>) {
+        *self.desktop_seat.borrow_mut() = Some(seat);
+        self.give(Owner::Desktop).await;
+    }
+
+    /// Once the compositor in greeter mode of `seat` has exited, makes the
+    /// text console the owner on `screen` when it was the owner.
+    pub async fn release_greeter(&self, seat: &Rc<SeatAsyncClient>, screen: u8) {
+        if !same(&self.greeter, seat) {
             return;
         }
-        *self.compositor.borrow_mut() = None;
-        if self.owner.get() == Owner::Compositor {
+        *self.greeter.borrow_mut() = None;
+        if self.owner.get() == Owner::Greeter {
             self.give(Owner::Console).await;
             let _ = self.console.set_screen(screen);
+        }
+    }
+
+    /// Once the compositor of a user's session of `seat` has exited, makes
+    /// the compositor in greeter mode the owner when it runs, and
+    /// otherwise the text console on `screen`.
+    pub async fn release_desktop(&self, seat: &Rc<SeatAsyncClient>, screen: u8) {
+        if !same(&self.desktop_seat, seat) {
+            return;
+        }
+        *self.desktop_seat.borrow_mut() = None;
+        if self.owner.get() == Owner::Desktop {
+            match self.compositor_owner() {
+                Some(owner) => self.give(owner).await,
+                None => {
+                    self.give(Owner::Console).await;
+                    let _ = self.console.set_screen(screen);
+                }
+            }
         }
     }
 
@@ -158,9 +207,10 @@ impl Seats {
     /// question, when the compositor owns the seat: whether it did
     /// (MIKSPEC-0057.R37).
     pub async fn lend_to_console(&self, screen: u8) -> bool {
-        if self.owner.get() != Owner::Compositor {
+        if self.owner.get() == Owner::Console {
             return false;
         }
+        self.lent.set(true);
         self.give(Owner::Console).await;
         let _ = self.console.set_screen(screen);
         true
@@ -169,8 +219,11 @@ impl Seats {
     /// Gives the seat back to the compositor after `lend_to_console`,
     /// unless the compositor has exited or the seat changed owner since.
     pub async fn give_back(&self) {
-        if self.owner.get() == Owner::Console && self.compositor.borrow().is_some() {
-            self.give(Owner::Compositor).await;
+        self.lent.set(false);
+        if self.owner.get() == Owner::Console
+            && let Some(owner) = self.compositor_owner()
+        {
+            self.give(owner).await;
         }
     }
 
@@ -183,12 +236,12 @@ impl Seats {
     pub async fn switch(&self, screen: u8) {
         let first = self.console_screen(1);
         if self.desktop && screen == 1 {
-            if self.compositor.borrow().is_none() {
+            let Some(owner) = self.compositor_owner() else {
                 mikros_rt::log!(Info, "sessionmgr: no desktop runs for screen 1");
                 return;
-            }
-            if self.owner.get() != Owner::Compositor {
-                self.give(Owner::Compositor).await;
+            };
+            if self.owner.get() != owner {
+                self.give(owner).await;
             }
             return;
         }
@@ -339,6 +392,14 @@ impl Seats {
     pub fn console(&self) -> Rc<SeatAsyncClient> {
         self.console.clone()
     }
+}
+
+/// Whether the slot `current` holds `seat`.
+fn same(current: &RefCell<Option<Rc<SeatAsyncClient>>>, seat: &Rc<SeatAsyncClient>) -> bool {
+    current
+        .borrow()
+        .as_ref()
+        .is_some_and(|current| Rc::ptr_eq(current, seat))
 }
 
 /// A new connection to the instance `instance` of `service`.
