@@ -55,6 +55,12 @@ jobs:
       # two archives and the SHA-256 of each, and `sysroot-latest` has the
       # same files for the newest commit (MIKSPEC-0062.R22). A release is
       # deleted only to make `sysroot-latest` again.
+      # `cargo xtask build` makes only part of the sysroot; the command that
+      # installs all of it, system libraries and CMake packages included, runs
+      # before it is packed (MIKSPEC-0062.R13).
+      - name: Build the whole sysroot
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: cargo xtask sysroot
       - name: Publish the sysroot and the toolchain
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
