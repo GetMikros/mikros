@@ -366,31 +366,28 @@ pub const OPENER: &str = "mikros.desktop.Opener";
 pub const FILE_PICKER: &str = "mikros.desktop.FilePicker";
 
 /// Forwards the connection `server` of the client `identity` to `protocol`
-/// to the compositor of the user's session, and closes it instead when no
-/// desktop of the client's user runs.
+/// to the compositor that runs for the client's user ID, the desktop's when
+/// the client is the user of its session, the greeter's when it is the
+/// greeter account, and closes it instead when there is none
+/// (MIKSPEC-0066.R40). The greeter compositor takes only `wayland`.
 pub async fn forward(
     requests: &Requests,
     protocol: &str,
     server: mikros_rt::interfaces::__midl::OwnedHandle,
     identity: ClientIdentity,
 ) {
-    // The desktop of a user's session, or else the greeter's compositor,
-    // with the user that may connect to it.
     let linked = *requests.desktops.linked.borrow();
     let desktop = requests.desktops.connections.borrow().clone();
     let greeter = requests.desktops.greeter_connections.borrow().clone();
-    let (connections, user) = match (linked, desktop, greeter) {
-        (Some(linked), Some(connections), _) => (connections, linked.user),
-        // In greeter mode only `wayland` is forwarded; the opener and the
-        // file picker are closed here.
-        (None, _, Some(connections)) if protocol == WAYLAND => {
-            (connections, crate::greeter::GREETER_USER)
+    let connections = match (linked, desktop, greeter) {
+        (Some(linked), Some(connections), _) if linked.user == identity.user => connections,
+        (_, _, Some(connections))
+            if identity.user == crate::greeter::GREETER_USER && protocol == WAYLAND =>
+        {
+            connections
         }
         _ => return,
     };
-    if user != identity.user {
-        return;
-    }
     let sent = match protocol {
         WAYLAND => connections.connect(server, identity).is_ok(),
         OPENER => connections
