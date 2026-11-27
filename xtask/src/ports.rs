@@ -10,6 +10,11 @@
 //!   of the system install, its path in `/system` and the names of those
 //!   editions (MIKSPEC-0023.R53). What is not named is in every edition.
 //!
+//! A port may instead be a prebuilt library, which `[prebuilt]` pins as an
+//! archive that was built elsewhere, with its `url` and `sha256` and the
+//! record of where it came from, and no `[source]`, `[build]` or `[tests]`
+//! (MIKSPEC-0062.R18).
+//!
 //! Its changes are patch files, in `patches/`. The
 //! Meson projects are built here, the others by modules of their own.
 
@@ -21,7 +26,24 @@ use std::path::PathBuf;
 /// files from them for the system image.
 pub const EDITION_PORTS: [&str; 4] = ["wayland", "vulkan-loader", "mesa", "llvm"];
 
-/// A ported project.
+/// The pin of a prebuilt library: the archive and the record of where it
+/// came from, which xtask does not check beyond its form
+/// (MIKSPEC-0062.R18).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prebuilt {
+    pub url: String,
+    pub sha256: String,
+    pub repository: String,
+    /// The commit that the library was built from, 40 lowercase hexadecimal
+    /// digits.
+    pub commit: String,
+    pub workflow: String,
+    pub sysroot: String,
+    pub toolchain: String,
+}
+
+/// A ported project, or a prebuilt library.
+#[derive(Debug)]
 pub struct Port {
     /// Its name, which names its directories.
     pub name: String,
@@ -30,8 +52,11 @@ pub struct Port {
     pub url: String,
     /// SHA-256 of the archive at `url`.
     pub sha256: String,
-    /// The directory that holds the source once it is unpacked.
+    /// The directory that holds the source once it is unpacked; empty for a
+    /// prebuilt library.
     pub source: String,
+    /// The pin of a prebuilt library, which has no source.
+    pub prebuilt: Option<Prebuilt>,
     /// The options it is configured with.
     pub options: Vec<String>,
     /// The directories of its source, relative to it, that its tests
@@ -73,13 +98,86 @@ pub fn load(name: &str) -> Result<Port> {
     parse(name, dir, &text).with_context(|| format!("in {}", path.display()))
 }
 
+/// Whether `text` is 40 lowercase hexadecimal digits.
+fn is_commit(text: &str) -> bool {
+    text.len() == 40
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The table `[prebuilt]`: every key, none empty, and a commit of 40
+/// lowercase hexadecimal digits.
+fn parse_prebuilt(table: &toml::Table) -> Result<Prebuilt> {
+    let keys = [
+        "url",
+        "sha256",
+        "repository",
+        "commit",
+        "workflow",
+        "sysroot",
+        "toolchain",
+    ];
+    only(table, "[prebuilt]", &keys)?;
+    let mut values = Vec::new();
+    for key in keys {
+        let value = string(table, key).with_context(|| format!("[prebuilt] has no `{key}`"))?;
+        if value.is_empty() {
+            bail!("[prebuilt] has an empty `{key}`");
+        }
+        values.push(value);
+    }
+    let [
+        url,
+        sha256,
+        repository,
+        commit,
+        workflow,
+        sysroot,
+        toolchain,
+    ]: [String; 7] = values.try_into().expect("seven keys");
+    if !is_commit(&commit) {
+        bail!("the `commit` of [prebuilt] is not 40 lowercase hexadecimal digits");
+    }
+    Ok(Prebuilt {
+        url,
+        sha256,
+        repository,
+        commit,
+        workflow,
+        sysroot,
+        toolchain,
+    })
+}
+
 fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
     let table: toml::Table = text.parse()?;
     only(
         &table,
         "the file",
-        &["source", "build", "tests", "editions"],
+        &["source", "build", "tests", "editions", "prebuilt"],
     )?;
+    let editions = parse_editions(&table)?;
+    if let Some(prebuilt) = table.get("prebuilt") {
+        // A prebuilt library has neither a source nor a build nor tests.
+        for other in ["source", "build", "tests"] {
+            if table.contains_key(other) {
+                bail!("a prebuilt library has no [{other}] table");
+            }
+        }
+        let prebuilt = parse_prebuilt(prebuilt.as_table().context("[prebuilt] is not a table")?)?;
+        return Ok(Port {
+            name: name.to_owned(),
+            dir,
+            url: prebuilt.url.clone(),
+            sha256: prebuilt.sha256.clone(),
+            source: String::new(),
+            prebuilt: Some(prebuilt),
+            options: Vec::new(),
+            test_data: Vec::new(),
+            editions,
+        });
+    }
     let source = table
         .get("source")
         .and_then(|s| s.as_table())
@@ -97,6 +195,21 @@ fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
             }
         }
     };
+    Ok(Port {
+        name: name.to_owned(),
+        dir,
+        url: string(source, "url")?,
+        sha256: string(source, "sha256")?,
+        source: string(source, "dir")?,
+        prebuilt: None,
+        options: section("build", &["options"])?,
+        test_data: section("tests", &["data"])?,
+        editions,
+    })
+}
+
+/// The table `[editions]`: for each path, the editions that install it.
+fn parse_editions(table: &toml::Table) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
     let mut editions = std::collections::BTreeMap::new();
     if let Some(t) = table.get("editions") {
         let t = t.as_table().context("[editions] is not a table")?;
@@ -111,16 +224,7 @@ fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
             editions.insert(key.clone(), names);
         }
     }
-    Ok(Port {
-        name: name.to_owned(),
-        dir,
-        url: string(source, "url")?,
-        sha256: string(source, "sha256")?,
-        source: string(source, "dir")?,
-        options: section("build", &["options"])?,
-        test_data: section("tests", &["data"])?,
-        editions,
-    })
+    Ok(editions)
 }
 
 /// Fails if `table`, which `what` names, has a key other than `keys`.
@@ -183,6 +287,9 @@ pub fn test_programs(port: &Port) -> String {
 /// Fetches the source archive of `port`, a `.tar.gz`, unpacks it and
 /// applies its patches, and returns the directory of the source.
 pub fn source(port: &Port) -> Result<PathBuf> {
+    if port.prebuilt.is_some() {
+        bail!("{} is a prebuilt library, which has no source", port.name);
+    }
     let root = crate::workspace_root();
     let dir = root.join("target/sources").join(&port.name);
     let archive = dir.join(format!("{}.tar.gz", port.source));
@@ -277,6 +384,94 @@ mod tests {
             let name = entry.unwrap().file_name().into_string().unwrap();
             load(&name).unwrap();
         }
+    }
+
+    /// A `[prebuilt]` table with the keys of MIKSPEC-0062.R18.
+    fn prebuilt_text(extra: &str) -> String {
+        format!(
+            "[prebuilt]\nurl = \"https://example.org/x.tar.zst\"\nsha256 = \"abc\"\n\
+             repository = \"https://example.org/x\"\n\
+             commit = \"0123456789abcdef0123456789abcdef01234567\"\n\
+             workflow = \"https://example.org/runs/1\"\nsysroot = \"sysroot-1\"\n\
+             toolchain = \"23.1.4\"\n{extra}"
+        )
+    }
+
+    #[test]
+    fn reads_a_prebuilt_library() {
+        let port = parse("x", PathBuf::new(), &prebuilt_text("")).unwrap();
+        let prebuilt = port.prebuilt.as_ref().unwrap();
+        assert_eq!(port.url, "https://example.org/x.tar.zst");
+        assert_eq!(port.sha256, "abc");
+        assert_eq!(prebuilt.commit, "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(prebuilt.sysroot, "sysroot-1");
+        assert!(port.source.is_empty() && port.options.is_empty());
+        // The editions that hold a file of a prebuilt library are named too.
+        let text = prebuilt_text("[editions]\n\"libraries/libx.dlib\" = [\"desktop\"]\n");
+        let port = parse("x", PathBuf::new(), &text).unwrap();
+        assert!(!port.installed_in("libraries/libx.dlib", crate::build::Edition::Server));
+    }
+
+    #[test]
+    fn refuses_a_prebuilt_library_that_lacks_a_key_or_has_one_empty() {
+        for key in [
+            "url",
+            "sha256",
+            "repository",
+            "commit",
+            "workflow",
+            "sysroot",
+            "toolchain",
+        ] {
+            let lines: Vec<String> = prebuilt_text("")
+                .lines()
+                .filter(|l| !l.starts_with(&format!("{key} =")))
+                .map(str::to_owned)
+                .collect();
+            let missing = parse("x", PathBuf::new(), &lines.join("\n")).unwrap_err();
+            assert!(format!("{missing:#}").contains(key), "{key}");
+            let empty = prebuilt_text("").replace(
+                prebuilt_text("")
+                    .lines()
+                    .find(|l| l.starts_with(&format!("{key} =")))
+                    .unwrap(),
+                &format!("{key} = \"\""),
+            );
+            let error = parse("x", PathBuf::new(), &empty).unwrap_err();
+            assert!(format!("{error:#}").contains(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_commit_that_is_not_40_lowercase_hex_digits() {
+        let good = "0123456789abcdef0123456789abcdef01234567";
+        for bad in [
+            "0123456789abcdef0123456789abcdef0123456",
+            "0123456789abcdef0123456789abcdef012345678",
+            "0123456789ABCDEF0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef0123456g",
+        ] {
+            let text = prebuilt_text("").replace(good, bad);
+            let error = parse("x", PathBuf::new(), &text).unwrap_err();
+            assert!(format!("{error:#}").contains("40 lowercase"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_prebuilt_library_has_no_source_build_or_tests() {
+        for other in [
+            "[source]\nurl = \"u\"\nsha256 = \"s\"\ndir = \"d\"\n",
+            "[build]\noptions = []\n",
+            "[tests]\ndata = []\n",
+        ] {
+            let error = parse("x", PathBuf::new(), &prebuilt_text(other)).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("a prebuilt library has no"),
+                "{other}"
+            );
+        }
+        let port = parse("x", PathBuf::new(), &prebuilt_text("")).unwrap();
+        assert!(source(&port).is_err());
     }
 
     #[test]
