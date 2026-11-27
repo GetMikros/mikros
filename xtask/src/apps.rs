@@ -235,7 +235,7 @@ fn parse_app(package: &Value, table: &serde_json::Map<String, Value>, name: &str
             .get("executable")
             .and_then(Value::as_bool)
             .context("a file without `executable`")?;
-        if at == name || at == "manifest.yaml" {
+        if at == name || at == "manifest.yaml" || at == mikros_manifest::GRANTS_FILE {
             bail!("a file is named {at}, which the app has already");
         }
         for path in [at, from] {
@@ -251,6 +251,11 @@ fn parse_app(package: &Value, table: &serde_json::Map<String, Value>, name: &str
             bail!("the file {from} is missing in {}", dir.display());
         }
         files.push((at.to_owned(), host, executable));
+    }
+    // The grant list of the app, if the folder has one (MIKSPEC-0101.R87).
+    let grants = dir.join(mikros_manifest::GRANTS_FILE);
+    if grants.is_file() {
+        files.push((mikros_manifest::GRANTS_FILE.to_owned(), grants, false));
     }
     let mut parts = Vec::new();
     for part in list(table, "shell_parts")? {
@@ -443,6 +448,27 @@ mod tests {
         let mut t = table();
         t["editions"] = json!(["tablet"]);
         assert!(fails("/r/user/apps/hello", t).contains("unknown edition `tablet`"));
+    }
+
+    #[test]
+    fn takes_the_grant_list_of_the_folder() {
+        let dir = std::env::temp_dir().join(format!(
+            "xtask-apps-grants-{}/user/apps/hello",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_str().unwrap();
+        assert!(only(path, table()).unwrap().files.is_empty());
+        std::fs::write(dir.join("permissions.yaml"), "permissions: []\n").unwrap();
+        let app = only(path, table()).unwrap();
+        assert_eq!(app.files.len(), 1);
+        assert_eq!(app.files[0].0, "permissions.yaml");
+        assert!(!app.files[0].2);
+        // The app may not name a file of its own that way.
+        let mut t = table();
+        t["files"] =
+            json!([{"name": "permissions.yaml", "from": "permissions.yaml", "executable": false}]);
+        assert!(format!("{:#}", only(path, t).unwrap_err()).contains("already"));
     }
 
     #[test]
