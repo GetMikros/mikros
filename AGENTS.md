@@ -78,6 +78,7 @@ components where it says.
 |---|---|
 | `user/bin/<name>/` | Programs: the shell, the console, setup, command-line utilities |
 | `user/core/<name>/` | init, processmgr and servicemgr, which start the system before any service runs |
+| `user/apps/<name>/` | System apps, each a package with `kind = "app"` in `[package.metadata.mikros]`, installed as `/system/apps/system.mikros.<name>/` |
 | `user/services/<name>/` | Services, each with its service manifest |
 | `user/drivers/<name>/` | Drivers, each with its `driver.yaml` |
 | `user/lib/<name>/` | Libraries that two or more packages, or xtask, use |
