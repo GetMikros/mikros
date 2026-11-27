@@ -151,42 +151,8 @@ fn check_library(path: &Path, name: &str) -> Result<()> {
 /// (MIKSPEC-0068.R22).
 fn check_abi_note(path: &Path) -> Result<()> {
     let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    abi_levels(&data).with_context(|| path.display().to_string())?;
+    crate::elf::abi_levels(&data).with_context(|| path.display().to_string())?;
     Ok(())
-}
-
-/// The minimum and target ABI levels that the ELF file `data` records.
-fn abi_levels(data: &[u8]) -> Result<(u32, u32)> {
-    use object::read::elf::{FileHeader, ProgramHeader};
-    let header = object::elf::FileHeader64::<object::Endianness>::parse(data)
-        .map_err(|_| anyhow::anyhow!("is no ELF file, so it has no ABI note"))?;
-    let endian = header.endian()?;
-    for segment in header.program_headers(endian, data)? {
-        let Some(notes) = segment.notes(endian, data)? else {
-            continue;
-        };
-        for note in notes {
-            let note = note?;
-            if note.name() == b"Mikros" && note.n_type(endian) == object::elf::NoteType(1) {
-                let desc = note.desc();
-                let (Some(minimum), Some(target), 8) = (
-                    desc.get(0..4).and_then(|b| b.try_into().ok()),
-                    desc.get(4..8).and_then(|b| b.try_into().ok()),
-                    desc.len(),
-                ) else {
-                    bail!("has an ABI note that is not two 32-bit levels");
-                };
-                let (minimum, target) = (u32::from_le_bytes(minimum), u32::from_le_bytes(target));
-                if target < minimum {
-                    bail!(
-                        "has an ABI note whose target level {target} is below its minimum {minimum}"
-                    );
-                }
-                return Ok((minimum, target));
-            }
-        }
-    }
-    bail!("has no ABI note (name Mikros, type 1)")
 }
 
 /// Fails unless the soname `found` of a library is its file name `name`, which
@@ -202,42 +168,7 @@ fn check_soname(name: &str, found: Option<&str>) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// A little-endian ELF64 file of one `PT_NOTE` segment, which holds the
-    /// ABI note of the levels `abi` if it has them.
-    fn elf(abi: Option<(u32, u32)>) -> Vec<u8> {
-        let mut note = Vec::new();
-        if let Some((minimum, target)) = abi {
-            for word in [7u32, 8, 1] {
-                note.extend(word.to_le_bytes());
-            }
-            note.extend(b"Mikros\0\0");
-            note.extend(minimum.to_le_bytes());
-            note.extend(target.to_le_bytes());
-        }
-        let mut file = vec![0x7f, b'E', b'L', b'F', 2, 1, 1];
-        file.resize(16, 0);
-        file.extend(3u16.to_le_bytes()); // e_type
-        file.extend(0x3eu16.to_le_bytes()); // e_machine
-        file.extend(1u32.to_le_bytes()); // e_version
-        file.extend([0u8; 8]); // e_entry
-        file.extend(64u64.to_le_bytes()); // e_phoff
-        file.extend([0u8; 8]); // e_shoff
-        file.extend([0u8; 4]); // e_flags
-        file.extend(64u16.to_le_bytes()); // e_ehsize
-        file.extend(56u16.to_le_bytes()); // e_phentsize
-        file.extend(1u16.to_le_bytes()); // e_phnum
-        file.extend(64u16.to_le_bytes()); // e_shentsize
-        file.extend([0u8; 4]); // e_shnum, e_shstrndx
-        file.extend(4u32.to_le_bytes()); // p_type: PT_NOTE
-        file.extend(4u32.to_le_bytes()); // p_flags
-        file.extend(120u64.to_le_bytes()); // p_offset
-        file.extend([0u8; 16]); // p_vaddr, p_paddr
-        file.extend((note.len() as u64).to_le_bytes()); // p_filesz
-        file.extend((note.len() as u64).to_le_bytes()); // p_memsz
-        file.extend(4u64.to_le_bytes()); // p_align
-        file.extend(note);
-        file
-    }
+    use crate::elf::fixtures::note_elf as elf;
 
     /// A demos directory of the given files, each with its content: the
     /// programs are ELF files with an ABI note.
@@ -304,15 +235,6 @@ mod tests {
     #[test]
     fn refuses_names_that_differ_only_in_case() {
         assert!(reason(&make(&["bin/Demo", "bin/demo"])).contains("only in case"));
-    }
-
-    #[test]
-    fn a_program_records_its_abi_levels() {
-        assert_eq!(abi_levels(&elf(Some((2, 5)))).unwrap(), (2, 5));
-        let error = |data: &[u8]| format!("{:#}", abi_levels(data).unwrap_err());
-        assert!(error(&elf(None)).contains("no ABI note"));
-        assert!(error(&elf(Some((5, 2)))).contains("below its minimum"));
-        assert!(error(b"#!/bin/msh\n").contains("no ELF"));
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod debug_build;
 mod debuginfo;
 mod desktop;
 mod durability;
+mod elf;
 mod entry_state;
 mod extended;
 mod fetch;

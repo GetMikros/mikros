@@ -204,27 +204,7 @@ pub fn check_installed(install: &Path, files: &[&str], links: &[(&str, &str)]) -
 
 /// The `DT_SONAME` of the shared library at `path`, if it has one.
 pub fn soname(path: &Path) -> Result<Option<String>> {
-    use object::read::elf::{Dyn, FileHeader, SectionHeader};
-    let data = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let header = object::elf::FileHeader64::<object::Endianness>::parse(&*data)
-        .with_context(|| format!("{} is no ELF file", path.display()))?;
-    let endian = header.endian()?;
-    let sections = header.sections(endian, &*data)?;
-    for section in sections.iter() {
-        let Some((entries, link)) = section.dynamic(endian, &*data)? else {
-            continue;
-        };
-        let strings = sections.strings(endian, &*data, link)?;
-        for entry in entries {
-            if entry.d_tag(endian) == object::elf::DT_SONAME {
-                let name = strings
-                    .get(entry.d_val(endian) as u32)
-                    .map_err(|()| anyhow::anyhow!("{} has a bad soname", path.display()))?;
-                return Ok(Some(String::from_utf8_lossy(name).into_owned()));
-            }
-        }
-    }
-    Ok(None)
+    crate::elf::soname(path)
 }
 
 /// Fails unless each shared library `libraries/<name>` in `install` has
