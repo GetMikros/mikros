@@ -855,3 +855,17 @@ fn an_app_manifest_names_the_roles_of_its_shell_parts() {
     assert!(!names_role(b"shell_parts: 3\n", "greeter"));
     assert!(!names_role(b"[", "greeter"));
 }
+
+#[test]
+fn service_and_driver_manifests_list_no_user_permissions() {
+    let service = format!("{MINIMAL}permissions:\n  - user.camera.use\n");
+    assert_eq!(
+        parse("system.log", service.as_bytes()).unwrap_err().kind,
+        ErrorKind::BadScope
+    );
+    let driver = "name: x\nmatch: [pci:8086:1234]\npermissions:\n  - user.camera.use\n";
+    let e = parse_driver("system.driver.x", driver.as_bytes());
+    assert!(e.is_err());
+    let ok = format!("{MINIMAL}permissions:\n  - admin.time.set\n");
+    assert!(parse("system.log", ok.as_bytes()).is_ok());
+}

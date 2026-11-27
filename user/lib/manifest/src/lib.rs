@@ -189,7 +189,8 @@ pub enum ErrorKind {
     /// manifests may have.
     CommandKey(&'static str),
     /// A program manifest lists a permission of a scope other than
-    /// `system`, `admin` and `user`.
+    /// `system`, `admin` and `user`, or a service or driver manifest one
+    /// of the scope `user`.
     BadScope,
     /// A grant list or a program manifest holds more names than it may.
     TooManyPermissions,
@@ -387,7 +388,10 @@ fn parse_service(
         start,
         restart,
         boot_handles,
-        permissions: permissions(map)?,
+        permissions: match package {
+            true => permissions(map)?,
+            false => service_permissions(map)?,
+        },
         namespace: program::namespace(map, &mut unknown)?,
         priority,
         stop_timeout,
@@ -417,6 +421,17 @@ fn permissions(map: Map<'_>) -> Result<Vec<String>, Error> {
         permissions.push(permission.into());
     }
     Ok(permissions)
+}
+
+/// The permissions of a system service's manifest: no `user` ones, which only
+/// program manifests and grant lists may grant (MIKSPEC-0037.R58).
+fn service_permissions(map: Map<'_>) -> Result<Vec<String>, Error> {
+    for item in list(map, "permissions")? {
+        if item.string()?.starts_with("user.") {
+            return Err(error(item, ErrorKind::BadScope));
+        }
+    }
+    permissions(map)
 }
 
 /// The list of strings at `key`, or none when it is absent.

@@ -258,6 +258,9 @@ pub fn parse_driver(directory: &str, bytes: &[u8]) -> Result<DriverManifest, Err
         if DRIVER_RESERVED_PERMISSIONS.contains(&item.string()?) {
             return Err(error(item, ErrorKind::ReservedPermission));
         }
+        if item.string()?.starts_with("user.") {
+            return Err(error(item, ErrorKind::BadScope));
+        }
     }
     let boot = match map.get("boot") {
         None => false,
