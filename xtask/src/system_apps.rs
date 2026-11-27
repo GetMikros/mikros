@@ -52,12 +52,37 @@ fn manifest(app: &SystemApp, checksum: &str) -> Result<String> {
     Ok(text)
 }
 
+/// Checks the grant list of `app`, if it has the file, against the rules
+/// of the service manager (MIKSPEC-0101.R87, MIKSPEC-0037.R59), so that no
+/// image has an app whose entries it would ignore at boot. The file is one
+/// of `app.files`, so the checksum covers it.
+fn check_grant_list(app: &SystemApp) -> Result<()> {
+    let Some((_, file, _)) = app
+        .files
+        .iter()
+        .find(|(path, _, _)| path == mikros_manifest::GRANTS_FILE)
+    else {
+        return Ok(());
+    };
+    let bytes = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let parts = format!("shell_parts:\n{}", app.shell_parts);
+    let greeter = mikros_manifest::names_role(parts.as_bytes(), "greeter");
+    let source = mikros_manifest::Source::List { greeter };
+    let list = mikros_manifest::parse_grant_list(&bytes, source)
+        .map_err(|e| anyhow!("the grant list of {} is invalid: {e:?}", app.id))?;
+    if let Some((name, why)) = list.rejected.first() {
+        bail!("the grant list of {} may not hold {name}: {why:?}", app.id);
+    }
+    Ok(())
+}
+
 /// The members that install `app` in a system image, each by its name in
 /// the image: its files and its manifest, which is written below `dir`.
 pub fn members(app: &SystemApp, dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     if !app.id.starts_with(PREFIX) || !mikros_mika::id::is_valid(app.id) {
         bail!("{} is not the ID of a system app", app.id);
     }
+    check_grant_list(app)?;
     let mut package = mikros_mika::format::Builder::default();
     for (path, file, executable) in &app.files {
         let data = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
@@ -121,6 +146,41 @@ mod tests {
         assert_eq!(parsed.checksum.as_deref(), Some(expected.as_str()));
         assert_eq!(parsed.executable.as_deref(), Some("probe"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn members_with_list(text: &str) -> Result<Vec<(String, PathBuf)>> {
+        let dir = std::env::temp_dir().join(format!(
+            "system-apps-grants-{}-{:x}",
+            std::process::id(),
+            text.len() * 31 + text.bytes().map(usize::from).sum::<usize>()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let list = dir.join("permissions.yaml");
+        fs::write(&list, text).unwrap();
+        let program = dir.join("probe");
+        fs::write(&program, b"program").unwrap();
+        let files = vec![
+            ("probe".into(), program, true),
+            ("permissions.yaml".into(), list, false),
+        ];
+        let result = members(&app(files), &dir);
+        fs::remove_dir_all(&dir).unwrap();
+        result
+    }
+
+    #[test]
+    fn a_grant_list_is_a_member_of_the_base_copy() {
+        let members = members_with_list("permissions:\n  - user.power.control\n").unwrap();
+        let names: Vec<&str> = members.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"system/apps/system.mikros.probe/permissions.yaml"));
+    }
+
+    #[test]
+    fn refuses_grant_lists_that_break_the_rules() {
+        // The probe app is a greeter: it may hold no admin permission.
+        assert!(members_with_list("permissions:\n  - admin.power.control\n").is_err());
+        assert!(members_with_list("permissions:\n  - user.full_disk.access\n").is_err());
+        assert!(members_with_list("permissions: [\n").is_err());
     }
 
     #[test]

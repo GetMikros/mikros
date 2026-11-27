@@ -921,6 +921,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-manifest"
+version = "0.0.0"
+dependencies = [
+ "mikros-yaml",
+]
+
+[[package]]
 name = "mikros-mika"
 version = "0.0.0"
 dependencies = [
@@ -1907,6 +1914,7 @@ dependencies = [
  "midlc",
  "mikros-curpack",
  "mikros-exfat",
+ "mikros-manifest",
  "mikros-mika",
  "mikros-userdb",
  "mikrosboot",
