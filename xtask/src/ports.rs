@@ -284,6 +284,63 @@ pub fn test_programs(port: &Port) -> String {
     format!("/system/libexec/{}-tests", port.name)
 }
 
+/// The prebuilt libraries among the ports in the folder `dir`, by name.
+fn prebuilt_in(dir: &std::path::Path) -> Result<Vec<Port>> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("port.toml").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let mut found = Vec::new();
+    for name in names {
+        let port_dir = dir.join(&name);
+        let path = port_dir.join("port.toml");
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let port =
+            parse(&name, port_dir, &text).with_context(|| format!("in {}", path.display()))?;
+        if port.prebuilt.is_some() {
+            found.push(port);
+        }
+    }
+    Ok(found)
+}
+
+/// Every prebuilt library that `user/ports` pins (MIKSPEC-0062.R18).
+pub fn prebuilt_ports() -> Result<Vec<Port>> {
+    prebuilt_in(&crate::workspace_root().join("user/ports"))
+}
+
+/// Where the archive of the prebuilt library `port` lies once fetched:
+/// below `target/sources`, under the file name of its address.
+pub fn prebuilt_archive(port: &Port) -> Result<PathBuf> {
+    let file = port
+        .url
+        .split(['?', '#'])
+        .next()
+        .and_then(|u| u.rsplit('/').next())
+        .filter(|f| !f.is_empty() && !f.starts_with('.'))
+        .with_context(|| format!("the url of {} names no file", port.name))?;
+    Ok(crate::workspace_root()
+        .join("target/sources")
+        .join(&port.name)
+        .join(file))
+}
+
+/// Fetches the archive of the prebuilt library `port` and checks its
+/// SHA-256, so that a mismatch fails before any file of it is used, and
+/// returns where it lies. It is not downloaded again while the file there
+/// has that checksum, so that a build after `cargo xtask setup` needs no
+/// network (MIKSPEC-0062.R18).
+pub fn fetch_prebuilt(port: &Port) -> Result<PathBuf> {
+    let archive = prebuilt_archive(port)?;
+    let what = format!("{} prebuilt library", port.name);
+    crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
+    Ok(archive)
+}
+
 /// Fetches the source archive of `port`, a `.tar.gz`, unpacks it and
 /// applies its patches, and returns the directory of the source.
 pub fn source(port: &Port) -> Result<PathBuf> {
@@ -472,6 +529,50 @@ mod tests {
         }
         let port = parse("x", PathBuf::new(), &prebuilt_text("")).unwrap();
         assert!(source(&port).is_err());
+    }
+
+    #[test]
+    fn finds_the_prebuilt_libraries_among_the_ports() {
+        let dir = std::env::temp_dir().join(format!("xtask-ports-{}", std::process::id()));
+        for (name, text) in [
+            (
+                "a-source",
+                "[source]\nurl = \"u\"\nsha256 = \"s\"\ndir = \"d\"\n".to_owned(),
+            ),
+            ("b-prebuilt", prebuilt_text("")),
+            ("c-folder-without-port", String::new()),
+        ] {
+            fs::create_dir_all(dir.join(name)).unwrap();
+            if name != "c-folder-without-port" {
+                fs::write(dir.join(name).join("port.toml"), text).unwrap();
+            }
+        }
+        let found = prebuilt_in(&dir).unwrap();
+        let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["b-prebuilt"]);
+        // A port that does not parse is an error, not skipped.
+        fs::write(dir.join("a-source/port.toml"), "[prebuilt]\n").unwrap();
+        assert!(prebuilt_in(&dir).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_archive_of_a_prebuilt_library_lies_under_the_file_name_of_its_address() {
+        let port = parse("x", PathBuf::new(), &prebuilt_text("")).unwrap();
+        let archive = prebuilt_archive(&port).unwrap();
+        assert!(
+            archive.ends_with("target/sources/x/x.tar.zst"),
+            "{archive:?}"
+        );
+        let mut other = parse("x", PathBuf::new(), &prebuilt_text("")).unwrap();
+        other.url = "https://example.org/a/b.tar.gz?download=1#top".to_owned();
+        assert!(
+            prebuilt_archive(&other)
+                .unwrap()
+                .ends_with("target/sources/x/b.tar.gz")
+        );
+        other.url = "https://example.org/".to_owned();
+        assert!(prebuilt_archive(&other).is_err());
     }
 
     #[test]

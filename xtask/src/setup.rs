@@ -1,5 +1,5 @@
 //! `cargo xtask setup`: checks the host tools and fetches the pinned
-//! firmware.
+//! firmware and the archives of the prebuilt libraries.
 
 use crate::firmware;
 use crate::qemu::{self, Gpu};
@@ -53,6 +53,12 @@ pub fn run(args: &Args) -> Result<()> {
     }
 
     firmware::fetch()?;
+    // The archives of the prebuilt libraries that the ports pin, whose
+    // SHA-256 is checked before any file of them is used
+    // (MIKSPEC-0062.R18).
+    for port in crate::ports::prebuilt_ports()? {
+        crate::ports::fetch_prebuilt(&port)?;
+    }
 
     if args.gpu == Some(Gpu::Venus) {
         if qemu_supports_venus() {
