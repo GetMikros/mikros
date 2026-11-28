@@ -1,16 +1,19 @@
-use elegance::prelude::*;
+//! The greeter, the login screen that the compositor starts in greeter
+//! mode (MIKSPEC-0077.R10, MIKSPEC-0075.R14): it lists the users, asks for
+//! a password and logs the user in through the `Login` protocol
+//! (MIKSPEC-0075.R30), and offers to restart and to shut down.
 
-#[component]
-fn Screen() -> impl IntoView {
-    elg! {
-        VStack(spacing: 16) {
-            Text("Mikros").font(Font::system(56.0, .bold))
-        }
-    }
+#![cfg_attr(target_os = "mikros", feature(mikros_handles))]
+#![cfg_attr(not(target_os = "mikros"), allow(dead_code))]
+
+mod model;
+#[cfg(target_os = "mikros")]
+mod program;
+
+#[cfg(target_os = "mikros")]
+fn main() -> std::process::ExitCode {
+    program::run()
 }
 
-fn main() -> Result<std::process::ExitCode, Error> {
-    App::new()
-        .window(WindowDesc::new("Greeter").size(800, 600), Screen)
-        .run()
-}
+#[cfg(not(target_os = "mikros"))]
+fn main() {}
