@@ -86,6 +86,10 @@ pub struct Seats {
     /// Whether the console has the seat for a question, which a
     /// compositor that starts meanwhile does not take.
     lent: Cell<bool>,
+    /// The screen that is shown, which the session manager sets when it
+    /// switches and the owner sets when it changes the screen itself
+    /// (MIKSPEC-0066.R43).
+    shown: Cell<u8>,
 }
 
 impl Seats {
@@ -112,6 +116,7 @@ impl Seats {
             generation: Cell::new(0),
             giving: Cell::new(false),
             lent: Cell::new(false),
+            shown: Cell::new(1),
         })
     }
 
@@ -240,6 +245,7 @@ impl Seats {
                 mikros_rt::log!(Info, "sessionmgr: no desktop runs for screen 1");
                 return;
             };
+            self.shown.set(1);
             if self.owner.get() != owner {
                 self.give(owner).await;
             }
@@ -249,6 +255,7 @@ impl Seats {
             mikros_rt::log!(Info, "sessionmgr: there is no screen {screen}");
             return;
         }
+        self.shown.set(screen);
         if self.owner.get() != Owner::Console {
             self.give(Owner::Console).await;
         }
@@ -382,10 +389,23 @@ impl Seats {
     /// Switches screens as the owner of `seat` asks, until it closes it.
     pub async fn switches(self: Rc<Self>, seat: Rc<SeatAsyncClient>) {
         while let Ok(event) = seat.next_event().await {
-            if let SeatEvent::OnSwitchRequested(e) = event {
-                self.switch(e.screen).await;
+            match event {
+                SeatEvent::OnSwitchRequested(e) => self.switch(e.screen).await,
+                // The owner changed the screen by its own doing, such as
+                // the console moving among its consoles.
+                SeatEvent::OnScreenShown(e) if self.owns(&seat) => {
+                    self.shown.set(e.screen);
+                    mikros_rt::log!(Info, "sessionmgr: screen {} is shown", self.shown.get());
+                }
+                _ => {}
             }
         }
+    }
+
+    /// Whether `seat` is the seat of the owner now.
+    fn owns(&self, seat: &Rc<SeatAsyncClient>) -> bool {
+        self.seat(self.owner.get())
+            .is_some_and(|owner| Rc::ptr_eq(&owner, seat))
     }
 
     /// The console's seat, for its requests to switch.

@@ -155,6 +155,20 @@ impl Console {
         }
     }
 
+    /// Tells the session manager which screen shows when the console
+    /// switched among its own since `before`, the index of the console
+    /// that was shown, by its own doing (MIKSPEC-0066.R45).
+    fn report_shown(&self, before: usize) {
+        let now = self.shown.get();
+        if now == before {
+            return;
+        }
+        let screen = now as u8 + 1 + u8::from(self.desktop);
+        if let Some(seat) = self.seat.borrow().as_ref() {
+            let _ = seat.server().send_on_screen_shown(screen);
+        }
+    }
+
     /// Shows text console `number`, 1 to 6, as it was left, unless the
     /// authorization screen shows.
     fn switch_to(&self, number: u8) {
@@ -467,7 +481,11 @@ impl Console {
                         );
                         self.deliver(route);
                     }
-                    Some(Pressed::Switch(screen)) => self.switch_to_screen(screen),
+                    Some(Pressed::Switch(screen)) => {
+                        let before = self.shown.get();
+                        self.switch_to_screen(screen);
+                        self.report_shown(before);
+                    }
                     Some(Pressed::LogView) | Some(Pressed::Nothing) | None => {}
                     #[cfg(mikros_diag)]
                     Some(Pressed::Overview) => {}

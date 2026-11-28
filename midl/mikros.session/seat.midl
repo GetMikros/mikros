@@ -1,4 +1,4 @@
-// MIKSPEC-0066.R12
+// MIKSPEC-0066.R45
 
 library mikros.session;
 using mikros.gpu;
@@ -11,4 +11,5 @@ protocol Seat {
     @3 -> OnAccepted(instance string<64>);
     @4 -> OnSwitchRequested(screen u8);
     @5 SetScreen(screen u8);
+    @6 -> OnScreenShown(screen u8);
 };
