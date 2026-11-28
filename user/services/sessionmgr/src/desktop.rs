@@ -65,6 +65,9 @@ pub struct Linked {
     /// Whether the compositor has exited, while its login session is
     /// still being ended.
     pub exited: bool,
+    /// Whether the text session that the desktop was started from was sent
+    /// `TERM`, which ends the desktop too.
+    pub text_ended: bool,
 }
 
 /// The state of desktops started from text logins.
@@ -82,7 +85,19 @@ pub struct Desktops {
     pub connections: RefCell<Option<Rc<CompositorAsyncClient>>>,
     /// The same of the greeter's compositor while it runs.
     pub greeter_connections: RefCell<Option<Rc<CompositorAsyncClient>>>,
-    /// Woken when the greeter's compositor or the desktop ended.
+    /// Whether the compositor in greeter mode is to run when no compositor
+    /// of a user's session does: at boot, after a session ended and when
+    /// screen 1 is asked for, and not after it was ended for a login.
+    pub wanted: Cell<bool>,
+    /// Whether the session manager is ending the compositor in greeter
+    /// mode itself, which is no exit of it (MIKSPEC-0075.R31).
+    pub ended: Cell<bool>,
+    /// Whether the compositor in greeter mode exited so often that the
+    /// text console's login takes over until the next boot
+    /// (MIKSPEC-0075.R32).
+    pub fallback: Cell<bool>,
+    /// Woken when the greeter's compositor or the desktop ended, or the
+    /// greeter is wanted.
     pub changed: Waiters,
 }
 
@@ -163,6 +178,7 @@ pub async fn start_for(
         text_session: Some(text_session),
         user,
         exited: false,
+        text_ended: false,
     });
     end_greeter(requests).await;
     launch(
@@ -201,6 +217,7 @@ pub async fn start_from_greeter(
         text_session: None,
         user,
         exited: false,
+        text_ended: false,
     });
     launch(
         requests,
@@ -257,6 +274,9 @@ async fn launch(
                 "sessionmgr: starting the desktop of {name}: {status:?}"
             );
             *desktops.linked.borrow_mut() = None;
+            // The greeter that was ended for this desktop is wanted again,
+            // since no session's compositor runs.
+            desktops.wanted.set(true);
             desktops.changed.wake_all();
             return Err(status);
         }
@@ -279,7 +299,7 @@ async fn launch(
         requests.reactor.clone(),
     )));
     let seat = Rc::new(SeatAsyncClient::new(seat, requests.reactor.clone()));
-    spawner.spawn(seats.clone().switches(seat.clone()));
+    spawner.spawn(seats.clone().switches(requests.clone(), seat.clone()));
     let (q, d) = (requests.clone(), directory.clone());
     spawner.spawn(async move { serve_session(&q, &d, session, pid).await });
     seats.set_desktop(seat.clone()).await;
@@ -294,14 +314,23 @@ async fn launch(
             linked.exited = true;
         }
         q.desktops.changed.wake_all();
-        ended_seats
-            .release_desktop(&ended_seat, ended_seats.console_screen(console))
-            .await;
+        // When the desktop was started from a text session that was not
+        // ended, the console of that session shows again (MIKSPEC-0057.R44).
+        let back = match (
+            origin,
+            q.desktops.linked.borrow().is_some_and(|l| l.text_ended),
+        ) {
+            (Origin::Console, false) => Some(ended_seats.console_screen(console)),
+            _ => None,
+        };
+        ended_seats.release_desktop(&ended_seat, back).await;
         *q.desktops.connections.borrow_mut() = None;
         q.desktops.changed.wake_all();
         end_session(&q, pid).await;
         *q.desktops.linked.borrow_mut() = None;
         q.desktops.changed.wake_all();
+        // The session of a desktop has screen 1 (MIKSPEC-0057.R44).
+        crate::greeter::returned(&q, crate::greeter::Ended::Desktop).await;
     });
     Ok(())
 }
@@ -312,6 +341,8 @@ pub async fn end_greeter(requests: &Requests) {
     let Some(pid) = desktops.greeter.get() else {
         return;
     };
+    desktops.ended.set(true);
+    desktops.wanted.set(false);
     let _ = requests.launcher.kill(pid, TERM).await;
     let late = now() + GRACE;
     let ended = desktops.changed.until(|| desktops.greeter.get().is_none());
@@ -422,6 +453,9 @@ pub async fn end_linked(requests: &Requests, text_session: u32) {
     }) = linked
         && linked == Some(text_session)
     {
+        if let Some(l) = requests.desktops.linked.borrow_mut().as_mut() {
+            l.text_ended = true;
+        }
         let _ = requests.launcher.kill_login_session(leader, TERM).await;
     }
 }

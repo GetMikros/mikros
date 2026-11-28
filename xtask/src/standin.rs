@@ -820,7 +820,7 @@ login = "console"
         let greeter = found.iter().find(|s| s.name == "greeter-probe").unwrap();
         assert_eq!(greeter.uses, ["sdl-probe"]);
         assert_eq!(greeter.build.as_ref().unwrap().protocols.len(), 12);
-        assert_eq!(greeter.apps.len(), 2);
+        assert_eq!(greeter.apps.len(), 1);
         assert!(greeter.account.is_some() && greeter.enables_desktop);
     }
 

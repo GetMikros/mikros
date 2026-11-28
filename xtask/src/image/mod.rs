@@ -38,10 +38,10 @@ pub struct Args {
     /// The edition of the system: `desktop`, or `server`, whose users log
     /// in on the text console and which has no compositor, programs that
     /// start the desktop, or libraries that only they need. For now the
-    /// desktop edition has stand-ins for the greeter and the shell and the
-    /// administrator `dee`, whom the greeter logs in on text console 1,
-    /// where `desktop` starts the desktop; Ctrl-Alt-F1 shows the desktop and
-    /// Ctrl-Alt-F2 the console. The password of `dee` is made for each
+    /// desktop edition has the greeter app, a stand-in for the shell and the
+    /// administrator `dee`, who logs in at the greeter on text console 1,
+    /// where `desktop` starts the desktop; Ctrl-Alt-F1 shows the greeter or
+    /// the desktop and Ctrl-Alt-F2 the console. The password of `dee` is made for each
     /// image, printed, and written to a file next to the image. The
     /// production kind has no stand-ins, and its desktop edition keeps the
     /// desktop off.
@@ -237,7 +237,7 @@ pub fn run(args: &Args) -> Result<()> {
                     .with_context(|| format!("reading {}", account.file.display()))?;
                 crate::standin_build::write_secret(&copy, &text)?;
                 println!(
-                    "stand-ins: this image holds stand-ins for the greeter and the shell, and the \
+                    "stand-ins: this image holds a stand-in for the shell, and the \
                      account {}, whose password is {}, which is also in {}, a secret of \
                      development (MIKSPEC-0023.R59)",
                     account.names.join(", "),
@@ -246,7 +246,7 @@ pub fn run(args: &Args) -> Result<()> {
                 );
             }
             _ => println!(
-                "stand-ins: this image holds stand-ins for the greeter and the shell, for \
+                "stand-ins: this image holds a stand-in for the shell, for \
                  development only (MIKSPEC-0023.R59)"
             ),
         }

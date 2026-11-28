@@ -1,17 +1,16 @@
 //! The desktop run: the system of the system tests without the session
 //! settings, so that a desktop counts as installed, and with shell
-//! settings that name the greeter probe as the greeter, boots, the
-//! session manager starts the compositor in greeter mode and gives it
-//! the display, and the compositor starts the probe, a system app,
-//! which draws a fullscreen toplevel in one colour with Vulkan, and
-//! then logs in `dee`, whose login mode is `CONSOLE`. The run waits
-//! until dee's session started on text console 1 and its screen shows,
-//! without the colour. Then it presses Ctrl, Alt and F1, which the
-//! console turns into a switch to the desktop, until the colour covers
-//! the screen, clicks the probe's toplevel, which gives it the keyboard,
-//! and types K, until the probe's second colour covers the screen, and
-//! presses Ctrl, Alt and F2, which the compositor turns into a switch
-//! back to the console, until that colour has left the screen again. In dee's session it then runs `desktop`, which starts dee's
+//! settings that name the shell probe as the shell, boots, the session
+//! manager starts the compositor in greeter mode and gives it the display,
+//! and the compositor starts the greeter, a system app that draws the
+//! users to log in. The run waits until the greeter shows its users, types
+//! the password of `dee`, whose login mode is `CONSOLE`, and waits until
+//! dee's session started on text console 1. The greeter's compositor
+//! ended and the console shows. Then it presses Ctrl, Alt and F1, which
+//! the console turns into a switch to screen 1 and the session manager
+//! answers by starting the greeter again, until the greeter shows, and
+//! presses Ctrl, Alt and F2 until the greeter has left the screen again.
+//! In dee's session it then runs `desktop`, which starts dee's
 //! desktop, whose shell is the shell probe: the run waits until the
 //! wallpaper that its desktop part hands the compositor covers the
 //! screen, until the haze of that wallpaper shows under its taskbar
@@ -23,7 +22,9 @@
 //! manager's `Control`, whose question the compositor cancels, and was
 //! refused. It then presses Ctrl, Alt and F2 until the wallpaper has
 //! left the screen, and ends the session with `exit`, which ends the
-//! desktop too. It keeps the last screen dump in `desktop.ppm`.
+//! desktop too and shows the greeter again, where the run selects `eve`,
+//! a user whose login mode is `DESKTOP`, and logs in with the same
+//! password. It keeps the last screen dump in `desktop.ppm`.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -42,10 +43,11 @@ const GREETER: &str = "compositor: started the greeter as pid";
 const LOGGED_IN: &str = "sessionmgr: dee logged in on console 1";
 const DESKTOP_STARTED: &str = "sessionmgr: started the desktop of dee";
 const DESKTOP_ENDED: &str = "sessionmgr: the desktop of dee ended";
-/// What the session manager logs when the greeter, which the key L makes
-/// log in `eve`, a user whose login mode is desktop, started eve's desktop,
-/// and that it ended the greeter's compositor after the reply to Login
-/// (MIKSPEC-0057.R42).
+/// What the session manager logs when the greeter, where the run logs
+/// `eve` in, a user whose login mode is desktop, started eve's desktop,
+/// and that it ended the greeter's compositor, which it does after a
+/// login of either kind and when `desktop` starts a desktop
+/// (MIKSPEC-0057.R42, MIKSPEC-0057.R46).
 const EVE_STARTED: &str = "sessionmgr: started the desktop of eve for the greeter's login";
 const GREETER_ENDED: &str = "sessionmgr: ended the compositor in greeter mode";
 /// What the compositor logs once it cancelled the shell probe's
@@ -107,12 +109,19 @@ const GROW: (usize, usize) = (100, 60);
 const SHELL_RESTARTED: &str =
     "compositor: starting the part start-menu of system.mikros.shell_probe again";
 const SHELL_GAVE_UP: &str = "compositor: the part start-menu of system.mikros.shell_probe stopped more than 5 times within a minute; leaving its roles empty";
-/// The probe's colour and the test colour of the shell probe's
-/// wallpaper, in the bytes of the display, and how far a pixel may be
-/// from them.
-const COLOUR: [u8; 3] = [200, 40, 120];
-const TYPED: [u8; 3] = [40, 170, 90];
+/// The colours of the greeter, which its screen sets, the background of
+/// the whole screen and the disc behind a user's initial, and the test
+/// colour of the shell probe's wallpaper, in the bytes of the display, and
+/// how far a pixel may be from them.
+const GREETER_BACKGROUND: [u8; 3] = [27, 34, 48];
+const GREETER_USER: [u8; 3] = [66, 74, 92];
 const WALLPAPER: [u8; 3] = [40, 90, 160];
+/// The share of the screen that the greeter's background must cover when
+/// the greeter shows, with its date, time, users and buttons on it, and the
+/// share that the discs behind the users' initials must cover once it
+/// listed them.
+const GREETER_COVERED: f64 = 0.8;
+const GREETER_LISTED: f64 = 0.003;
 /// The haze of that wallpaper in the light scheme, which the shell
 /// probe's transparent taskbar shows along the bottom edge, 48 rows of
 /// the 800 of the screen, and the bottom part of the screen that it must
@@ -152,6 +161,20 @@ const GONE: f64 = 0.1;
 /// check leaves the area out and wants every other pixel of the window to
 /// have the window's colour.
 const ARROW_AREA: (isize, isize, isize, isize) = (-2, -2, 15, 20);
+/// The keys, as the monitor's `sendkey` names them, that type `text`, which
+/// holds letters and digits, such as the password of the stand-in account.
+fn keys_of(text: &str) -> Result<String> {
+    let mut keys = Vec::new();
+    for c in text.chars() {
+        match c {
+            'a'..='z' | '0'..='9' => keys.push(c.to_string()),
+            'A'..='Z' => keys.push(format!("shift-{}", c.to_ascii_lowercase())),
+            _ => bail!("the key for {c:?} is not known"),
+        }
+    }
+    Ok(keys.join(" "))
+}
+
 /// How often the screen is dumped while the run waits for the colour.
 const DUMP_EVERY: Duration = Duration::from_secs(1);
 
@@ -539,7 +562,11 @@ pub fn run_with(
     let ended = (|| -> Result<()> {
         scenario::wait_for_line(&log, STARTED, &mut qemu, deadline)?;
         scenario::wait_for_line(&log, GREETER, &mut qemu, deadline)?;
-        scenario::wait_for_line(&log, LOGGED_IN, &mut qemu, deadline)?;
+        let password = &built
+            .stand_in_account
+            .as_ref()
+            .context("the system has no stand-in account to log in")?
+            .password;
         let dump = dir.join("desktop.ppm");
         let mut screen = Screen {
             socket: &socket,
@@ -548,15 +575,46 @@ pub fn run_with(
         };
         let gone = |share: f64| share <= GONE;
         let covered = |share: f64| share >= COVERED;
-        screen.until(&mut qemu, COLOUR, &gone, "the session's console showed")?;
+        let greeter_shown = |share: f64| share >= GREETER_COVERED;
+        let users_listed = |share: f64| share >= GREETER_LISTED;
+        // The greeter lists the users, and the first of them is dee.
+        screen.until(
+            &mut qemu,
+            GREETER_BACKGROUND,
+            &greeter_shown,
+            "the greeter showed",
+        )?;
+        screen.until(
+            &mut qemu,
+            GREETER_USER,
+            &users_listed,
+            "the greeter listed the users",
+        )?;
+        crate::console::type_keys(&socket, &keys_of(password)?)?;
+        crate::console::type_keys(&socket, "ret")?;
+        scenario::wait_for_line(&log, LOGGED_IN, &mut qemu, deadline)?;
+        screen.until(
+            &mut qemu,
+            GREETER_BACKGROUND,
+            &gone,
+            "the session's console showed",
+        )?;
+        // The greeter's compositor ended with the login, and screen 1
+        // starts one again.
         scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
-        screen.until(&mut qemu, COLOUR, &covered, "the desktop showed")?;
-        scenario::monitor(&socket, "mouse_button 1")?;
-        scenario::monitor(&socket, "mouse_button 0")?;
-        scenario::monitor(&socket, "sendkey k")?;
-        screen.until(&mut qemu, TYPED, &covered, "the greeter took the key K")?;
+        screen.until(
+            &mut qemu,
+            GREETER_BACKGROUND,
+            &greeter_shown,
+            "the greeter showed again",
+        )?;
         scenario::monitor(&socket, "sendkey ctrl-alt-f2")?;
-        screen.until(&mut qemu, TYPED, &gone, "the console showed again")?;
+        screen.until(
+            &mut qemu,
+            GREETER_BACKGROUND,
+            &gone,
+            "the console showed again",
+        )?;
         crate::console::type_keys(&socket, "d e s k t o p ret")?;
         scenario::wait_for_line(&log, DESKTOP_STARTED, &mut qemu, deadline)?;
         let what = "dee's desktop showed";
@@ -724,27 +782,28 @@ pub fn run_with(
         if !desktop_login {
             return Ok(());
         }
-        // The greeter started again and logged dee in on the console again,
-        // as its arguments say; the desktop's screen shows the greeter,
-        // and the key L logs `eve` in there, whose desktop then owns the
-        // seat while the greeter's compositor ends.
-        wait_for_lines(&log, LOGGED_IN, 2, &mut qemu, deadline)?;
+        // Ending the session showed the greeter again (MIKSPEC-0057.R44);
+        // the run selects eve, the second user, and types the password,
+        // whose desktop then owns the seat while the greeter's compositor
+        // ends. The greeter's compositor ended for dee's login, for
+        // `desktop`, and now.
         screen.until(
             &mut qemu,
-            COLOUR,
-            &gone,
-            "the console showed after the greeter",
+            GREETER_BACKGROUND,
+            &greeter_shown,
+            "the greeter showed after the session",
         )?;
-        scenario::monitor(&socket, "sendkey ctrl-alt-f1")?;
-        screen.until(&mut qemu, COLOUR, &covered, "the greeter showed again")?;
-        // The click gives the greeter the keyboard, as in the first step.
-        scenario::monitor(&socket, "mouse_button 1")?;
-        scenario::monitor(&socket, "mouse_button 0")?;
-        scenario::monitor(&socket, "sendkey l")?;
+        screen.until(
+            &mut qemu,
+            GREETER_USER,
+            &users_listed,
+            "the greeter listed the users again",
+        )?;
+        crate::console::type_keys(&socket, "down")?;
+        crate::console::type_keys(&socket, &keys_of(password)?)?;
+        crate::console::type_keys(&socket, "ret")?;
         scenario::wait_for_line(&log, EVE_STARTED, &mut qemu, deadline)?;
-        // The first of these lines is from the greeter that dee's desktop
-        // ended before; the second is from this login.
-        wait_for_lines(&log, GREETER_ENDED, 2, &mut qemu, deadline)?;
+        wait_for_lines(&log, GREETER_ENDED, 3, &mut qemu, deadline)?;
         screen.until(&mut qemu, WALLPAPER, &covered, "eve's desktop showed")
     })();
     let _ = qemu.kill();
@@ -826,12 +885,20 @@ mod tests {
             [40, 90, 160],
             [200, 40, 120],
         ]);
+        const COLOUR: [u8; 3] = [200, 40, 120];
         assert_eq!(colour_share(&screen, COLOUR, 1.0), Some(0.75));
         assert_eq!(colour_share(&screen, WALLPAPER, 1.0), Some(0.25));
         assert_eq!(colour_share(b"not a picture", COLOUR, 1.0), None);
         assert_eq!(colour_share(&screen, COLOUR, 0.5), Some(0.5));
         assert_eq!(pixel(&screen, (2, 0)), Some([40, 90, 160]));
         assert_eq!(pixel(&screen, (4, 0)), None);
+    }
+
+    #[test]
+    fn types_letters_and_digits_with_shift_for_capitals() {
+        assert_eq!(keys_of("aB3").unwrap(), "a shift-b 3");
+        assert_eq!(keys_of("").unwrap(), "");
+        assert!(keys_of("a-b").is_err());
     }
 
     #[test]

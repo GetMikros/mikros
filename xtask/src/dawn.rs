@@ -227,7 +227,7 @@ fn test(args: &Args, install: &Path) -> Result<()> {
     if args.kind == crate::build::Kind::Production {
         println!(
             "skipped  the Dawn window for the production kind, whose image has no \
-             stand-ins for the greeter and the shell (MIKSPEC-0023.R59)"
+             stand-in for the shell (MIKSPEC-0023.R59)"
         );
         return Ok(());
     }

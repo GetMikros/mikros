@@ -25,8 +25,8 @@ link = [
 ]
 protocols = []
 
-# The user whom the greeter probe logs in when the key L is pressed, to
-# test the login of a user of the desktop.
+# The user whom the desktop run logs in at the greeter after the first,
+# to test the login of a user of the desktop.
 [account]
 name = "eve"
 full_name = "Eve"

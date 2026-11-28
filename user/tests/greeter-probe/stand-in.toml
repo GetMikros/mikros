@@ -1,13 +1,13 @@
-# The greeter and the shell of the desktop run: one C program that is the
-# greeter, and the desktop, taskbar and start-menu parts of the shell,
-# with the SDL probe as the shell's switcher part. The greeter logs in the
-# account below, whose password cargo xtask makes for each image and
-# substitutes for {password}.
+# The shell of the desktop run: one C program that is the desktop, taskbar
+# and start-menu parts of the shell, with the SDL probe as the shell's
+# switcher part, and that also serves as the clients that the run starts in
+# a user's session. The greeter is the greeter app. The run logs in the
+# accounts below, whose password cargo xtask makes for each image.
 
 [stand-in]
 stand_in = true
 name = "greeter-probe"
-reason = "MIKSPEC-0075.R14"
+reason = "MIKSPEC-0075.R19"
 editions = ["desktop"]
 uses = ["sdl-probe"]
 enables_desktop = true
@@ -47,22 +47,6 @@ protocols = [
   { name = "tablet-v2", from = "sysroot", path = "share/wayland-protocols/stable/tablet/tablet-v2.xml" },
 ]
 
-[[system_apps]]
-id = "system.mikros.greeter_probe"
-kind = "app"
-version = "1.0.0"
-name = "Greeter probe"
-description = "The greeter of the desktop run"
-executable = "greeter-probe"
-portable = false
-installable = false
-shell_parts = [
-  { roles = ["greeter"], executable = "greeter-probe", arguments = ["--login", "dee", "{password}", "--then", "eve", "{password}"] },
-]
-files = [
-  { name = "greeter-probe", from = "self", executable = true },
-]
-
 # The shell: its desktop part hands the compositor a wallpaper of a test
 # colour, its taskbar part shows a panel of haze, its start-menu part
 # connects to the service manager's Control and so asks a question, and its
@@ -87,7 +71,7 @@ files = [
   { name = "sdl-probe", from = "sdl-probe", executable = true },
 ]
 
-# The shell settings, which name the greeter and the shell.
+# The shell settings, which name the greeter app and the shell.
 [[installs]]
 path = "config/desktop/shell.yaml"
 file = "shell.yaml"

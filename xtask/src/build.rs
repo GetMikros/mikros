@@ -144,8 +144,8 @@ const SESSION_SETTINGS: &str = "config/session.yaml";
 pub enum Edition {
     /// The system whose users log in on the text console.
     Server,
-    /// The system with the compositor and the stand-ins for the greeter and
-    /// the shell, whose user is logged in by the greeter. For development.
+    /// The system with the compositor and a stand-in for the shell, whose
+    /// user is logged in by the greeter. For development.
     Desktop,
 }
 
@@ -181,8 +181,8 @@ pub enum BootImage {
     /// The system's boot image.
     System,
     /// The system's boot image, with the system of the desktop edition: the
-    /// compositor's stand-ins for the greeter and the shell, and the user
-    /// that the greeter logs in.
+    /// compositor's stand-in for the shell, and the user that the greeter
+    /// logs in.
     Desktop,
     /// The system's boot image, with a test image's system: the system
     /// tests and selftest besides the system's components.

@@ -1,6 +1,6 @@
 # The shell settings of the desktop run's system, installed as
 # config/desktop/shell.yaml, which processes see as
-# /system/config/desktop/shell.yaml: its greeter is the greeter probe, and
+# /system/config/desktop/shell.yaml: its greeter is the greeter app, and
 # its shell the shell probe.
 shell: system.mikros.shell_probe
-greeter: system.mikros.greeter_probe
+greeter: system.mikros.greeter

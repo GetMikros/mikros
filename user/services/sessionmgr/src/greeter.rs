@@ -132,10 +132,11 @@ pub async fn run(
 ) {
     let mut exits = VecDeque::new();
     let desktops = &requests.desktops;
+    desktops.wanted.set(true);
     loop {
         desktops
             .changed
-            .until(|| desktops.linked.borrow().is_none())
+            .until(|| desktops.wanted.get() && desktops.linked.borrow().is_none())
             .await;
         let (Ok((seat, seat_server)), Ok((login_client, login_server))) =
             (endpoints::<Seat>(), endpoints::<Login>())
@@ -195,7 +196,7 @@ pub async fn run(
             reactor.clone(),
         )));
         let seat = Rc::new(SeatAsyncClient::new(seat, reactor.clone()));
-        spawner.spawn(seats.clone().switches(seat.clone()));
+        spawner.spawn(seats.clone().switches(requests.clone(), seat.clone()));
         seats.set_greeter(seat.clone()).await;
         let login =
             LoginAsyncServer::new(ServerEnd::new(login_server.into_handle()), reactor.clone());
@@ -207,7 +208,7 @@ pub async fn run(
         desktops.greeter.set(None);
         desktops.changed.wake_all();
         seats.release_greeter(&seat).await;
-        if desktops.linked.borrow().is_some() {
+        if desktops.ended.replace(false) {
             mikros_rt::log!(Info, "sessionmgr: ended the compositor in greeter mode");
             continue;
         }
@@ -218,8 +219,56 @@ pub async fn run(
         }
         mikros_rt::log!(Error, "sessionmgr: the compositor in greeter mode exited");
         if exits.len() >= EXITS {
+            desktops.fallback.set(true);
+            seats.switch(seats.console_screen(1)).await;
             return;
         }
+    }
+}
+
+/// Which login session ended.
+pub enum Ended {
+    /// The session of a desktop, which has screen 1.
+    Desktop,
+    /// The session on text console `console`, whose login session has
+    /// the process ID `pid`.
+    Console(u8, u32),
+}
+
+/// Shows the login again after a login session ended (MIKSPEC-0057.R44):
+/// when a desktop is installed and the text console's login has not taken
+/// over, wants the compositor in greeter mode unless a compositor of a
+/// user's session runs, and switches to screen 1 when the screen of the
+/// session that ended is the one shown.
+pub async fn returned(requests: &Rc<Requests>, ended: Ended) {
+    let Some(seats) = requests.seats.borrow().clone() else {
+        return;
+    };
+    let desktops = &requests.desktops;
+    // The desktop that was started from the session ends with it, and is
+    // no compositor of a user's session by now.
+    if let Ended::Console(_, pid) = ended {
+        desktops
+            .changed
+            .until(|| {
+                !desktops
+                    .linked
+                    .borrow()
+                    .is_some_and(|l| l.text_session == Some(pid))
+            })
+            .await;
+    }
+    if !seats.desktop_installed() || desktops.fallback.get() || desktops.linked.borrow().is_some() {
+        return;
+    }
+    desktops.wanted.set(true);
+    desktops.changed.wake_all();
+    let screen = match ended {
+        Ended::Desktop => 1,
+        Ended::Console(console, _) => seats.console_screen(console),
+    };
+    if seats.shown() == screen {
+        seats.switch(1).await;
     }
 }
 
@@ -292,9 +341,11 @@ async fn serve(
 
 /// Starts the session of `user`, named `name`, whom `Login`
 /// authenticated: a user whose login mode is `CONSOLE` on the lowest text
-/// console without a session, whose screen then shows
-/// (MIKSPEC-0057.R39), and a user whose login mode is `DESKTOP` in a
-/// desktop of its own, whose compositor has the seat when this returns
+/// console without a session, in the order of MIKSPEC-0057.R46: its screen
+/// is switched to, the greeter's compositor is ended and the session is
+/// started, and when that fails the login screen comes back and `Login`
+/// fails with `IO`; and a user whose login mode is `DESKTOP` in a desktop
+/// of its own, whose compositor has the seat when this returns
 /// (MIKSPEC-0057.R42). It says whether the greeter's compositor has to be
 /// ended once the reply has gone: after a desktop.
 async fn log_in(
@@ -308,9 +359,24 @@ async fn log_in(
 ) -> Result<bool, Status> {
     match accounts.get_login_mode(user).await {
         Ok(Ok(r)) if r.mode == LoginMode::Console => {
-            let console = crate::login::hand_over(requests, user, name).await?;
+            let reserved = crate::login::reserve_console(requests, user, name)?;
+            let console = reserved.console;
             seats.switch(seats.console_screen(console)).await;
-            Ok(false)
+            crate::desktop::end_greeter(requests).await;
+            match crate::login::hand_over(requests, reserved).await {
+                Ok(()) => Ok(false),
+                Err(status) => {
+                    mikros_rt::log!(
+                        Error,
+                        "sessionmgr: the session of {name} on console {console}: {status:?}"
+                    );
+                    let desktops = &requests.desktops;
+                    desktops.wanted.set(true);
+                    desktops.changed.wake_all();
+                    seats.switch(1).await;
+                    Err(Status::Io)
+                }
+            }
         }
         Ok(Ok(_)) => {
             crate::desktop::start_from_greeter(requests, directory, spawner, user, name).await?;

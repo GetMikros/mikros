@@ -250,7 +250,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             SeatAsyncClient::new(seat, reactor.clone()),
         );
         *requests.seats.borrow_mut() = Some(seats.clone());
-        spawner.spawn(seats.clone().switches(seats.console()));
+        spawner.spawn(seats.clone().switches(requests.clone(), seats.console()));
         spawner.spawn(seats.clone().keep_giving());
         let greeting = match desktop {
             true => connect_accounts(&directory, &reactor).await,

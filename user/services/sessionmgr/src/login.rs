@@ -63,17 +63,19 @@ pub struct Handover {
     started: Rc<Slot<Result<(), Status>>>,
 }
 
-/// Hands the session of `user`, named `name`, whom the greeter
-/// authenticated, to the lowest console without a session, and returns
-/// that console once the session runs there. Fails with `BAD_STATE`
-/// without such a console or a console that serves `TextLogin`, and with
-/// `TIMED_OUT` when the console does not start the session in time.
-pub async fn hand_over(requests: &Requests, user: u32, name: &str) -> Result<u8, Status> {
-    let server = requests
-        .text_login
-        .borrow()
-        .clone()
-        .ok_or(Status::BadState)?;
+/// A console that is kept for a session that the greeter authenticated,
+/// until the session is handed to it.
+pub struct Reserved {
+    pub console: u8,
+    number: u64,
+    started: Rc<Slot<Result<(), Status>>>,
+}
+
+/// Reserves the lowest console without a session or a handover for the
+/// session of `user`, named `name`, whom the greeter authenticated, so that
+/// no other login takes it meanwhile. Fails with `BAD_STATE` when there is
+/// none, and changes nothing.
+pub fn reserve_console(requests: &Requests, user: u32, name: &str) -> Result<Reserved, Status> {
     let console = CONSOLES
         .clone()
         .find(|c| {
@@ -85,33 +87,65 @@ pub async fn hand_over(requests: &Requests, user: u32, name: &str) -> Result<u8,
     mikros_rt::objects::random(&mut number).map_err(|_| Status::Internal)?;
     let number = u64::from_le_bytes(number);
     let started = Rc::new(Slot::default());
-    let at = now();
     requests.handovers.borrow_mut().insert(
         console,
         Handover {
             number,
             user,
             name: name.into(),
-            at,
+            at: now(),
             started: started.clone(),
         },
     );
+    Ok(Reserved {
+        console,
+        number,
+        started,
+    })
+}
+
+/// Hands the session of `reserved` to its console, and returns once the
+/// session runs there. Fails with `BAD_STATE` without a console that
+/// serves `TextLogin`, and with `TIMED_OUT` when the console does not start
+/// the session in time.
+pub async fn hand_over(requests: &Requests, reserved: Reserved) -> Result<(), Status> {
+    let Reserved {
+        console,
+        number,
+        started,
+    } = reserved;
+    let release = |requests: &Requests| {
+        let mut handovers = requests.handovers.borrow_mut();
+        if handovers.get(&console).is_some_and(|h| h.number == number) {
+            handovers.remove(&console);
+        }
+    };
+    let Some(server) = requests.text_login.borrow().clone() else {
+        release(requests);
+        return Err(Status::BadState);
+    };
+    // The handover is valid from now on.
+    let at = now();
+    let name = match requests.handovers.borrow_mut().get_mut(&console) {
+        Some(handover) if handover.number == number => {
+            handover.at = at;
+            handover.name.clone()
+        }
+        _ => return Err(Status::BadState),
+    };
     if server
         .server()
-        .send_on_handover(console, number, name.into())
+        .send_on_handover(console, number, name)
         .is_err()
     {
-        requests.handovers.borrow_mut().remove(&console);
+        release(requests);
         return Err(Status::PeerClosed);
     }
     let late = requests.reactor.sleep_until(at + HANDOVER_FOR);
     match select(started.take(), late).await {
-        Either::Left(started) => started.map(|()| console),
+        Either::Left(started) => started,
         Either::Right(_) => {
-            let mut handovers = requests.handovers.borrow_mut();
-            if handovers.get(&console).is_some_and(|h| h.number == number) {
-                handovers.remove(&console);
-            }
+            release(requests);
             Err(Status::TimedOut)
         }
     }
@@ -175,6 +209,7 @@ impl Sessions {
             requests.sessions.borrow_mut().remove(&console);
             running.borrow_mut().remove(&console);
             let _ = server.server().send_on_session_ended(console);
+            crate::greeter::returned(&requests, crate::greeter::Ended::Console(console, pid)).await;
         });
         Ok(())
     }
@@ -182,7 +217,7 @@ impl Sessions {
     /// After a login on `console` of `user`, whose login mode is
     /// `DESKTOP`, starts the desktop as `StartDesktop` does when one is
     /// installed, and keeps the text session when it does not start
-    /// (MIKSPEC-0057.R39).
+    /// (MIKSPEC-0057.R46).
     fn desktop_after_login(&self, console: u8, user: u32) -> impl Future<Output = ()> + 'static {
         let (accounts, requests) = (self.accounts.clone(), self.requests.clone());
         let (directory, spawner) = (self.directory.clone(), self.spawner.clone());

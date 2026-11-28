@@ -11,6 +11,7 @@
 //! the desktop and screens 2 to 7 are the text consoles 1 to 6; otherwise
 //! screens 1 to 6 are the text consoles (MIKSPEC-0066.R45).
 
+use crate::authorize::Requests;
 use crate::{SECOND, now};
 use alloc::collections::BTreeSet;
 use alloc::rc::Rc;
@@ -159,7 +160,7 @@ impl Seats {
 
     /// Whether a compositor runs, the one of a user's session or the one in
     /// greeter mode.
-    fn compositor_runs(&self) -> bool {
+    pub fn compositor_runs(&self) -> bool {
         self.desktop_seat.borrow().is_some() || self.greeter.borrow().is_some()
     }
 
@@ -213,13 +214,15 @@ impl Seats {
 
     /// Once the compositor of a user's session of `seat` has exited, finds
     /// the owner of the screen that is shown again, and when no compositor
-    /// runs shows text console `screen`.
-    pub async fn release_desktop(&self, seat: &Rc<SeatAsyncClient>, screen: u8) {
+    /// runs shows `screen` in place of screen 1, if there is one.
+    pub async fn release_desktop(&self, seat: &Rc<SeatAsyncClient>, screen: Option<u8>) {
         if !same(&self.desktop_seat, seat) {
             return;
         }
         *self.desktop_seat.borrow_mut() = None;
-        if self.shown.get() == 1 && !self.compositor_runs() {
+        if let Some(screen) = screen
+            && self.shown.get() == 1
+        {
             self.shown.set(screen);
         }
         self.refresh().await;
@@ -255,12 +258,7 @@ impl Seats {
     /// (MIKSPEC-0057.R45).
     pub async fn switch(&self, screen: u8) {
         let first = self.console_screen(1);
-        if self.desktop && screen == 1 {
-            if !self.compositor_runs() {
-                mikros_rt::log!(Info, "sessionmgr: no desktop runs for screen 1");
-                return;
-            }
-        } else if !(first..first + 6).contains(&screen) {
+        if !(self.desktop && screen == 1) && !(first..first + 6).contains(&screen) {
             mikros_rt::log!(Info, "sessionmgr: there is no screen {screen}");
             return;
         }
@@ -403,11 +401,30 @@ impl Seats {
         }
     }
 
+    /// The screen that is shown.
+    pub fn shown(&self) -> u8 {
+        self.shown.get()
+    }
+
     /// Switches screens as the owner of `seat` asks, until it closes it.
-    pub async fn switches(self: Rc<Self>, seat: Rc<SeatAsyncClient>) {
+    /// A request for screen 1 while no compositor runs makes the
+    /// compositor in greeter mode wanted, and is ignored while the text
+    /// console's login has taken over (MIKSPEC-0057.R45).
+    pub async fn switches(self: Rc<Self>, requests: Rc<Requests>, seat: Rc<SeatAsyncClient>) {
         while let Ok(event) = seat.next_event().await {
             match event {
-                SeatEvent::OnSwitchRequested(e) => self.switch(e.screen).await,
+                SeatEvent::OnSwitchRequested(e) => {
+                    let desktops = &requests.desktops;
+                    if self.desktop && e.screen == 1 && !self.compositor_runs() {
+                        if desktops.fallback.get() {
+                            mikros_rt::log!(Info, "sessionmgr: no desktop runs for screen 1");
+                            continue;
+                        }
+                        desktops.wanted.set(true);
+                        desktops.changed.wake_all();
+                    }
+                    self.switch(e.screen).await;
+                }
                 // The owner changed the screen by its own doing, such as
                 // the console moving among its consoles.
                 SeatEvent::OnScreenShown(e) if self.owns(&seat) => {
