@@ -206,7 +206,7 @@ pub async fn run(
         *desktops.greeter_connections.borrow_mut() = None;
         desktops.greeter.set(None);
         desktops.changed.wake_all();
-        seats.release_greeter(&seat, seats.console_screen(1)).await;
+        seats.release_greeter(&seat).await;
         if desktops.linked.borrow().is_some() {
             mikros_rt::log!(Info, "sessionmgr: ended the compositor in greeter mode");
             continue;

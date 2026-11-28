@@ -1,13 +1,15 @@
 //! The seat: the displays and the input devices that the session manager
-//! opens and gives through `Seat` to their owner, the compositor of a
-//! user's session while one runs, else the compositor in greeter mode,
-//! and otherwise the text console, with the screen that it shows. Each connection is opened with a revocation event of its own;
-//! to change the owner, the session manager signals those events, which
-//! make the drivers close the connections, and opens and gives new ones
-//! to the new owner (MIKSPEC-0066.R42). Screens are numbered after the
-//! function keys: with a desktop installed, screen 1 is the desktop and
-//! screens 2 to 7 are the text consoles 1 to 6; otherwise screens 1 to 6
-//! are the text consoles (MIKSPEC-0066.R12, MIKSPEC-0057.R23).
+//! opens and gives through `Seat` to their owner, which is the owner of the
+//! screen that is shown: of screen 1, with a desktop installed, the
+//! compositor of a user's session while one runs, else the compositor in
+//! greeter mode while it runs, else the text console, and of every other
+//! screen the text console (MIKSPEC-0066.R43). Each connection is opened
+//! with a revocation event of its own; to change the owner, the session
+//! manager signals those events, which make the drivers close the
+//! connections, and opens and gives new ones to the new owner. Screens are
+//! numbered after the function keys: with a desktop installed, screen 1 is
+//! the desktop and screens 2 to 7 are the text consoles 1 to 6; otherwise
+//! screens 1 to 6 are the text consoles (MIKSPEC-0066.R45).
 
 use crate::{SECOND, now};
 use alloc::collections::BTreeSet;
@@ -40,9 +42,7 @@ const REOPEN_EVERY: i64 = SECOND / 20;
 const SIGNALED: u32 = 1 << 3;
 const SAME_RIGHTS: u32 = 1 << 31;
 
-/// Who owns the seat: the compositor of a user's session while one runs,
-/// else the compositor in greeter mode, else the text console
-/// (MIKSPEC-0066.R42).
+/// Who owns the seat, as the screen that is shown says (MIKSPEC-0066.R43).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
     Console,
@@ -128,16 +128,39 @@ impl Seats {
         }
     }
 
-    /// The owner that the compositors that run make it: the one of a
-    /// user's session, else the one in greeter mode.
-    fn compositor_owner(&self) -> Option<Owner> {
-        if self.desktop_seat.borrow().is_some() {
-            Some(Owner::Desktop)
+    /// The owner of `screen` now (MIKSPEC-0066.R43): of screen 1, when a
+    /// desktop is installed, the compositor of a user's session while one
+    /// runs, else the compositor in greeter mode while it runs, and
+    /// otherwise, and for every other screen, the text console.
+    fn owner_of(&self, screen: u8) -> Owner {
+        if !self.desktop || screen != 1 {
+            Owner::Console
+        } else if self.desktop_seat.borrow().is_some() {
+            Owner::Desktop
         } else if self.greeter.borrow().is_some() {
-            Some(Owner::Greeter)
+            Owner::Greeter
         } else {
-            None
+            Owner::Console
         }
+    }
+
+    /// Makes the owner of the screen that is shown the owner, when it is
+    /// not yet, unless the console has the seat for a question.
+    async fn refresh(&self) {
+        let owner = self.owner_of(self.shown.get());
+        if self.lent.get() || self.owner.get() == owner {
+            return;
+        }
+        self.give(owner).await;
+        if owner == Owner::Console {
+            let _ = self.console.set_screen(self.shown.get());
+        }
+    }
+
+    /// Whether a compositor runs, the one of a user's session or the one in
+    /// greeter mode.
+    fn compositor_runs(&self) -> bool {
+        self.desktop_seat.borrow().is_some() || self.greeter.borrow().is_some()
     }
 
     /// Makes `owner` the owner: revokes the connections of the previous
@@ -160,76 +183,65 @@ impl Seats {
     }
 
     /// Makes `seat` the seat of the compositor in greeter mode, which owns
-    /// the seat unless the compositor of a user's session runs.
+    /// the seat while screen 1 is shown and no compositor of a user's
+    /// session runs.
     pub async fn set_greeter(&self, seat: Rc<SeatAsyncClient>) {
         *self.greeter.borrow_mut() = Some(seat);
-        if self.desktop_seat.borrow().is_none() && !self.lent.get() {
-            self.give(Owner::Greeter).await;
-        }
+        self.refresh().await;
     }
 
-    /// Makes `seat` the seat of the compositor of a user's session, which
-    /// owns the seat: the compositor in greeter mode loses its displays and
-    /// input devices when it runs (MIKSPEC-0066.R42).
+    /// Makes `seat` the seat of the compositor of a user's session, and
+    /// switches to the desktop's screen, which it owns: the compositor in
+    /// greeter mode loses its displays and input devices when it runs
+    /// (MIKSPEC-0066.R43).
     pub async fn set_desktop(&self, seat: Rc<SeatAsyncClient>) {
         *self.desktop_seat.borrow_mut() = Some(seat);
-        self.give(Owner::Desktop).await;
+        self.shown.set(1);
+        self.lent.set(false);
+        self.refresh().await;
     }
 
-    /// Once the compositor in greeter mode of `seat` has exited, makes the
-    /// text console the owner on `screen` when it was the owner.
-    pub async fn release_greeter(&self, seat: &Rc<SeatAsyncClient>, screen: u8) {
+    /// Once the compositor in greeter mode of `seat` has exited, finds the
+    /// owner of the screen that is shown again.
+    pub async fn release_greeter(&self, seat: &Rc<SeatAsyncClient>) {
         if !same(&self.greeter, seat) {
             return;
         }
         *self.greeter.borrow_mut() = None;
-        if self.owner.get() == Owner::Greeter {
-            self.give(Owner::Console).await;
-            let _ = self.console.set_screen(screen);
-        }
+        self.refresh().await;
     }
 
-    /// Once the compositor of a user's session of `seat` has exited, makes
-    /// the compositor in greeter mode the owner when it runs, and
-    /// otherwise the text console on `screen`.
+    /// Once the compositor of a user's session of `seat` has exited, finds
+    /// the owner of the screen that is shown again, and when no compositor
+    /// runs shows text console `screen`.
     pub async fn release_desktop(&self, seat: &Rc<SeatAsyncClient>, screen: u8) {
         if !same(&self.desktop_seat, seat) {
             return;
         }
         *self.desktop_seat.borrow_mut() = None;
-        if self.owner.get() == Owner::Desktop {
-            match self.compositor_owner() {
-                Some(owner) => self.give(owner).await,
-                None => {
-                    self.give(Owner::Console).await;
-                    let _ = self.console.set_screen(screen);
-                }
-            }
+        if self.shown.get() == 1 && !self.compositor_runs() {
+            self.shown.set(screen);
         }
+        self.refresh().await;
     }
 
-    /// Makes the text console the owner on `screen` while it asks a
-    /// question, when the compositor owns the seat: whether it did
-    /// (MIKSPEC-0057.R37).
-    pub async fn lend_to_console(&self, screen: u8) -> bool {
+    /// Makes the text console the owner while it asks a question, when a
+    /// compositor owns the seat: whether it did. The screen that is shown
+    /// does not change (MIKSPEC-0066.R43, MIKSPEC-0057.R37).
+    pub async fn lend_to_console(&self) -> bool {
         if self.owner.get() == Owner::Console {
             return false;
         }
         self.lent.set(true);
         self.give(Owner::Console).await;
-        let _ = self.console.set_screen(screen);
         true
     }
 
-    /// Gives the seat back to the compositor after `lend_to_console`,
-    /// unless the compositor has exited or the seat changed owner since.
+    /// Gives the seat back to the owner of the screen that is shown after
+    /// `lend_to_console`, unless there is none.
     pub async fn give_back(&self) {
         self.lent.set(false);
-        if self.owner.get() == Owner::Console
-            && let Some(owner) = self.compositor_owner()
-        {
-            self.give(owner).await;
-        }
+        self.refresh().await;
     }
 
     /// The screen of text console `console`.
@@ -237,29 +249,34 @@ impl Seats {
         console + u8::from(self.desktop)
     }
 
-    /// Switches to `screen`, ignoring one that does not exist.
+    /// Switches to `screen`, ignoring one that does not exist: makes it the
+    /// screen that is shown, which makes its owner the owner, and tells the
+    /// text console which screen to show when it is the owner
+    /// (MIKSPEC-0057.R45).
     pub async fn switch(&self, screen: u8) {
         let first = self.console_screen(1);
         if self.desktop && screen == 1 {
-            let Some(owner) = self.compositor_owner() else {
+            if !self.compositor_runs() {
                 mikros_rt::log!(Info, "sessionmgr: no desktop runs for screen 1");
                 return;
-            };
-            self.shown.set(1);
-            if self.owner.get() != owner {
-                self.give(owner).await;
             }
-            return;
-        }
-        if !(first..first + 6).contains(&screen) {
+        } else if !(first..first + 6).contains(&screen) {
             mikros_rt::log!(Info, "sessionmgr: there is no screen {screen}");
             return;
         }
+        // A switch that the user asks for while the text console asks a
+        // question moves the devices to the owner of the screen
+        // (MIKSPEC-0057.R45); the question stays open.
         self.shown.set(screen);
-        if self.owner.get() != Owner::Console {
-            self.give(Owner::Console).await;
+        self.lent.set(false);
+        if self.owner_of(screen) == Owner::Console {
+            if self.owner.get() != Owner::Console {
+                self.give(Owner::Console).await;
+            }
+            let _ = self.console.set_screen(screen);
+        } else {
+            self.refresh().await;
         }
-        let _ = self.console.set_screen(screen);
     }
 
     /// Opens the displays and input devices that the owner has not been

@@ -395,15 +395,16 @@ impl Requests {
     }
 
     /// For a request on a text console, makes the console the seat's
-    /// owner on that console's screen while the compositor owns it:
-    /// whether it did, so that the seat goes back once the request ended.
+    /// owner while the compositor owns it, without changing the screen that
+    /// is shown: whether it did, so that the seat goes back once the
+    /// request ended (MIKSPEC-0066.R43).
     async fn lend_seat(&self, front: &FrontEnd) -> bool {
-        let FrontEnd::Console(console, _) = front else {
+        let FrontEnd::Console(..) = front else {
             return false;
         };
         let seats = self.seats.borrow().clone();
         match seats {
-            Some(seats) => seats.lend_to_console(seats.console_screen(*console)).await,
+            Some(seats) => seats.lend_to_console().await,
             None => false,
         }
     }
