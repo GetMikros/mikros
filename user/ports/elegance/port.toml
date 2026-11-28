@@ -1,23 +1,22 @@
 # The Elegance C library for Mikros, pinned as a prebuilt library
-# (MIKSPEC-0062.R18): an interim build of the project's c/ part, made on a
-# development machine and not by CI, hosted as the asset of a release of this
-# repository. It is replaced by a package that CI builds, by a change of this
-# file, when one exists. The record below says where the archive came from;
-# xtask checks the archive's SHA-256 and the form of the commit, not the rest.
-# Elegance's own code was built against the sysroot of the release named
-# below; its dependencies (SDL, Dawn, Abseil, HarfBuzz and others) came from a
-# local vcpkg cache, so the build is not reproducible from the release alone.
+# (MIKSPEC-0062.R18): the package that the CI of the Elegance repository
+# builds for x86_64-unknown-mikros, laid out as /system. The record below
+# says where the archive came from; xtask checks the archive's SHA-256, the
+# form of the commit and the contents of the archive, not the rest.
 # The library loads the Vulkan loader at run time, which the system holds.
 
 [prebuilt]
-url = "https://github.com/GetMikros/mikros/releases/download/elegance-d4a5a447ce80/eleganceui-d4a5a447ce80-mikros.tar.gz"
-sha256 = "8de04803dabc23ade91c8649c04c7a1d527e12794f3eb23271ab49339b289509"
+url = "https://github.com/EleganceUI/elegance/releases/download/c-a3647de3e568/elegance-c-x86_64-unknown-mikros.tar.gz"
+sha256 = "5e7b818ea552f1b3edc405ca528f78b73d69b08eb10f45760b30233e033942e3"
 repository = "https://github.com/EleganceUI/elegance"
-commit = "d4a5a447ce80ea62bc04ca3447cb36fd8e7d001b"
-workflow = "https://github.com/GetMikros/mikros/releases/tag/elegance-d4a5a447ce80"
-sysroot = "sysroot-32a3874874f4, for Elegance's own code only; the dependencies were not built against it"
-toolchain = "23.1.4, a locally built LLVM, and CMake 4.4.5; not the toolchain archive of the release"
+commit = "a3647de3e5681442bf3a582bfd1b554a48cebfd1"
+workflow = "https://github.com/EleganceUI/elegance/actions/runs/46081677611"
+sysroot = "sysroot-32a3874874f4, commit 32a3874874f4dce2f8d7fef68dc1a332cf43e5da of this repository"
+toolchain = "the toolchain archive of the release sysroot-32a3874874f4, commit 32a3874874f4dce2f8d7fef68dc1a332cf43e5da"
 
-# The library is part of the desktop, not of the server edition.
+# The library, its licence and its build record are part of the desktop, not
+# of the server edition.
 [editions]
 "libraries/eleganceui.0.dlib" = ["desktop"]
+"share/doc/elegance/LICENSE-elegance" = ["desktop"]
+"share/doc/elegance/BUILDINFO" = ["desktop"]
