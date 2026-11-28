@@ -1,0 +1,19 @@
+[package]
+name = "greeter"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[package.metadata.mikros]
+kind = "app"
+name = "Greeter"
+description = "The login screen"
+editions = ["desktop"]
+shell_parts = [{ roles = ["greeter"], executable = "greeter" }]
+
+[dependencies]
+elegance = { git = "https://github.com/EleganceUI/elegance-rs", rev = "d7533e6f3e44c47f519582f303fa1fa25ec853c1" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

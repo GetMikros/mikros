@@ -346,6 +346,18 @@ pub fn install_all() -> Result<()> {
     install_in(&sysroot, &sysroot.join(".prebuilt"), &prepared)
 }
 
+/// The folders with the shared libraries of the prebuilt libraries that
+/// `user/ports` pin, for the linker of the programs of the user workspace:
+/// a program links such a library by its file name, and the sysroot holds
+/// the library only after `cargo xtask sysroot`.
+pub fn library_dirs() -> Result<Vec<PathBuf>> {
+    Ok(prepare_all()?
+        .into_iter()
+        .filter(|item| item.files.iter().any(|f| f.starts_with("libraries/")))
+        .map(|item| item.tree.join("libraries"))
+        .collect())
+}
+
 /// The members that install the prebuilt libraries in the system version
 /// of an image of the edition `edition`, each by its name in the image:
 /// the files of `libraries/` and `share/` that the `[editions]` of the port

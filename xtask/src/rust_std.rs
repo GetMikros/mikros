@@ -231,6 +231,10 @@ pub fn cargo(dir: &Path, rustflags: &[&str]) -> Result<Command> {
         // and so has no use for the `-pie` that rustc passes.
         "-Clink-arg=-Wno-unused-command-line-argument".to_owned(),
     ];
+    // The prebuilt libraries that the ports pin, which programs link.
+    for dir in crate::prebuilt::library_dirs()? {
+        flags.push(format!("-Lnative={}", dir.display()));
+    }
     flags.extend(rustflags.iter().map(|f| f.to_string()));
     let mut command = Command::new(cargo);
     command
