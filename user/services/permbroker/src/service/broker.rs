@@ -20,6 +20,7 @@ use core::task::{Poll, Waker};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::log as midl_log;
 use mikros_rt::interfaces::mikros::permissions::{
     self as midl, BrokerAsyncServer, BrokerCheckResponse, BrokerGrantListResponse,
     BrokerGrantSystemResponse, BrokerListGrantsRequest, BrokerListGrantsResponse,
@@ -149,6 +150,7 @@ impl Broker {
         let store = Rc::new(RefCell::new(store));
         let files = Rc::new(Files::default());
         let directory = Rc::new(directory);
+        spawner.spawn(log_writer(directory.clone(), reactor.clone()));
         spawner.spawn(files::keep(
             store.clone(),
             files.clone(),
@@ -297,6 +299,30 @@ fn log_elevated(client: &ClientIdentity, permission: &str) {
         Info,
         "permbroker: allowed {permission} to process {pid} ({app_id}) by the elevation of user {admin}"
     );
+}
+
+/// How often, and how long after a refusal, the broker asks for the log
+/// service's `Writer` until it has one: it starts before that service.
+const WRITER_TRIES: u32 = 600;
+const WRITER_WAIT: i64 = 100_000_000;
+const WRITER: &str = "mikros.log.Writer";
+
+/// Connects to the log service's `Writer` so that the broker's records
+/// reach it (MIKSPEC-0037.R65), trying again while it is not there yet.
+async fn log_writer(directory: Rc<DirectoryAsyncClient>, reactor: Reactor) {
+    for _ in 0..WRITER_TRIES {
+        let Ok((client, server)) = endpoints::<midl_log::Writer>() else {
+            return;
+        };
+        if let Ok(Ok(_)) = directory
+            .connect(WRITER.into(), None, server.into_handle())
+            .await
+        {
+            mikros_rt::log::set_writer(client);
+            return;
+        }
+        let _ = reactor.sleep_until(now().saturating_add(WRITER_WAIT)).await;
+    }
 }
 
 /// Logs the `admin` and `user` ones among `permissions`, which are
