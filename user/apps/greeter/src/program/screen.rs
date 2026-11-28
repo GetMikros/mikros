@@ -1,12 +1,16 @@
 //! The screen, drawn with Elegance: the users, the password of the
 //! selected one, what went wrong, and the buttons for restart and shutdown.
 
+use super::clock;
 use super::login::{Event, Request, Service};
 use crate::model::{self, Failure, Power, User};
 use elegance::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::process::ExitCode;
 use std::rc::Rc;
+
+/// The ticks, a second each, between two readings of the time zone.
+const ZONE_EVERY: u32 = 30;
 
 /// What the screen shows, as states of the UI thread.
 struct Ui {
@@ -15,6 +19,12 @@ struct Ui {
     password: State<String>,
     message: State<String>,
     busy: State<bool>,
+    /// The date and the time of day, as the lines that the screen shows.
+    date: State<String>,
+    time: State<String>,
+    /// How many times `tick` ran, to read the time zone again from time
+    /// to time.
+    ticks: Cell<u32>,
     service: Option<Service>,
 }
 
@@ -48,10 +58,32 @@ impl Ui {
             password: State::new(String::new()),
             message: State::new(String::new()),
             busy: State::new(false),
+            date: State::new(String::new()),
+            time: State::new(String::new()),
+            ticks: Cell::new(0),
             service,
         });
+        ui.tick();
         UI.with(|slot| *slot.borrow_mut() = Some(ui.clone()));
         ui
+    }
+
+    /// Shows the local time now, or nothing when it cannot be told.
+    fn tick(&self) {
+        let ticks = self.ticks.get();
+        self.ticks.set(ticks.wrapping_add(1));
+        if ticks % ZONE_EVERY == 1 {
+            clock::refresh();
+        }
+        let (date, time) = clock::now().map_or_else(Default::default, |moment| {
+            (moment.date_line(), moment.time_line())
+        });
+        if self.time.get() != time {
+            self.time.set(time);
+        }
+        if self.date.get() != date {
+            self.date.set(date);
+        }
     }
 
     /// Asks the service for `request`, or says that there is none.
@@ -146,17 +178,19 @@ fn Chip(index: usize, user: User, selected: State<usize>) -> impl IntoView {
 fn Screen() -> impl IntoView {
     let ui = Ui::new();
     let (users, selected, password, message) = (ui.users, ui.selected, ui.password, ui.message);
+    let (date, time) = (ui.date, ui.time);
     let focus = State::new(true);
     let submit = ui.clone();
     let restart = ui.clone();
     let shut_down = ui.clone();
     let start = ui.clone();
+    let tick = ui.clone();
     elg! {
         ZStack(alignment: .center) {
             VStack(spacing: 0) {
                 Spacer().frame(height: 72)
-                Text("Thursday, June 29").font(Font::system(24.0, .medium)).foreground_style(Color::rgba(255, 255, 255, 0.85))
-                Text("9:19").font(Font::system(128.0, .bold)).foreground_style(Color::WHITE)
+                Text(move || date.get()).font(Font::system(24.0, .medium)).foreground_style(Color::rgba(255, 255, 255, 0.85))
+                Text(move || time.get()).font(Font::system(128.0, .bold)).foreground_style(Color::WHITE)
                 Spacer()
                 HStack(spacing: 16) {
                     ForEach(move || users.get().into_iter().enumerate().collect::<Vec<_>>(), id: |entry: &(usize, User)| entry.0) { entry in
@@ -190,6 +224,9 @@ fn Screen() -> impl IntoView {
         .background(Color::hex(0x1B2230))
         .on_appear(move || {
             start.ask(Request::Users);
+            // The timer ends with the view, so the handle is not kept.
+            let again = tick.clone();
+            let _ = every(1.0, move || again.tick());
         })
     }
 }

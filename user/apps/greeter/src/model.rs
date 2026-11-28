@@ -99,6 +99,62 @@ pub fn step(from: usize, count: usize, forward: bool) -> usize {
     }
 }
 
+/// A local date and time, as the broken-down time of the C library gives
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Moment {
+    /// Days since Sunday, 0 to 6.
+    pub weekday: u8,
+    /// The month, 1 to 12.
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+}
+
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+impl Moment {
+    /// The date as a line: the weekday, the month and the day, such as
+    /// "Thursday, June 29". Empty for a moment that is none.
+    pub fn date_line(&self) -> String {
+        match (
+            WEEKDAYS.get(usize::from(self.weekday)),
+            MONTHS.get(usize::from(self.month).wrapping_sub(1)),
+        ) {
+            (Some(weekday), Some(month)) => format!("{weekday}, {month} {}", self.day),
+            _ => String::new(),
+        }
+    }
+
+    /// The time as a line on a 24-hour clock, such as "9:19" or "14:05".
+    pub fn time_line(&self) -> String {
+        format!("{}:{:02}", self.hour, self.minute)
+    }
+}
+
 /// Whether the password of the selected user may be sent: a user is
 /// selected, a password is typed, and no login is waiting for an answer.
 pub fn may_log_in(users: usize, selected: usize, password: &str, busy: bool) -> bool {
@@ -183,6 +239,35 @@ mod tests {
         assert!(!may_log_in(0, 0, "x", false));
         assert!(!may_log_in(2, 0, "", false));
         assert!(!may_log_in(2, 0, "x", true));
+    }
+
+    #[test]
+    fn a_moment_shows_as_a_date_and_a_time() {
+        let moment = Moment {
+            weekday: 4,
+            month: 6,
+            day: 29,
+            hour: 9,
+            minute: 19,
+        };
+        assert_eq!(moment.date_line(), "Thursday, June 29");
+        assert_eq!(moment.time_line(), "9:19");
+        let later = Moment {
+            weekday: 0,
+            month: 12,
+            day: 1,
+            hour: 14,
+            minute: 5,
+        };
+        assert_eq!(later.date_line(), "Sunday, December 1");
+        assert_eq!(later.time_line(), "14:05");
+        // A broken-down time that is none shows nothing.
+        let none = Moment {
+            weekday: 7,
+            month: 0,
+            ..later
+        };
+        assert_eq!(none.date_line(), "");
     }
 
     #[test]
